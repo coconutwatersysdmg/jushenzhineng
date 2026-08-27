@@ -10,7 +10,7 @@ from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QFrame, QLabel,
     QPushButton, QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QMessageBox,
-    QTabWidget,
+    QTabWidget, QToolButton,
 )
 
 from controllers.flow_controller import FlowController
@@ -63,6 +63,25 @@ class MainWindow(QMainWindow):
         f=QFrame(); f.setObjectName("card"); l=QVBoxLayout(f); l.setContentsMargins(9,8,9,8)
         t=QLabel(title); t.setObjectName("sectionTitle"); l.addWidget(t); return f,l
 
+    def _collapsible_card(self,title,*,expanded=True):
+        f=QFrame(); f.setObjectName("card"); outer=QVBoxLayout(f); outer.setContentsMargins(9,8,9,8); outer.setSpacing(6)
+        header=QHBoxLayout(); header.setSpacing(6)
+        toggle=QToolButton(); toggle.setCheckable(True); toggle.setChecked(expanded); toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
+        toggle.setStyleSheet("QToolButton{border:none;background:transparent;color:#74d8ff;padding:0 2px}")
+        toggle.setToolTip("展开 / 折叠")
+        title_label=QLabel(title); title_label.setObjectName("sectionTitle"); title_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        header.addWidget(toggle,0); header.addWidget(title_label,1); header.addStretch(1); outer.addLayout(header)
+        body=QWidget(); body_l=QVBoxLayout(body); body_l.setContentsMargins(0,0,0,0); body_l.setSpacing(6); outer.addWidget(body); body.setVisible(expanded)
+
+        def _set_expanded(opened):
+            body.setVisible(opened); toggle.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow)
+            if toggle.isChecked()!=opened: toggle.setChecked(opened)
+
+        toggle.toggled.connect(_set_expanded)
+        title_label.mousePressEvent=lambda _event: toggle.setChecked(not toggle.isChecked())
+        return f,body_l,toggle
+
     def _build(self):
         root=QWidget(); self.setCentralWidget(root)
         root.setStyleSheet("""
@@ -80,7 +99,7 @@ class MainWindow(QMainWindow):
         top.addStretch(1); self.phase=QLabel("IDLE"); self.phase.setStyleSheet("font-size:15px;font-weight:700;color:#5ad0ff"); top.addWidget(self.phase)
         self.progress=QLabel("0/0"); self.progress.setStyleSheet("font-size:18px;font-weight:700"); top.addWidget(self.progress); lay.addLayout(top)
 
-        f,l=self._card("流程链路")
+        f,l,self.flow_toggle=self._collapsible_card("流程链路",expanded=False)
         self.flow_nodes=[]
         for row_index,stage_row in enumerate((self.FLOW_STAGES[:6],self.FLOW_STAGES[6:])):
             row=QHBoxLayout(); row.setSpacing(5)
