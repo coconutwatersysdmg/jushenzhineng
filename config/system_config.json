@@ -1,0 +1,38 @@
+{
+  "runtime": {
+    "allow_demo_device_data": true,
+    "allow_unimplemented_vision_measurement_zero": true
+  },
+  "database": {
+    "enabled": true,
+    "driver": "mysql",
+    "host": "127.0.0.1",
+    "port": 3306,
+    "database": "jushenzhineng",
+    "user": "root",
+    "password": "123456",
+    "password_env": "JUSHEN_MYSQL_PASSWORD",
+    "auto_start": false,
+    "initialize_schema": false,
+    "path": "runtime/vehicle_loading.db",
+    "center_entity": "truck"
+  },
+  "pallet_cargo_offset": {
+    "max_overhang_percent": 5.0,
+    "reference_pallet_width_mm": 1200.0
+  },
+  "camera_corner_world": {
+    "depth_mode": "raw",
+    "depth_sample_window": 5,
+    "coarse_radar_warning_mm": 800.0
+  },
+  "camera_board_geometry": {
+    "row_length_mm": 1200.0,
+    "high_low_height_threshold_mm": 80.0,
+    "max_borrow_mm": 650.0,
+    "min_second_section_remaining_mm": 600.0
+  },
+  "plc": {
+    "ack_timeout_ms": 5000
+  }
+}

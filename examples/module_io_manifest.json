@@ -1,0 +1,149 @@
+{
+  "version": "v8-module-evidence-1",
+  "description": "系统启动自动加载的全部模型/算法模块示例输入输出；实时流程调用后由 runtime/module_call_evidence 追加真实证据。",
+  "modules": [
+    {
+      "module_id": "PALLET_OVERHANG_PRE",
+      "name": "放置前货物-托盘横向偏移",
+      "flow_stage": "2",
+      "category": "传统视觉算法",
+      "implementation": "pallet_overhang_detection_module / OpenCV",
+      "example_inputs": {"image_path": "examples/demo_pre_pick_offset.jpg"},
+      "example_output": "examples/module_outputs/PALLET_OVERHANG_PRE.json"
+    },
+    {
+      "module_id": "PALLET_HOLE_YOLO",
+      "name": "托盘左右插孔识别",
+      "flow_stage": "3.1",
+      "category": "YOLO .pt 模型",
+      "implementation": "Ultralytics YOLO RGB-D",
+      "model_path": "models/pallet_hole_best.pt",
+      "example_inputs": {"rgb_path": "examples/pallet_rgbd/pallet1.jpg", "depth_path": "examples/pallet_rgbd/pallet1_depth.png"},
+      "example_output": "examples/module_outputs/PALLET_HOLE_YOLO.json"
+    },
+    {
+      "module_id": "POINTNET_TRUCK",
+      "name": "雷达点云车板分割/粗定位",
+      "flow_stage": "3.2",
+      "category": "PointNet++ .pth 模型",
+      "implementation": "PointNet2Segmenter + 点云几何",
+      "model_path": "algorithm_modules/point_cloud_segment_module/checkpoints/best_model.pth",
+      "example_inputs": {"pcd_path": "examples/cloud-net/1-1.pcd"},
+      "example_output": "examples/module_outputs/POINTNET_TRUCK.json"
+    },
+    {
+      "module_id": "CORNER_YOLO",
+      "name": "车板角点像素识别",
+      "flow_stage": "6",
+      "category": "YOLO .pt 模型",
+      "implementation": "Ultralytics YOLO point detection",
+      "model_path": "models/corner_service.pt",
+      "example_inputs": {
+        "image_paths_by_point": {
+          "P1": "examples/corner_net/20251225_125040_525.jpg",
+          "P2": "examples/corner_net/20251225_125129_401.jpg",
+          "P3": "examples/corner_net/20251225_125153_482.jpg",
+          "P4": "examples/corner_net/20251225_125040_525_P4.jpg"
+        }
+      },
+      "example_output": "examples/module_outputs/CORNER_YOLO.json"
+    },
+    {
+      "module_id": "CAMERA_WORLD",
+      "name": "像素+深度+动态外参转 WORLD",
+      "flow_stage": "7",
+      "category": "标定几何模块",
+      "implementation": "CameraCornerWorldService",
+      "example_inputs": {
+        "depth_paths_by_point": {
+          "P1": "examples/demo_auto/P1_depth.png", "P2": "examples/demo_auto/P2_depth.png",
+          "P3": "examples/demo_auto/P3_depth.png", "P4": "examples/demo_auto/P4_depth.png"
+        },
+        "intrinsic": "config/sensor_coordinate_config/camera_intrinsic.json",
+        "extrinsic": "config/sensor_coordinate_config/coordinate_config.json"
+      },
+      "example_output": "examples/module_outputs/CAMERA_WORLD.json"
+    },
+    {
+      "module_id": "BOARD_GEOMETRY_PLAN",
+      "name": "相机车板几何/高低板/盲码规划",
+      "flow_stage": "8.1",
+      "category": "几何规划模块",
+      "implementation": "CameraBoardGeometryService + SpaceManager",
+      "example_inputs": {"world_points": "examples/module_outputs/CAMERA_WORLD.json"},
+      "example_output": "examples/module_outputs/BOARD_GEOMETRY_PLAN.json"
+    },
+    {
+      "module_id": "NEIGHBOR_POSE",
+      "name": "临近托盘姿态补偿",
+      "flow_stage": "8.2",
+      "category": "外部测量接口（无正式模型）",
+      "implementation": "NeighborPalletPoseService",
+      "example_inputs": {"image_path": "examples/demo_auto/neighbor_pose.jpg", "measurement": {"dx_mm": 4.0, "dy_mm": -3.0, "dz_mm": 0.0, "yaw_deg": 0.25}},
+      "example_output": "examples/module_outputs/NEIGHBOR_POSE.json"
+    },
+    {
+      "module_id": "SPACE_TARGET",
+      "name": "可用空间状态/最终目标锁定",
+      "flow_stage": "8.3",
+      "category": "状态规划模块",
+      "implementation": "SpaceManager + PlacementCompensationService",
+      "example_inputs": {"geometry": "examples/module_outputs/BOARD_GEOMETRY_PLAN.json", "neighbor": "examples/module_outputs/NEIGHBOR_POSE.json"},
+      "example_output": "examples/module_outputs/SPACE_TARGET.json"
+    },
+    {
+      "module_id": "DYNAMIC_PRE_PLACE",
+      "name": "货物放置前动态监测",
+      "flow_stage": "9 前",
+      "category": "RGB-D 传统视觉算法",
+      "implementation": "dynamic_monitoring_opencv_rgbd",
+      "example_inputs": {"rgb_path": "examples/dynamic_monitoring/color.png", "depth_path": "examples/dynamic_monitoring/depth_z16.png", "camera_path": "examples/dynamic_monitoring/camera.json"},
+      "example_output": "examples/module_outputs/DYNAMIC_PRE_PLACE.json"
+    },
+    {
+      "module_id": "DYNAMIC_POST_PLACE",
+      "name": "放置后底层托盘检测",
+      "flow_stage": "10.0",
+      "category": "RGB-D 传统视觉算法",
+      "implementation": "dynamic_monitoring_opencv_rgbd",
+      "example_inputs": {"rgb_path": "examples/dynamic_monitoring/color.png", "depth_path": "examples/dynamic_monitoring/depth_z16.png", "camera_path": "examples/dynamic_monitoring/camera.json"},
+      "example_output": "examples/module_outputs/DYNAMIC_POST_PLACE.json"
+    },
+    {
+      "module_id": "REGION_DEVIATION",
+      "name": "托盘-车板区域偏差",
+      "flow_stage": "10.1",
+      "category": "外部测量接口（无正式模型）",
+      "implementation": "PalletBoardRegionDeviationService",
+      "example_inputs": {"image_path": "examples/demo_auto/region_deviation.jpg", "measurement": {"dx_mm": -5.0, "dy_mm": 3.0, "dz_mm": 0.0, "yaw_deg": -0.2}},
+      "example_output": "examples/module_outputs/REGION_DEVIATION.json"
+    },
+    {
+      "module_id": "TWO_FACE_CAPTURE",
+      "name": "货物相邻两面观测",
+      "flow_stage": "10.1",
+      "category": "相机采集模块（无识别模型）",
+      "implementation": "TwoFaceObservationService",
+      "example_inputs": {"face_a": "examples/demo_auto/face_a.jpg", "face_b": "examples/demo_auto/face_b.jpg"},
+      "example_output": "examples/module_outputs/TWO_FACE_CAPTURE.json"
+    },
+    {
+      "module_id": "PALLET_CARGO_POST",
+      "name": "放置后托盘-货物中心偏移",
+      "flow_stage": "10.2",
+      "category": "传统视觉算法",
+      "implementation": "pallet_overhang_detection_module / OpenCV",
+      "example_inputs": {"image_path": "examples/demo_pre_pick_offset.jpg"},
+      "example_output": "examples/module_outputs/PALLET_CARGO_POST.json"
+    },
+    {
+      "module_id": "PLACEMENT_FEEDBACK",
+      "name": "下一托盘反馈/空间更新",
+      "flow_stage": "11",
+      "category": "补偿与状态模块",
+      "implementation": "PlacementCompensationService + SpaceManager",
+      "example_inputs": {"region_result": "examples/module_outputs/REGION_DEVIATION.json", "cargo_offset": "examples/module_outputs/PALLET_CARGO_POST.json"},
+      "example_output": "examples/module_outputs/PLACEMENT_FEEDBACK.json"
+    }
+  ]
+}

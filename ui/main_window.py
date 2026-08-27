@@ -1,0 +1,444 @@
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from PySide6.QtCore import QEventLoop, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtQuickWidgets import QQuickWidget
+from PySide6.QtWidgets import (
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QFrame, QLabel,
+    QPushButton, QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QMessageBox,
+    QTabWidget,
+)
+
+from controllers.flow_controller import FlowController
+from ui.twin_bridge import TwinBridge
+from ui.debug_dialog import DebugInputDialog
+
+PROJECT_ROOT=Path(__file__).resolve().parents[1]
+QML_FILE=PROJECT_ROOT/"ui"/"qml"/"TwinScene.qml"
+DEFAULT_PLAN=PROJECT_ROOT/"data"/"loading_plan.json"
+
+
+class MainWindow(QMainWindow):
+    motionSnapshot = Signal(dict, dict)
+
+    FLOW_STAGES = [
+        (1,"数据 / 设备 / 车辆"),
+        (2,"货物-托盘偏差"),
+        (3,"3.1 插取 ∥ 3.2 雷达"),
+        (4,"雷达点 → PLC → 相机"),
+        (5,"角点 RGB-D"),
+        (6,"角点识别"),
+        (7,"转换 WORLD"),
+        (8,"8.1 规划 · 8.2 补偿 · 8.3 锁定"),
+        (9,"放置前监测 / 计算位置 / 放置"),
+        (10,"底托检测 · 区域两面 · 货物偏差"),
+        (11,"反馈 PLC / 空间管理"),
+        (12,"机械臂返回 / 下一轮"),
+    ]
+    STEP_STAGE = {
+        "PRE_PICK_OFFSET":2,"PARALLEL_LOCATE":3,"PICK_ONLY":3,"RADAR_TO_CAMERA":4,
+        "CAPTURE_CORNERS":5,"CORNER_RECOGNITION":6,"CAMERA_TO_WORLD":7,
+        "INITIAL_SPACE_PLAN":8,"NEIGHBOR_POSE":8,"TARGET_CONFIRM":8,"PRE_PLACE_MONITOR":9,"PLACE":9,
+        "POST_PLACE_BOTTOM":10,"POST_REGION":10,"POST_CARGO_OFFSET":10,"FEEDBACK":11,"RETURN":12,"DONE":12,
+    }
+
+    def __init__(self):
+        super().__init__()
+        self.controller=FlowController(); self.bridge=TwinBridge(); self.debug_inputs=self.controller.default_debug_inputs()
+        self._step_busy=False
+        self.motionSnapshot.connect(self._apply_motion_snapshot)
+        self.controller.set_state_listener(self.motionSnapshot.emit)
+        self.timer=QTimer(self); self.timer.setInterval(900); self.timer.timeout.connect(self._auto_tick)
+        self.setWindowTitle("具身智能装载数字孪生 · 单机械臂携货 / 挂载相机角点识别")
+        screen=self.screen().availableGeometry()
+        self.resize(min(1920,max(1080,int(screen.width()*0.94))),min(1120,max(700,int(screen.height()*0.92))))
+        self.setMinimumSize(1024,680)
+        self._build(); self._load_plan(); self._refresh()
+
+    def _card(self,title):
+        f=QFrame(); f.setObjectName("card"); l=QVBoxLayout(f); l.setContentsMargins(9,8,9,8)
+        t=QLabel(title); t.setObjectName("sectionTitle"); l.addWidget(t); return f,l
+
+    def _build(self):
+        root=QWidget(); self.setCentralWidget(root)
+        root.setStyleSheet("""
+        QWidget{background:#07111f;color:#dcecff;font-size:12px}
+        QFrame#card{background:#0c1b2e;border:1px solid #1f537e;border-radius:8px}
+        QLabel#title{font-size:22px;font-weight:700;color:#fff}
+        QLabel#sectionTitle{font-size:14px;font-weight:700;color:#74d8ff}
+        QPushButton{background:#12395f;border:1px solid #2a78bd;border-radius:5px;padding:7px 11px}
+        QPushButton:hover{background:#194a78} QPushButton#primary{background:#0b72d0;font-weight:700}
+        QTableWidget,QTextEdit{background:#06101d;border:1px solid #244b72;border-radius:4px}
+        QHeaderView::section{background:#102a46;color:#dcecff;padding:5px;border:0}
+        """)
+        lay=QVBoxLayout(root); lay.setContentsMargins(12,10,12,10); lay.setSpacing(8)
+        top=QHBoxLayout(); title=QLabel("具身智能装载数字孪生"); title.setObjectName("title"); top.addWidget(title)
+        top.addStretch(1); self.phase=QLabel("IDLE"); self.phase.setStyleSheet("font-size:15px;font-weight:700;color:#5ad0ff"); top.addWidget(self.phase)
+        self.progress=QLabel("0/0"); self.progress.setStyleSheet("font-size:18px;font-weight:700"); top.addWidget(self.progress); lay.addLayout(top)
+
+        f,l=self._card("流程链路")
+        self.flow_nodes=[]
+        for row_index,stage_row in enumerate((self.FLOW_STAGES[:6],self.FLOW_STAGES[6:])):
+            row=QHBoxLayout(); row.setSpacing(5)
+            for index,(number,title_text) in enumerate(stage_row):
+                node=QLabel(f"{number}. {title_text}"); node.setAlignment(Qt.AlignmentFlag.AlignCenter); node.setWordWrap(True)
+                node.setMinimumHeight(42); node.setToolTip(f"步骤 {number}：{title_text}"); row.addWidget(node,1); self.flow_nodes.append(node)
+                if index < len(stage_row)-1:
+                    arrow=QLabel("→"); arrow.setAlignment(Qt.AlignmentFlag.AlignCenter); arrow.setStyleSheet("color:#527a96;font-size:16px"); row.addWidget(arrow,0)
+            l.addLayout(row)
+        lay.addWidget(f,0)
+
+        self.body_splitter=QSplitter(Qt.Orientation.Vertical); self.body_splitter.setChildrenCollapsible(False); lay.addWidget(self.body_splitter,1)
+        main=QSplitter(Qt.Orientation.Horizontal); main.setChildrenCollapsible(False); self.body_splitter.addWidget(main); self.main_splitter=main
+        left=QWidget(); ll=QVBoxLayout(left); ll.setContentsMargins(0,0,0,0); ll.setSpacing(8); main.addWidget(left)
+        center=QWidget(); cl=QVBoxLayout(center); cl.setContentsMargins(0,0,0,0); cl.setSpacing(8); main.addWidget(center)
+        right=QWidget(); rl=QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8); main.addWidget(right)
+        main.setStretchFactor(0,2); main.setStretchFactor(1,5); main.setStretchFactor(2,3)
+        main.setSizes([320,820,480])
+
+        f,l=self._card("货物 / 托盘实时数据")
+        self.cargo_table=QTableWidget(0,2); self.cargo_table.setHorizontalHeaderLabels(["字段","值"]); self.cargo_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.cargo_table); ll.addWidget(f,1)
+
+        f,l=self._card("车辆 / 相机最终车板 WORLD 数据")
+        self.truck_table=QTableWidget(0,2); self.truck_table.setHorizontalHeaderLabels(["字段","值"]); self.truck_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.truck_table)
+        self.corner_table=QTableWidget(0,4); self.corner_table.setHorizontalHeaderLabels(["角点","X","Y","Z"]); self.corner_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.corner_table); ll.addWidget(f,2)
+
+        f,l=self._card("数字孪生场景 · world / mm · X右 Y车辆前进 Z向上")
+        self.quick=QQuickWidget(); self.quick.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView); self.quick.setClearColor(QColor("#07111f"))
+        self.quick.rootContext().setContextProperty("twinBridge",self.bridge); self.quick.statusChanged.connect(self._on_qml_status); self.quick.setSource(QUrl.fromLocalFile(str(QML_FILE))); l.addWidget(self.quick,1); cl.addWidget(f,1)
+        controls=QHBoxLayout(); self.start_btn=QPushButton("开始"); self.start_btn.setObjectName("primary"); self.start_btn.clicked.connect(self._start)
+        self.next_btn=QPushButton("执行下一步"); self.next_btn.clicked.connect(self._next); self.auto_btn=QPushButton("自动运行"); self.auto_btn.clicked.connect(self._auto)
+        dbg=QPushButton("调试输入"); dbg.clicked.connect(self._debug); reset=QPushButton("重置"); reset.clicked.connect(self._reset)
+        for b in (self.start_btn,self.next_btn,self.auto_btn,dbg,reset): controls.addWidget(b)
+        controls.addStretch(1); cl.addLayout(controls)
+
+        self.right_tabs=QTabWidget(); rl.addWidget(self.right_tabs,1)
+        device_page=QWidget(); device_layout=QVBoxLayout(device_page); device_layout.setContentsMargins(5,5,5,5); device_layout.setSpacing(7)
+        space_page=QWidget(); space_layout=QVBoxLayout(space_page); space_layout.setContentsMargins(5,5,5,5)
+
+        f,l=self._card("设备 / 单机械臂与挂载相机实时 WORLD 坐标")
+        self.device_table=QTableWidget(0,7); self.device_table.setMinimumHeight(130); self.device_table.setHorizontalHeaderLabels(["设备","类型","父设备","状态","WORLD XYZ","RPY","当前动作"]); self.device_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); self.device_table.horizontalHeader().setStretchLastSection(True); l.addWidget(self.device_table)
+        device_layout.addWidget(f,3)
+
+        f,l=self._card("空间管理 · 相机几何 · 两列 × 1.2m")
+        self.space_table=QTableWidget(0,7); self.space_table.setHorizontalHeaderLabels(["盲码","板段","列","中心XYZ","支撑块","状态","货物"]); self.space_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.space_table)
+        self.comp=QLabel("补偿：-"); self.comp.setWordWrap(True); l.addWidget(self.comp); space_layout.addWidget(f,1)
+
+        f,l=self._card("并行状态 / PLC Message / 标定状态")
+        self.parallel_label=QLabel("-"); self.parallel_label.setWordWrap(True); l.addWidget(self.parallel_label)
+        self.cal_label=QLabel("-"); self.cal_label.setMaximumHeight(38); self.cal_label.setStyleSheet("color:#9ec8dc"); l.addWidget(self.cal_label)
+        self.database_label=QLabel("车辆数据库：等待装载会话")
+        self.database_label.setWordWrap(True); self.database_label.setStyleSheet("color:#8fd4b8"); l.addWidget(self.database_label)
+        self.message=QTextEdit(); self.message.setReadOnly(True); self.message.setMinimumHeight(110); l.addWidget(self.message,1)
+        device_layout.addWidget(f,2)
+        self.right_tabs.addTab(device_page,"设备与消息")
+        self.right_tabs.addTab(space_page,"空间与补偿")
+
+        module_page=QWidget(); module_layout=QVBoxLayout(module_page); module_layout.setContentsMargins(5,5,5,5); module_layout.setSpacing(7)
+        self.module_summary=QLabel("等待流程调用模型/模块；未执行步骤不提前显示")
+        self.module_summary.setWordWrap(True); self.module_summary.setStyleSheet("color:#9fdcff;font-weight:600")
+        module_layout.addWidget(self.module_summary)
+        self.module_table=QTableWidget(0,8)
+        self.module_table.setHorizontalHeaderLabels(["阶段","模型/模块","类型","实现/权重","状态","调用","耗时ms","记录"])
+        self.module_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.module_table.horizontalHeader().setStretchLastSection(True)
+        self.module_table.setMinimumHeight(150)
+        self.module_table.cellClicked.connect(self._show_module_detail)
+        module_layout.addWidget(self.module_table,2)
+
+        self.current_module_title=QLabel("当前模型/模块：等待流程")
+        self.current_module_title.setWordWrap(True)
+        self.current_module_title.setStyleSheet("color:#ffffff;font-size:13px;font-weight:700;background:#102a46;border:1px solid #2a78bd;border-radius:5px;padding:6px")
+        module_layout.addWidget(self.current_module_title)
+
+        io_splitter=QSplitter(Qt.Orientation.Horizontal); io_splitter.setChildrenCollapsible(False)
+        input_card,input_layout=self._card("本次输入（数据 + 图片）")
+        self.module_input_preview=QLabel("该步骤执行后显示输入图片")
+        self.module_input_preview.setAlignment(Qt.AlignmentFlag.AlignCenter); self.module_input_preview.setMinimumHeight(125)
+        self.module_input_preview.setStyleSheet("background:#06101d;border:1px solid #244b72;color:#6f8ca5")
+        input_layout.addWidget(self.module_input_preview,2)
+        self.module_input_data=QTextEdit(); self.module_input_data.setReadOnly(True); self.module_input_data.setMinimumHeight(135)
+        self.module_input_data.setPlaceholderText("当前步骤的图像路径、深度图、点云、位姿、参数等输入将显示在这里")
+        input_layout.addWidget(self.module_input_data,3); io_splitter.addWidget(input_card)
+
+        output_card,output_layout=self._card("本次输出（数据 + 图片）")
+        self.module_output_preview=QLabel("该步骤执行后显示输出图片")
+        self.module_output_preview.setAlignment(Qt.AlignmentFlag.AlignCenter); self.module_output_preview.setMinimumHeight(125)
+        self.module_output_preview.setStyleSheet("background:#06101d;border:1px solid #244b72;color:#6f8ca5")
+        output_layout.addWidget(self.module_output_preview,2)
+        self.module_output_data=QTextEdit(); self.module_output_data.setReadOnly(True); self.module_output_data.setMinimumHeight(135)
+        self.module_output_data.setPlaceholderText("当前步骤的识别结果、坐标、判断、耗时和输出文件将显示在这里")
+        output_layout.addWidget(self.module_output_data,3); io_splitter.addWidget(output_card)
+        io_splitter.setSizes([500,500]); module_layout.addWidget(io_splitter,5)
+        self.right_tabs.addTab(module_page,"模型输入/输出")
+        self._module_rows=[]; self._selected_module_id=""; self._latest_module_id=""
+
+        bottom=QSplitter(Qt.Orientation.Horizontal); bottom.setChildrenCollapsible(False); self.body_splitter.addWidget(bottom)
+        f,l=self._card("总体结果（每一步自动保存）"); self.results=QTextEdit(); self.results.setReadOnly(True); self.results.setMinimumHeight(110); l.addWidget(self.results); bottom.addWidget(f)
+        f,l=self._card("运行日志 / 报警"); self.logs=QTextEdit(); self.logs.setReadOnly(True); self.logs.setMinimumHeight(110); l.addWidget(self.logs); bottom.addWidget(f); bottom.setSizes([1000,900])
+        self.body_splitter.setStretchFactor(0,5); self.body_splitter.setStretchFactor(1,1); self.body_splitter.setSizes([820,145])
+
+    def _on_qml_status(self,status):
+        if status==QQuickWidget.Status.Error:
+            msg="\n".join(e.toString() for e in self.quick.errors()) or "未知 QML 错误"
+            QTimer.singleShot(0,lambda m=msg: QMessageBox.critical(self,"数字孪生场景加载失败",m))
+
+    @staticmethod
+    def _fill_kv(table,data):
+        table.setRowCount(0)
+        for k,v in data:
+            r=table.rowCount(); table.insertRow(r); table.setItem(r,0,QTableWidgetItem(str(k))); table.setItem(r,1,QTableWidgetItem(str(v)))
+
+    def _load_plan(self):
+        if DEFAULT_PLAN.is_file():
+            try:
+                data=json.loads(DEFAULT_PLAN.read_text(encoding="utf-8")); self.controller.set_plan(data.get("items",data))
+            except Exception: pass
+        if not self.controller.queue:
+            self.controller.set_plan([{"cargo_code":"CARGO-001","cargo_name":"货物","quantity":3,"length_mm":1200,"width_mm":1000,"height_mm":900,"pallet_reference_width_mm":1200}])
+
+    @staticmethod
+    def _first_image(value):
+        if isinstance(value,dict):
+            preferred=("result_image_path","result_image","rgb_path","image_path","face_a","face_b")
+            for key in preferred:
+                if key in value:
+                    found=MainWindow._first_image(value[key])
+                    if found: return found
+            for item in value.values():
+                found=MainWindow._first_image(item)
+                if found: return found
+        elif isinstance(value,(list,tuple)):
+            for item in value:
+                found=MainWindow._first_image(item)
+                if found: return found
+        elif isinstance(value,str):
+            path=Path(value)
+            if path.is_file() and path.suffix.lower() in {".jpg",".jpeg",".png",".bmp",".webp"}:
+                return str(path.resolve())
+        return ""
+
+    @staticmethod
+    def _image_paths(value):
+        found=[]
+        def visit(item):
+            if isinstance(item,dict):
+                for child in item.values(): visit(child)
+            elif isinstance(item,(list,tuple)):
+                for child in item: visit(child)
+            elif isinstance(item,str):
+                path=Path(item)
+                if path.is_file() and path.suffix.lower() in {".jpg",".jpeg",".png",".bmp",".webp"}:
+                    resolved=str(path.resolve())
+                    if resolved not in found: found.append(resolved)
+        visit(value)
+        return found
+
+    @staticmethod
+    def _set_io_preview(label,image_data,empty_text):
+        paths=MainWindow._image_paths(image_data)
+        pixmap=QPixmap(paths[0]) if paths else QPixmap()
+        if not pixmap.isNull():
+            label.setText("")
+            label.setPixmap(pixmap.scaled(max(120,label.width()-8),max(100,label.height()-8),Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation))
+            label.setToolTip((f"共 {len(paths)} 张图片\n" if len(paths)>1 else "")+"\n".join(paths))
+        else:
+            label.setPixmap(QPixmap()); label.setText(empty_text); label.setToolTip("")
+
+    @staticmethod
+    def _read_live_evidence(item):
+        path=Path(str(item.get("last_evidence_path") or ""))
+        if path.is_file():
+            try:
+                evidence=json.loads(path.read_text(encoding="utf-8"))
+                return evidence.get("inputs") or {},evidence.get("output") or {},evidence
+            except Exception as exc:
+                return item.get("last_inputs") or {},item.get("last_output") or {},{"load_error":str(exc)}
+        return item.get("last_inputs") or {},item.get("last_output") or {},{}
+
+    def _show_module_detail(self,row,column=0):
+        if not (0 <= row < len(self._module_rows)): return
+        item=self._module_rows[row]
+        self._selected_module_id=str(item.get("module_id") or "")
+        inputs,output,evidence=self._read_live_evidence(item)
+        call_time=item.get("last_call") or evidence.get("time") or "-"
+        invoked="已调用真实权重" if item.get("model_invoked") else "算法/模块调用（无模型权重）"
+        self.current_module_title.setText(
+            f"当前模型/模块：{item.get('flow_stage','-')} · {item.get('name') or item.get('module_id')}\n"
+            f"{item.get('live_status','-')} · {invoked} · {item.get('last_elapsed_ms','-')} ms · {call_time}"
+        )
+        input_view={
+            "module_id":item.get("module_id"),"implementation":item.get("implementation"),
+            "model_path":item.get("model_path") or "","call_time":call_time,"inputs":inputs,
+        }
+        output_view={
+            "status":item.get("live_status"),"model_invoked":bool(item.get("model_invoked")),
+            "elapsed_ms":item.get("last_elapsed_ms"),"note":evidence.get("note") or "","output":output,
+            "evidence_path":item.get("last_evidence_path") or "",
+        }
+        self.module_input_data.setPlainText(json.dumps(input_view,ensure_ascii=False,indent=2,default=str))
+        self.module_output_data.setPlainText(json.dumps(output_view,ensure_ascii=False,indent=2,default=str))
+        self._set_io_preview(self.module_input_preview,inputs,"本次输入不包含可预览图片\n详细数据见下方")
+        self._set_io_preview(self.module_output_preview,output,"本次输出不包含可预览图片\n详细数据见下方")
+
+    def _refresh_modules(self,modules):
+        all_rows=list(modules or [])
+        # Only live calls from the current controller run are visible. Example
+        # assets can feed demo mode but must not appear as completed I/O early.
+        self._module_rows=[item for item in all_rows if int(item.get("call_count",0) or 0)>0]
+        self.module_table.setRowCount(0)
+        models=sum(1 for item in self._module_rows if item.get("model_invoked"))
+        if self._module_rows:
+            self.module_summary.setText(f"已随流程显示 {len(self._module_rows)} 个已执行模型/模块｜真实权重已调用 {models}｜未到步骤不显示")
+        else:
+            self.module_summary.setText("等待流程调用模型/模块；未执行步骤不提前显示")
+        for item in self._module_rows:
+            row=self.module_table.rowCount(); self.module_table.insertRow(row)
+            implementation=item.get("implementation","")
+            if item.get("model_path"): implementation=f"{implementation}\n{item.get('model_path')}"
+            proof=item.get("last_evidence_path") or "-"
+            values=[item.get("flow_stage"),item.get("name"),item.get("category"),implementation,item.get("live_status"),item.get("call_count"),item.get("last_elapsed_ms") if item.get("last_elapsed_ms") is not None else "-",proof]
+            for column,value in enumerate(values):
+                cell=QTableWidgetItem(str(value)); self.module_table.setItem(row,column,cell)
+            status=str(item.get("live_status"))
+            color="#9df0d3" if status=="SUCCESS" else ("#ffd27a" if status in {"WAITING","FALLBACK"} else "#ff9b9b")
+            self.module_table.item(row,4).setForeground(QColor(color))
+        if not self._module_rows:
+            self._selected_module_id=""; self._latest_module_id=""
+            self.current_module_title.setText("当前模型/模块：等待流程")
+            self.module_input_data.clear(); self.module_output_data.clear()
+            self._set_io_preview(self.module_input_preview,{},"该步骤执行后显示输入图片")
+            self._set_io_preview(self.module_output_preview,{},"该步骤执行后显示输出图片")
+            return
+        latest=max(self._module_rows,key=lambda item:str(item.get("last_call") or ""))
+        latest_id=str(latest.get("module_id") or "")
+        target_id=latest_id if latest_id!=self._latest_module_id else (self._selected_module_id or latest_id)
+        self._latest_module_id=latest_id
+        row_index=next((i for i,item in enumerate(self._module_rows) if str(item.get("module_id") or "")==target_id),len(self._module_rows)-1)
+        self.module_table.selectRow(row_index); self._show_module_detail(row_index)
+
+    def _start(self):
+        try: self.controller.set_debug_inputs(self.debug_inputs); self.controller.start(); self._refresh()
+        except Exception as e: QMessageBox.critical(self,"启动失败",str(e))
+    def _next(self):
+        if self._step_busy: return
+        self._step_busy=True
+        try: self.controller.set_debug_inputs(self.debug_inputs); self.controller.execute_next(); self._refresh()
+        except Exception as e: QMessageBox.warning(self,"步骤未通过",str(e)); self._refresh()
+        finally: self._step_busy=False
+    def _auto(self):
+        if self.timer.isActive(): self.timer.stop(); self.auto_btn.setText("自动运行")
+        else:
+            if not self.controller.running: self._start()
+            self.timer.start(); self.auto_btn.setText("暂停")
+    def _auto_tick(self):
+        if self._step_busy: return
+        self._step_busy=True
+        try:
+            self.controller.execute_next(); self._refresh()
+            if self.controller.finished: self.timer.stop(); self.auto_btn.setText("自动运行")
+        except Exception as e:
+            self.timer.stop(); self.auto_btn.setText("自动运行"); QMessageBox.warning(self,"流程等待/失败",str(e)); self._refresh()
+        finally: self._step_busy=False
+    def _debug(self):
+        d=DebugInputDialog(self.debug_inputs,self)
+        if d.exec(): self.debug_inputs=d.values(); self.controller.set_debug_inputs(self.debug_inputs)
+    def _reset(self): self.timer.stop(); self.controller.reset(keep_plan=True); self._refresh()
+
+    def _apply_motion_snapshot(self,snapshot,motion):
+        # Parallel 3.1 runs in a worker thread.  Its queued motion signal can be
+        # delivered after fork pickup has already attached the cargo; never let
+        # that older snapshot overwrite the latest CARRIED state in QML.
+        latest=self.controller.snapshot()
+        robot_id=motion.get("robot_id","")
+        latest_task=(((latest.get("twin") or {}).get("devices") or {}).get(robot_id) or {}).get("task","")
+        self._refresh(latest)
+        if str(latest_task) != str(motion.get("task","")):
+            return
+        self.phase.setText(f"场景动作 · {motion.get('robot_id','')} · {motion.get('task','')}")
+        if self.isVisible():
+            loop=QEventLoop(self); QTimer.singleShot(460,loop.quit); loop.exec()
+
+    def _refresh_flow_chain(self,s):
+        if s.get("finished"):
+            current_stage=13
+        elif not s.get("running") and not s.get("results"):
+            current_stage=1
+        else:
+            current_stage=self.STEP_STAGE.get(s.get("step_code"),1)
+        skipped={4,5,6,7} if not s.get("first_round") else set()
+        for (number,title_text),node in zip(self.FLOW_STAGES,self.flow_nodes):
+            if number in skipped:
+                status="SKIP"; bg="#172535"; border="#344b5e"; color="#7990a1"
+            elif number < current_stage:
+                status="DONE"; bg="#123e37"; border="#28a985"; color="#9df0d3"
+            elif number == current_stage:
+                status="RUN"; bg="#0b5794"; border="#61c7ff"; color="#ffffff"
+            else:
+                status="WAIT"; bg="#10243a"; border="#294d6d"; color="#8faabd"
+            node.setText(f"{number}. {title_text}\n{status}")
+            node.setStyleSheet(f"background:{bg};border:1px solid {border};border-radius:5px;color:{color};font-size:11px;font-weight:600;padding:3px")
+
+    def _refresh(self,s=None):
+        s=s or self.controller.snapshot(); t=s["twin"]; self.bridge.update_state(t); self._refresh_flow_chain(s)
+        self.phase.setText(f"第 {s['round']} 轮 · {'首轮建图' if s['first_round'] else '循环装载（跳过雷达/角点）'} · {s['step_name']}"); self.progress.setText(f"{s['completed']} / {s['total']}")
+        rd=s.get("round_data") or {}; cargo=t.get("cargo") or {}; p=cargo.get("pose") or {}; truck=t.get("truck") or {}; target=truck.get("current_target") or {}; tp=target.get("final_world_pose") or {}; fb=t.get("feedback_compensation_mm") or {}
+        self._fill_kv(self.cargo_table,[
+            ("货物编号",cargo.get("instance_id") or cargo.get("cargo_code","-")),("名称",cargo.get("cargo_name","-")),("状态",cargo.get("status","-")),
+            ("随动绑定",cargo.get("attached_to") or "已释放 / 未插取"),
+            ("尺寸 mm",f"{cargo.get('length_mm','-')} × {cargo.get('width_mm','-')} × {cargo.get('height_mm','-')}"),("当前 WORLD XYZ",f"{p.get('x_mm','-')}, {p.get('y_mm','-')}, {p.get('z_mm','-')}"),
+            ("目标盲码",target.get("blind_code","-")),("目标 WORLD XYZ",f"{tp.get('x_mm','-')}, {tp.get('y_mm','-')}, {tp.get('z_mm','-')}"),
+            ("步骤2 偏移%",(rd.get("pre_pick_offset") or {}).get("overhang_percent","-")),
+            ("放置前动态监测",json.dumps({k:(rd.get("pre_place_monitor") or {}).get(k) for k in ("corner_xyz_m","offset_deg")},ensure_ascii=False)),
+            ("放置后底层托盘",json.dumps({k:(rd.get("post_place_bottom_pallet") or {}).get(k) for k in ("corner_xyz_m","offset_deg")},ensure_ascii=False)),
+            ("10.1 区域偏差",json.dumps(((rd.get("post_region") or {}).get("region_deviation") or {}).get("next_pallet_compensation_world_mm",{}),ensure_ascii=False)),
+            ("10.2 货物/托盘偏移mm",(rd.get("post_cargo_offset") or {}).get("offset_distance_mm","-")),
+            ("下一托盘 WORLD 反馈",json.dumps(fb,ensure_ascii=False)),
+        ])
+        trp=truck.get("pose") or {}; geom=truck.get("camera_board_geometry") or {}
+        self._fill_kv(self.truck_table,[
+            ("车辆编号",truck.get("truck_id")),("坐标系","world / mm；X右 Y车辆前进 Z向上"),("车辆 XYZ",f"{trp.get('x_mm')}, {trp.get('y_mm')}, {trp.get('z_mm')}"),
+            ("车辆 RPY",f"{trp.get('roll_deg')}, {trp.get('pitch_deg')}, {trp.get('yaw_deg')}"),("车板类型",truck.get("board_mode")),
+            ("板型判断来源",geom.get("decision_source","-")),("相机最终角点数",len(truck.get("corners") or {})),("高低差 mm",geom.get("height_difference_mm","-")),
+            ("可用区域",len(truck.get("available") or [])),("已占用区域",len(truck.get("occupied") or [])),("借位规划",json.dumps(geom.get("borrow_plan"),ensure_ascii=False)),
+        ])
+        corners=truck.get("corners") or {}; self.corner_table.setRowCount(0)
+        for pid in sorted(corners,key=lambda x:int(x[1:]) if x[1:].isdigit() else 999):
+            q=corners[pid]; r=self.corner_table.rowCount(); self.corner_table.insertRow(r)
+            for c,val in enumerate([pid,q.get("x"),q.get("y"),q.get("z")]): self.corner_table.setItem(r,c,QTableWidgetItem(str(val)))
+
+        self.device_table.setRowCount(0); rows=[]
+        compact=self.width()<1500
+        for column in (1,2,5): self.device_table.setColumnHidden(column,compact)
+        for did,d in (t.get("devices") or {}).items(): rows.append((did,d.get("kind"),"-",d.get("status"),d.get("pose") or {},d.get("task","-")))
+        for cid,c in (t.get("cameras") or {}).items(): rows.append((cid,"arm_camera",c.get("parent_robot_id"),c.get("status"),c.get("world_pose") or {},c.get("task","-")))
+        for did,kind,parent,status,pp,task in rows:
+            r=self.device_table.rowCount(); self.device_table.insertRow(r); vals=[did,kind,parent,status,f"{pp.get('x_mm','-'):.0f}, {pp.get('y_mm','-'):.0f}, {pp.get('z_mm','-'):.0f}" if pp else "-",f"{pp.get('roll_deg','-')}, {pp.get('pitch_deg','-')}, {pp.get('yaw_deg','-')}",task]
+            for c,val in enumerate(vals): self.device_table.setItem(r,c,QTableWidgetItem(str(val)))
+
+        self.space_table.setRowCount(0)
+        for reg in truck.get("regions") or []:
+            center=reg.get("center_world_xyz_mm") or [0,0,0]; support=f"{reg.get('support_height_compensation_mm',0):.1f}mm" if reg.get("requires_support_block") else "-"
+            vals=[reg.get("blind_code") or reg.get("region_id"),reg.get("section"),reg.get("column"),f"{center[0]:.0f},{center[1]:.0f},{center[2]:.0f}",support,reg.get("status"),reg.get("cargo_id") or "-"]
+            r=self.space_table.rowCount(); self.space_table.insertRow(r)
+            for c,val in enumerate(vals): self.space_table.setItem(r,c,QTableWidgetItem(str(val)))
+        self.comp.setText("8.2当前补偿："+json.dumps((rd.get("neighbor_pose") or {}).get("compensation_world_mm",{}),ensure_ascii=False)+"\n历史反馈："+json.dumps(fb,ensure_ascii=False)+"\n剩余空间："+json.dumps(truck.get("remaining_space") or {},ensure_ascii=False))
+
+        par=t.get("parallel") or {}; self.parallel_label.setText(f"3.1插取：{par.get('pick',{}).get('status')} ｜ 3.2雷达：{par.get('radar',{}).get('status')}")
+        cal=s.get("calibration") or {}
+        intr="参考/占位" if "PLACEHOLDER" in str(cal.get("intrinsic_parameter_status","")).upper() else str(cal.get("intrinsic_parameter_status","-"))
+        extr="占位" if "PLACEHOLDER" in str(cal.get("coordinate_parameter_status","")).upper() else str(cal.get("coordinate_parameter_status","-"))
+        self.cal_label.setText(f"标定：内参={intr}｜外参={extr}｜运动相机=实时位姿×安装外参")
+        self.cal_label.setToolTip(json.dumps(cal,ensure_ascii=False,indent=2))
+        db=s.get("database") or {}; db_location=str(db.get("location") or db.get("path") or "-")
+        db_name=("MySQL" if str(db.get("backend")).lower()=="mysql" else "SQLite")
+        self.database_label.setText(f"车辆数据库：{db_name}｜装载会话：{db.get('session_id') or '未开始'}")
+        self.database_label.setToolTip(db_location)
+        self._refresh_modules(s.get("module_evidence") or [])
+        msgs=t.get("messages") or []; self.message.setPlainText("\n".join(f"[{m.get('time')}] {m.get('source')} {m.get('status')}  {m.get('message')}" for m in msgs[-30:]))
+        self.results.setPlainText("\n\n".join(f"==== 第{r.get('round')}轮｜{r.get('step_name')}｜{r.get('status')} ====\n{r.get('message')}\n{json.dumps(r.get('data'),ensure_ascii=False,indent=2,default=str)}" for r in s.get("results",[])))
+        alarm=t.get("alarm"); self.logs.setPlainText(("ALARM: "+str(alarm)+"\n\n" if alarm else "")+"\n".join(f"[{m.get('time')}] {m.get('source')} {m.get('status')} {m.get('message')}" for m in msgs))

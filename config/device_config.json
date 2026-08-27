@@ -1,0 +1,52 @@
+{
+  "coordinate_frame": "world",
+  "unit": "mm",
+  "axis": {
+    "x": "right",
+    "y": "vehicle_forward",
+    "z": "up"
+  },
+  "calibration_source": "config/sensor_coordinate_config",
+  "radar": {
+    "calibration_name": "lidar",
+    "initial_pose": {
+      "x_mm": 0,
+      "y_mm": 500,
+      "z_mm": 1800,
+      "roll_deg": 0,
+      "pitch_deg": -15,
+      "yaw_deg": 0
+    }
+  },
+  "robots": {
+    "PICK_ARM": {
+      "role": "车尾左外侧初始位；沿双侧龙门架的纵轨、横梁运动",
+      "initial_pose": {"x_mm": -3500, "y_mm": 1000, "z_mm": 1800, "roll_deg": 0, "pitch_deg": 0, "yaw_deg": -90},
+      "cargo_mount_pose": {"x_mm": 0, "y_mm": 1100, "z_mm": -350, "roll_deg": 0, "pitch_deg": 0, "yaw_deg": 0}
+    }
+  },
+  "cameras": {
+    "CAM_PICK": {
+      "calibration_name": "hole_camera",
+      "parent_robot_id": "PICK_ARM",
+      "sensor": "RGB-D",
+      "role": "插孔、携货角点识别、临近托盘、放置及两面复检",
+      "mount_pose": {"x_mm": 250, "y_mm": 0, "z_mm": -80, "roll_deg": 0, "pitch_deg": 0, "yaw_deg": 180}
+    }
+  },
+  "camera_roles": {
+    "pallet_hole": "CAM_PICK",
+    "pre_pick_offset": "CAM_PICK",
+    "corner": "CAM_PICK",
+    "observe": "CAM_PICK",
+    "neighbor": "CAM_PICK",
+    "post": "CAM_PICK"
+  },
+  "notes": [
+    "当前只有1台活动机械臂PICK_ARM和1个挂载相机CAM_PICK，初始均位于车尾左外侧。",
+    "角点拍照固定沿左外侧从车尾向车头单次运动，车尾/车头各拍1张RGB-D。",
+    "放货时按最终目标WORLD X相对车体中心的物理左右选择作业侧；横梁在安全高度换侧，完成第10、11步后再返车尾。",
+    "用户标定包中的 corner_camera 条目保留为历史/备用占位，不建立第四个活动相机。",
+    "运动相机最终外参使用 T_world_camera(t)=T_world_robot(t)@T_robot_camera；coordinate_config 中固定相机 T_world_sensor 仅作占位参考。"
+  ]
+}

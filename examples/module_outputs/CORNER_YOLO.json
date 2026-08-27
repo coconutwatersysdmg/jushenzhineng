@@ -1,0 +1,1 @@
+{"status":"ACTUAL_EXAMPLE","success":true,"recognition_source":"pt_model_visual_only","model_path":"models/corner_service.pt","detected_points":4,"example_image_count":4,"result_note":"2026-08-25 本机按P1-P4实际推理成功；第4份为独立文件名的已识别样例副本"}

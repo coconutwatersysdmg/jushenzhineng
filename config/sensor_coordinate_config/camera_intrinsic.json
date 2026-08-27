@@ -1,0 +1,146 @@
+{
+  "description": "相机内参配置（当前四个相机统一采用 D435i / 1280x720 占位参数）",
+  "parameter_status": "PLACEHOLDER_ONLY_EXCEPT_REFERENCE_D435I_VALUES",
+  "resolution": {
+    "width": 1280,
+    "height": 720
+  },
+  "cameras": {
+    "corner_camera": {
+      "description": "车板角点识别深度相机",
+      "model": "Intel RealSense D435i (temporary placeholder)",
+      "resolution": [
+        1280,
+        720
+      ],
+      "K": [
+        [
+          904.6748,
+          0.0,
+          657.9651
+        ],
+        [
+          0.0,
+          904.9058,
+          374.3209
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "distortion": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "depth_scale": 0.001,
+      "status": "placeholder"
+    },
+    "hole_camera": {
+      "description": "托盘插孔识别相机",
+      "model": "Intel RealSense D435i (temporary placeholder)",
+      "resolution": [
+        1280,
+        720
+      ],
+      "K": [
+        [
+          904.6748,
+          0.0,
+          657.9651
+        ],
+        [
+          0.0,
+          904.9058,
+          374.3209
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "distortion": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "depth_scale": 0.001,
+      "status": "placeholder"
+    },
+    "left_camera": {
+      "description": "叉车臂左侧辅助相机",
+      "model": "Intel RealSense D435i (temporary placeholder)",
+      "resolution": [
+        1280,
+        720
+      ],
+      "K": [
+        [
+          904.6748,
+          0.0,
+          657.9651
+        ],
+        [
+          0.0,
+          904.9058,
+          374.3209
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "distortion": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "depth_scale": 0.001,
+      "status": "placeholder"
+    },
+    "right_camera": {
+      "description": "叉车臂右侧辅助相机",
+      "model": "Intel RealSense D435i (temporary placeholder)",
+      "resolution": [
+        1280,
+        720
+      ],
+      "K": [
+        [
+          904.6748,
+          0.0,
+          657.9651
+        ],
+        [
+          0.0,
+          904.9058,
+          374.3209
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "distortion": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "depth_scale": 0.001,
+      "status": "placeholder"
+    }
+  }
+}

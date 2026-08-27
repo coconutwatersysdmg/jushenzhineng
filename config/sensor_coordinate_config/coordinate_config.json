@@ -1,0 +1,211 @@
+{
+  "description": "多传感器坐标转换配置（临时初始化参数，后续替换真实标定结果）",
+  "parameter_status": "PLACEHOLDER_ONLY",
+  "world_frame": {
+    "name": "world",
+    "origin": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "unit": "mm",
+    "axis": {
+      "x": "right",
+      "y": "vehicle_forward",
+      "z": "up"
+    }
+  },
+  "matrix_convention": {
+    "definition": "P_world = T_world_sensor * P_sensor_homogeneous",
+    "point_format": "[x, y, z, 1]^T",
+    "matrix_size": "4x4"
+  },
+  "transforms": {
+    "forklift": {
+      "description": "叉车臂坐标系",
+      "parent": "world",
+      "status": "placeholder",
+      "T_world_sensor": [
+        [
+          1.0,
+          0.0,
+          0.0,
+          12.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          165.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0,
+          270.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    "lidar": {
+      "description": "激光雷达坐标系",
+      "parent": "world",
+      "status": "placeholder",
+      "T_world_sensor": [
+        [
+          0.966,
+          0.0,
+          -0.259,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          500.0
+        ],
+        [
+          0.259,
+          0.0,
+          0.966,
+          1800.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    "corner_camera": {
+      "description": "车板角点识别深度相机",
+      "parent": "world",
+      "status": "placeholder",
+      "T_world_sensor": [
+        [
+          0.866,
+          0.0,
+          -0.5,
+          200.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          350.0
+        ],
+        [
+          0.5,
+          0.0,
+          0.866,
+          1600.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    "hole_camera": {
+      "description": "托盘插孔识别相机",
+      "parent": "world",
+      "status": "placeholder",
+      "T_world_sensor": [
+        [
+          0.707,
+          0.0,
+          -0.707,
+          -150.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0,
+          200.0
+        ],
+        [
+          0.707,
+          0.0,
+          0.707,
+          900.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    "left_camera": {
+      "description": "叉车臂左侧辅助相机",
+      "parent": "world",
+      "status": "placeholder",
+      "T_world_sensor": [
+        [
+          0.925,
+          -0.174,
+          -0.337,
+          -300.0
+        ],
+        [
+          0.163,
+          0.985,
+          -0.059,
+          0.0
+        ],
+        [
+          0.342,
+          0.0,
+          0.94,
+          500.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    "right_camera": {
+      "description": "叉车臂右侧辅助相机",
+      "parent": "world",
+      "status": "placeholder",
+      "T_world_sensor": [
+        [
+          0.925,
+          0.174,
+          -0.337,
+          300.0
+        ],
+        [
+          -0.163,
+          0.985,
+          -0.059,
+          0.0
+        ],
+        [
+          0.342,
+          0.0,
+          0.94,
+          500.0
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    }
+  }
+}

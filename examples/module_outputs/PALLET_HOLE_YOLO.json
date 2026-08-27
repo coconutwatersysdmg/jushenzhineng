@@ -1,0 +1,1 @@
+{"status":"ACTUAL_EXAMPLE","success":true,"recognition_source":"pallet_hole_yolo_rgbd","model_path":"models/pallet_hole_best.pt","detected_holes":2,"result_note":"2026-08-25 本机实际推理成功"}

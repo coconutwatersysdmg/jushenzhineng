@@ -1,0 +1,1 @@
+{"status":"ACTUAL_EXAMPLE","success":true,"recognition_source":"pointnet2_point_cloud_pipeline","checkpoint_path":"algorithm_modules/point_cloud_segment_module/checkpoints/best_model.pth","board_count":1,"corner_ids":["P1","P2","P3","P4"],"result_note":"2026-08-25 本机实际推理成功，总耗时约11.5秒"}

@@ -1,0 +1,861 @@
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+import json
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
+from datetime import datetime
+from math import ceil, sqrt
+from pathlib import Path
+from time import perf_counter
+from typing import Any, Dict, List, Mapping
+from uuid import uuid4
+
+from core.digital_twin_state import DigitalTwinState
+from core.geometry import Pose6D, parent_pose_for_child
+from devices.mock_devices import MockPLCAdapter, MockRobotAdapter, MockRadarAdapter, MockArmCameraAdapter
+from services.algorithm_facade import AlgorithmFacade
+from services.sensor_calibration_service import SensorCalibrationService
+from services.camera_corner_world_service import CameraCornerWorldService
+from services.camera_board_geometry_service import CameraBoardGeometryService
+from services.space_manager import SpaceManager
+from services.vision_measurement_interfaces import NeighborPalletPoseService, PalletBoardRegionDeviationService
+from services.placement_compensation_service import PlacementCompensationService
+from services.two_face_observation_service import TwoFaceObservationService
+from services.dynamic_monitoring_service import DynamicMonitoringService
+from services.module_evidence_service import ModuleEvidenceService
+from services.vehicle_database_service import create_vehicle_database_service
+from utils.demo_assets import ensure_demo_pre_pick_image
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+RESULT_FILE = PROJECT_ROOT / "runtime" / "overall_results.json"
+STATE_FILE = PROJECT_ROOT / "runtime" / "twin_state.json"
+DEVICE_CONFIG_FILE = PROJECT_ROOT / "config" / "device_config.json"
+SYSTEM_CONFIG_FILE = PROJECT_ROOT / "config" / "system_config.json"
+GANTRY_LEFT_X_MM = -3500.0
+GANTRY_RIGHT_X_MM = 3500.0
+GANTRY_CLEARANCE_Z_MM = 4800.0
+
+
+class FlowController:
+    """v8 首轮建图 + 后续循环装载控制器。
+
+    首轮：2 -> 3(并行3.1/3.2) -> 4 -> 5 -> 6 -> 7 -> 8.1 -> 8.2 -> 8.3 -> 9 -> 10.1 -> 10.2 -> 11 -> 12
+    后续：2 -> 3.1 -> 8.2 -> 8.3 -> 9 -> 10.1 -> 10.2 -> 11 -> 12
+
+    8.3 是根据用户“下一轮包含8.3”的描述明确出来的目标锁定节点：
+    它不重新建图，只把持久可用空间、历史反馈与8.2临近托盘补偿合成为本轮最终目标。
+    """
+
+    FIRST_STEPS = [
+        ("PRE_PICK_OFFSET", "2. 货物-托盘偏差分析 / S-F message"),
+        ("PARALLEL_LOCATE", "3. 并行：3.1插孔插取 + 3.2雷达找车"),
+        ("RADAR_TO_CAMERA", "4. 雷达粗点 -> PLC -> 机械臂挂载相机"),
+        ("CAPTURE_CORNERS", "5. 左外侧单次通过：车尾/车头各1组 RGB-D"),
+        ("CORNER_RECOGNITION", "6. 角点 .pt 像素识别"),
+        ("CAMERA_TO_WORLD", "7. 像素+深度+动态外参 -> WORLD"),
+        ("INITIAL_SPACE_PLAN", "8.1 相机判断平/高低板 + 两列×1.2m盲码规划"),
+        ("NEIGHBOR_POSE", "8.2 拍临近托盘姿态 / 计算当前补偿"),
+        ("TARGET_CONFIRM", "8.3 可用空间状态确认 / 锁定本轮目标"),
+        ("PRE_PLACE_MONITOR", "8.4 放置前 RGB-D 动态监测"),
+        ("PLACE", "9. 计算最终放置点 / PLC / 放货"),
+        ("POST_PLACE_BOTTOM", "10.0 放置后底层托盘 RGB-D 检测"),
+        ("POST_REGION", "10.1 托盘-车板区域偏差 + 货物两面观测"),
+        ("POST_CARGO_OFFSET", "10.2 托盘-货物偏差 / 补偿"),
+        ("FEEDBACK", "11. 偏差回PLC / 修正下一托盘 / 更新空间"),
+        ("RETURN", "12. 机械臂返回 / 下一轮"),
+    ]
+    REPEAT_STEPS = [
+        ("PRE_PICK_OFFSET", "2. 货物-托盘偏差分析 / S-F message"),
+        ("PICK_ONLY", "3.1 机械臂找插孔并插取（跳过雷达）"),
+        ("NEIGHBOR_POSE", "8.2 拍临近托盘姿态 / 计算当前补偿"),
+        ("TARGET_CONFIRM", "8.3 复用首轮车板模型 / 锁定下一可用区域"),
+        ("PRE_PLACE_MONITOR", "8.4 放置前 RGB-D 动态监测"),
+        ("PLACE", "9. 计算最终放置点 / PLC / 放货"),
+        ("POST_PLACE_BOTTOM", "10.0 放置后底层托盘 RGB-D 检测"),
+        ("POST_REGION", "10.1 托盘-车板区域偏差 + 货物两面观测"),
+        ("POST_CARGO_OFFSET", "10.2 托盘-货物偏差 / 补偿"),
+        ("FEEDBACK", "11. 偏差回PLC / 修正下一托盘 / 更新空间"),
+        ("RETURN", "12. 机械臂返回 / 下一轮"),
+    ]
+
+    def __init__(self, twin=None, plc=None, robot=None, radar=None, camera=None, algorithms=None):
+        self.device_config = self._load_json(DEVICE_CONFIG_FILE)
+        self.system_config = self._load_json(SYSTEM_CONFIG_FILE)
+        self.allow_demo = bool((self.system_config.get("runtime") or {}).get("allow_demo_device_data", True))
+        self.twin = twin or DigitalTwinState()
+        self.plc = plc or MockPLCAdapter(self.twin)
+        self.robot = robot or MockRobotAdapter(self.twin, self.plc)
+        self.radar = radar or MockRadarAdapter(self.twin)
+        self.camera = camera or MockArmCameraAdapter(self.twin)
+        if hasattr(self.camera, "set_demo_enabled"):
+            self.camera.set_demo_enabled(self.allow_demo)
+        self.algorithms = algorithms or AlgorithmFacade()
+        self.calibration = SensorCalibrationService()
+        c_cfg = self.system_config.get("camera_corner_world") or {}
+        self.corner_world = CameraCornerWorldService(self.calibration, depth_window=int(c_cfg.get("depth_sample_window", 5)))
+        g_cfg = self.system_config.get("camera_board_geometry") or {}
+        self.board_geometry = CameraBoardGeometryService(
+            row_length_mm=float(g_cfg.get("row_length_mm", 1200.0)),
+            high_low_height_threshold_mm=float(g_cfg.get("high_low_height_threshold_mm", 80.0)),
+            max_borrow_mm=float(g_cfg.get("max_borrow_mm", 650.0)),
+            min_second_section_remaining_mm=float(g_cfg.get("min_second_section_remaining_mm", 600.0)),
+        )
+        self.space = SpaceManager()
+        self.neighbor_pose = NeighborPalletPoseService()
+        self.region_deviation = PalletBoardRegionDeviationService()
+        self.placement_comp = PlacementCompensationService()
+        self.dynamic_monitoring = DynamicMonitoringService()
+        self.module_evidence = ModuleEvidenceService()
+        db_cfg=self.system_config.get("database") or {}
+        self.vehicle_db=create_vehicle_database_service(db_cfg)
+        self.loading_session_id=""; self._db_message_cursor=0
+        roles = self.device_config.get("camera_roles") or {}
+        self.two_face = TwoFaceObservationService(
+            self.twin, self.robot, self.camera,
+            robot_id="PICK_ARM",
+            camera_id=roles.get("observe", "CAM_PICK"),
+        )
+        self.queue: List[Dict[str, Any]] = []
+        self.completed: List[Dict[str, Any]] = []
+        self.round_index = 0
+        self.step_index = 0
+        self.running = False
+        self.finished = False
+        self.round_data: Dict[str, Any] = {}
+        self.results: List[Dict[str, Any]] = []
+        self.debug_inputs: Dict[str, Any] = {}
+        self.state_listener = None
+        self.truck_initialized = False
+        self.plc.connect()
+        if hasattr(self.robot, "motion_callback"):
+            self.robot.motion_callback = self._notify_motion
+        self.twin.add_message("CALIBRATION", "INFO", "已加载用户标定配置；运动相机使用机械臂实时位姿×安装外参", self.calibration.diagnostic_summary())
+        self.set_debug_inputs(self.module_evidence.example_debug_inputs())
+        self.twin.add_message("MODULE_INPUTS", "INFO", "联调输入源已就绪；模型输入/输出只在流程到达并完成调用后显示", {"module_count":len(self.module_evidence.snapshot())})
+
+    def set_state_listener(self, listener):
+        """Receive intermediate motion snapshots so the UI can animate real step actions."""
+        self.state_listener = listener if callable(listener) else None
+
+    def _notify_motion(self, robot_id: str, pose: Dict[str, Any], task: str):
+        if self.loading_session_id:
+            self.vehicle_db.record_motion(self.loading_session_id,robot_id,pose,task)
+        if self.state_listener:
+            self.state_listener(self.snapshot(), {"robot_id":robot_id,"pose":deepcopy(pose),"task":str(task)})
+
+    def _move_attached_cargo_world(self, target_pose: Dict[str, Any], task: str) -> Dict[str, Any]:
+        """Animate telescopic load motion while the arm base remains on the exterior rail."""
+        snapshot=self.twin.snapshot(); cargo=snapshot.get("cargo") or {}
+        start=Pose6D.from_any(cargo.get("pose")); target=Pose6D.from_any(target_pose)
+        distance=sqrt((target.x_mm-start.x_mm)**2+(target.y_mm-start.y_mm)**2+(target.z_mm-start.z_mm)**2)
+        segments=max(1,int(ceil(distance/900.0)))
+        start_data,target_data=start.to_dict(),target.to_dict()
+        keys=("x_mm","y_mm","z_mm","roll_deg","pitch_deg","yaw_deg")
+        self.twin.update_device("PICK_ARM",task=task)
+        for segment in range(1,segments+1):
+            fraction=segment/segments
+            pose={key:float(start_data[key])+(float(target_data[key])-float(start_data[key]))*fraction for key in keys}
+            self.twin.set_attached_cargo_world_pose("PICK_ARM",pose)
+            robot_pose=((self.twin.snapshot().get("devices") or {}).get("PICK_ARM") or {}).get("pose") or {}
+            self._notify_motion("PICK_ARM",robot_pose,task)
+        return {"success":True,"task":task,"trajectory_segments":segments,"cargo_pose":target.to_dict()}
+
+    @staticmethod
+    def _load_json(path: Path):
+        try:
+            return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        except Exception:
+            return {}
+
+    def _camera_for_role(self, role: str, default: str):
+        return str((self.device_config.get("camera_roles") or {}).get(role, default))
+
+    @property
+    def is_first_round(self): return self.round_index == 0
+    @property
+    def steps(self): return self.FIRST_STEPS if self.is_first_round else self.REPEAT_STEPS
+    @property
+    def current_step(self):
+        if self.finished: return ("DONE", "全部货物装载完成")
+        return self.steps[min(self.step_index, len(self.steps)-1)]
+    @property
+    def current_cargo(self): return self.queue[self.round_index] if 0 <= self.round_index < len(self.queue) else None
+
+    def set_plan(self, items):
+        self.queue=[]; seq=0
+        for item in items:
+            qty=max(1,int(item.get("quantity",1)))
+            for unit in range(1,qty+1):
+                seq+=1; c=deepcopy(item); c["unit_index"]=unit; c["sequence"]=seq
+                c["instance_id"]=f"{c.get('cargo_code','CARGO')}-{unit:03d}-{seq:03d}"
+                inventory_base=c.get("inventory_id") or c.get("stock_id")
+                c["inventory_id"]=str(f"{inventory_base}-{unit:03d}" if inventory_base and qty>1 else (inventory_base or f"STOCK-{uuid4().hex[:12].upper()}"))
+                self.queue.append(c)
+        # All task cargo exists from the initial scene. Pickup and the one-pass
+        # camera route start at the left tail. Target-side selection begins only
+        # after the placement target has been locked.
+        # Explicit task/recognition poses remain authoritative when supplied.
+        for index, cargo in enumerate(self.queue):
+            cargo.setdefault("pose", {
+                "x_mm": -2400.0,
+                "y_mm": 1000.0 - index * max(1450.0, float(cargo.get("width_mm", 1000) or 1000) + 350.0),
+                "z_mm": 0.0,
+                "roll_deg": 0.0, "pitch_deg": 0.0, "yaw_deg": -90.0,
+            })
+            cargo["status"] = "STAGED"
+            cargo["attached_to"] = None
+            cargo["attachment"] = None
+        self.reset(keep_plan=True)
+        self.vehicle_db.register_inventory(self.queue)
+
+    def set_debug_inputs(self, values: Dict[str, Any]):
+        self.debug_inputs=deepcopy(values or {})
+        if hasattr(self.radar,"set_point_cloud_path"):
+            self.radar.set_point_cloud_path(self.debug_inputs.get("point_cloud_path", ""))
+        pallet_rgb=self.debug_inputs.get("pallet_rgb", ""); pallet_depth=self.debug_inputs.get("pallet_depth", "")
+        if pallet_rgb and hasattr(self.camera,"set_tagged_image"):
+            self.camera.set_tagged_image("pallet_hole",pallet_rgb)
+        if pallet_depth and hasattr(self.camera,"set_tagged_depth"):
+            self.camera.set_tagged_depth("pallet_hole",pallet_depth)
+        for tag,path in (self.debug_inputs.get("images") or {}).items():
+            if hasattr(self.camera,"set_tagged_image"): self.camera.set_tagged_image(tag,path)
+        for tag,path in (self.debug_inputs.get("corner_images") or {}).items():
+            if hasattr(self.camera,"set_tagged_image"): self.camera.set_tagged_image(tag,path)
+        for tag,path in (self.debug_inputs.get("corner_depths") or {}).items():
+            if hasattr(self.camera,"set_tagged_depth"): self.camera.set_tagged_depth(tag,path)
+        for tag,path in (self.debug_inputs.get("depths") or {}).items():
+            if hasattr(self.camera,"set_tagged_depth"): self.camera.set_tagged_depth(tag,path)
+
+    def default_debug_inputs(self):
+        return self.module_evidence.example_debug_inputs()
+
+    def _evidence(self, module_id: str, inputs: Dict[str, Any], output: Any, started: float,
+                  model_invoked: bool = False, note: str = "", status: str | None = None):
+        final_status=status or ("SUCCESS" if isinstance(output,Mapping) and output.get("success",True) else "FAILED")
+        evidence=self.module_evidence.record(
+            module_id,inputs,output,(perf_counter()-started)*1000.0,
+            status=final_status,model_invoked=model_invoked,used_by_flow=True,note=note,
+        )
+        if self.loading_session_id:
+            self.vehicle_db.record_module_run(
+                self.loading_session_id,evidence,
+                str((self.current_cargo or {}).get("instance_id") or ""),
+            )
+        return evidence
+
+    def reset(self, keep_plan=False):
+        if getattr(self,"loading_session_id","") and not self.finished:
+            self.vehicle_db.finish_session(self.loading_session_id,"RESET","用户重置或重新加载装载计划")
+        q=deepcopy(self.queue) if keep_plan else []
+        self.twin.reset(); self.queue=q; self.completed=[]; self.round_index=0; self.step_index=0
+        self.running=False; self.finished=False; self.round_data={}; self.results=[]; self.truck_initialized=False
+        self.space.reset()
+        self.loading_session_id=""; self._db_message_cursor=0
+        self.twin.set_cargo_inventory(self.queue)
+        self._save()
+
+    def start(self):
+        if not self.queue: raise RuntimeError("装载计划为空")
+        if not self.loading_session_id:
+            truck=self.twin.snapshot().get("truck") or {}
+            first=self.queue[0] if self.queue else {}
+            task_code=str(first.get("task_code") or first.get("task_id") or "")
+            self.loading_session_id=self.vehicle_db.start_session(truck,self.queue,task_code)
+        self.running=True; self.finished=False; self._load_cargo_to_twin(); self._persist_database_snapshot(); return self.snapshot()
+
+    def _load_cargo_to_twin(self):
+        cargo_id=(self.current_cargo or {}).get("instance_id")
+        inventory=self.twin.snapshot().get("cargo_inventory") or []
+        c=deepcopy(next((item for item in inventory if item.get("instance_id")==cargo_id),self.current_cargo or {}))
+        c["status"]="CURRENT"; self.twin.set_cargo(c); self.twin.set_phase(self.current_step[1],self.round_index+1)
+
+    def _record(self, code, name, status, message, data=None):
+        rec={"time":datetime.now().isoformat(timespec="seconds"),"round":self.round_index+1,"step_code":code,"step_name":name,"status":status,"cargo_id":(self.current_cargo or {}).get("instance_id"),"message":str(message),"data":deepcopy(data)}
+        self.results.append(rec); self.twin.add_result(rec); self.twin.add_message(code,status.upper(),message,data)
+        if self.loading_session_id:
+            self.vehicle_db.record_step(self.loading_session_id,rec)
+            twin=self.twin.snapshot()
+            if code=="INITIAL_SPACE_PLAN" and isinstance(data,Mapping):
+                self.vehicle_db.record_board_snapshot(self.loading_session_id,self.round_index+1,twin.get("truck") or {},data.get("geometry") or {})
+            if code=="PLACE" and status=="success" and isinstance(data,Mapping):
+                self.vehicle_db.record_placement(self.loading_session_id,self.round_index+1,rec.get("cargo_id") or "",data)
+            self._persist_database_snapshot(twin)
+        self._save(); return rec
+
+    def _persist_database_snapshot(self,twin=None):
+        if not self.loading_session_id: return
+        twin=twin or self.twin.snapshot()
+        self.vehicle_db.sync_state(self.loading_session_id,twin)
+        messages=list(twin.get("messages") or [])
+        if self._db_message_cursor>len(messages): self._db_message_cursor=0
+        self.vehicle_db.record_messages(self.loading_session_id,messages[self._db_message_cursor:])
+        self._db_message_cursor=len(messages)
+
+    def _capture_rgb(self, camera_id: str, tag: str, required=True):
+        cap=self.camera.capture_rgb(camera_id,tag=tag)
+        if not cap.get("success") and self.allow_demo and tag == "pre_pick_offset":
+            demo_path=ensure_demo_pre_pick_image()
+            cap={
+                "success":True,
+                "camera_id":camera_id,
+                "tag":tag,
+                "camera_world_pose":self.twin.camera_world_pose(camera_id),
+                "image_path":str(demo_path),
+                "demo":True,
+                "source":"generated_demo_image",
+            }
+        if required and not cap.get("success"): raise RuntimeError(f"{camera_id} 未取得 {tag} JPG")
+        return cap
+
+    def _capture_rgbd(self, camera_id: str, tag: str):
+        cap=self.camera.capture_rgbd(camera_id,tag=tag)
+        if not cap.get("success"): raise RuntimeError(f"{camera_id} 未取得 {tag} 的 RGB + 对齐深度")
+        return cap
+
+    def _pre_pick_offset(self):
+        cam=self._camera_for_role("pre_pick_offset","CAM_PICK")
+        cap=self._capture_rgb(cam,"pre_pick_offset",required=True)
+        started=perf_counter(); result=self.algorithms.pre_pick_offset(cap["image_path"],self.current_cargo)
+        self._evidence("PALLET_OVERHANG_PRE",{"image_path":cap["image_path"],"cargo_id":self.current_cargo.get("instance_id")},result,started)
+        if cap.get("demo"):
+            result["demo_input"]=True
+            result["input_source"]=cap.get("source")
+            result["message"]="联调示例图（非相机实拍）："+str(result.get("message") or "偏移分析完成")
+        self.round_data["pre_pick_offset"]=result
+        status="SUCCESS" if result.get("should_fork") else "FAILED"
+        self.plc.send_message("PALLET_OFFSET_PRE_PICK",status,result.get("message",status),result)
+        if not result.get("should_fork"): raise RuntimeError(result.get("message") or "插取前偏移不合格")
+        return result
+
+    def _pick_task(self):
+        if self.round_data.get("pick_result",{}).get("success"): return self.round_data["pick_result"]
+        self.twin.set_parallel("pick","RUNNING","3.1 插孔定位/插取中")
+        pick_cfg=((self.device_config.get("robots") or {}).get("PICK_ARM") or {})
+        cargo_mount=pick_cfg.get("cargo_mount_pose") or {
+            "x_mm":0.0,"y_mm":1100.0,"z_mm":-350.0,
+            "roll_deg":0.0,"pitch_deg":0.0,"yaw_deg":0.0,
+        }
+        staged_pose=Pose6D.from_any((self.twin.snapshot().get("cargo") or {}).get("pose"))
+        pickup_tool=parent_pose_for_child(staged_pose,Pose6D.from_any(cargo_mount)).to_dict()
+        approach=deepcopy(pickup_tool); approach["z_mm"]+=700.0
+        self.robot.move_tool_world("PICK_ARM",approach,"MOVE_TO_TAIL_STAGED_CARGO")
+        self.robot.move_tool_world("PICK_ARM",pickup_tool,"FIND_PALLET_HOLE")
+        cam=self._camera_for_role("pallet_hole","CAM_PICK")
+        cap=self.camera.capture_rgbd(cam,tag="pallet_hole")
+        if cap.get("success"):
+            started=perf_counter(); hole=self.algorithms.pallet_hole_recognize(cap["rgb_path"],cap["depth_path"],self.current_cargo)
+            self._evidence("PALLET_HOLE_YOLO",{"rgb_path":cap["rgb_path"],"depth_path":cap["depth_path"]},hole,started,model_invoked=True)
+        elif self.allow_demo:
+            hole={"success":True,"demo":True,"left_xyz_mm":[-120,0,1000],"right_xyz_mm":[120,0,1000],"message":"插孔联调数据"}
+            started=perf_counter(); self._evidence("PALLET_HOLE_YOLO",{"rgb_path":"","depth_path":""},hole,started,model_invoked=False,note="未取得RGB-D，模型未调用，使用联调插孔数据",status="FALLBACK")
+        else:
+            hole={"success":False,"message":"缺少插孔RGB-D"}
+        if not hole.get("success"):
+            result={"success":False,"message":hole.get("message","插孔定位失败"),"hole_result":hole}
+        else:
+            # 插孔算法输出相机坐标；相机挂在PICK_ARM上，使用拍摄时动态相机WORLD位姿转换后再送PLC。
+            try:
+                import numpy as np
+                T = self.calibration.dynamic_camera_world_matrix(cap.get("camera_world_pose") or self.twin.camera_world_pose(cam))
+                for side in ("left", "right"):
+                    xyz = hole.get(f"{side}_xyz_mm")
+                    if xyz is not None:
+                        q = self.calibration.transform_point(T, xyz)
+                        hole[f"{side}_world_xyz_mm"] = [float(x) for x in q]
+                hole["world_coordinate_frame"] = "world"
+            except Exception as exc:
+                hole["world_transform_warning"] = str(exc)
+            fork=self.robot.fork_pallet(hole)
+            result={"success":bool(fork.get("success")),"message":fork.get("message"),"hole_result":hole,"fork_result":fork}
+            if result["success"]:
+                # 3.1完成后货物/托盘成为PICK_ARM的刚性载荷；后续任何
+                # PICK_ARM位姿变化都必须同步更新货物WORLD位姿。
+                result["cargo_attachment"]=self.twin.attach_cargo("PICK_ARM",cargo_mount)
+                lift_pose=deepcopy(pickup_tool); lift_pose["z_mm"]+=850.0
+                result["lift_move"]=self.robot.move_tool_world("PICK_ARM",lift_pose,"LIFT_STAGED_CARGO")
+                result["message"]="托盘插取完成，货物已绑定 PICK_ARM 并进入随动运载状态"
+        self.round_data["pick_result"]=result
+        status="SUCCESS" if result.get("success") else "FAILED"
+        self.twin.set_parallel("pick",status,result.get("message",""),result); self.plc.send_message("PALLET_PICK",status,result.get("message",""),result)
+        return result
+
+    @staticmethod
+    def _point_dict(v):
+        if isinstance(v,Mapping): return {"x":float(v.get("x",v.get("x_mm",0))),"y":float(v.get("y",v.get("y_mm",0))),"z":float(v.get("z",v.get("z_mm",0)))}
+        return {"x":float(v[0]),"y":float(v[1]),"z":float(v[2])}
+
+    @staticmethod
+    def _avg_point(a,b):
+        return {k:0.5*(float(a[k])+float(b[k])) for k in ("x","y","z")}
+
+    def _normalize_radar_result(self, raw: Dict[str,Any]) -> Dict[str,Any]:
+        r=deepcopy(raw); frame=str(r.get("coordinate_frame") or "world").lower()
+        world_raw=r.get("world_points") or {}
+        ids=[str(x) for x in (r.get("corner_ids") or list(world_raw))]
+        if not world_raw and isinstance(r.get("corner_points"),list):
+            for item in r["corner_points"]:
+                if isinstance(item,Mapping) and item.get("name"): world_raw[str(item["name"])]=item
+            ids=[str(x) for x in (r.get("corner_ids") or list(world_raw))]
+        world={}
+        for pid in ids:
+            if pid not in world_raw: continue
+            p=self._point_dict(world_raw[pid])
+            if frame not in {"world","radar_world"}:
+                q=self.calibration.lidar_point_to_world([p["x"],p["y"],p["z"]]); p={"x":float(q[0]),"y":float(q[1]),"z":float(q[2])}
+            world[pid]=p
+        ids=[i for i in ids if i in world]
+        collapsed=False
+        if len(ids)==8 and all(f"P{i}" in world for i in range(1,9)):
+            # 兼容旧点云模块8点输出，但仅压缩为“6个相机搜索粗点”。最终高低板仍由相机6点判断。
+            old=deepcopy(world)
+            world={
+                "P1":old["P1"],"P2":old["P2"],
+                "P3":self._avg_point(old["P3"],old["P5"]),
+                "P4":self._avg_point(old["P4"],old["P6"]),
+                "P5":old["P7"],"P6":old["P8"],
+            }; ids=[f"P{i}" for i in range(1,7)]; collapsed=True
+        if len(ids) not in {4,6}: raise RuntimeError(f"雷达找车必须输出4或6个粗角点（旧8点可自动压缩），当前：{ids}")
+        return {
+            "success":True,"message":r.get("message","雷达找车完成"),"coordinate_frame":"world","coordinate_unit":"mm",
+            "corner_ids":ids,"world_points":world,"coarse_only":True,"collapsed_from_8_points":collapsed,
+            "raw_radar_reference":{k:deepcopy(r.get(k)) for k in ("board_mode","boards","first_workface_loading_plan")},
+            "final_board_judgement_source":"camera_not_radar",
+        }
+
+    def _radar_task(self):
+        if self.round_data.get("radar_result",{}).get("success"): return self.round_data["radar_result"]
+        self.twin.set_parallel("radar","RUNNING","3.2 雷达找车中")
+        locate=self.radar.locate_truck(self.current_cargo)
+        started=perf_counter(); raw_result=self.algorithms.radar_process(locate,self.current_cargo) if locate.get("success") else locate
+        model_invoked=bool(locate.get("pcd_path"))
+        example_only=bool(model_invoked and self.debug_inputs.get("point_cloud_example_only"))
+        self._evidence("POINTNET_TRUCK",{"pcd_path":locate.get("pcd_path","") ,"example_only":example_only},raw_result,started,model_invoked=model_invoked,note=("离线PCD已完成真实推理；因不属于当前场景标定，仅展示输入输出，不将其坐标发送给机械臂" if example_only else "雷达仅用于相机粗搜索；最终板型由相机角点判断") if model_invoked else "无PCD，PointNet++未调用",status="SUCCESS" if raw_result.get("success") else "FAILED")
+        if example_only:
+            raw_result={
+                "success":True,"demo":True,
+                "message":"PointNet++离线示例已实际调用；当前场景运动继续使用已标定的4个联调粗点",
+                "coordinate_frame":"world","coordinate_unit":"mm",
+                "corner_ids":["P1","P2","P3","P4"],
+                "world_points":{
+                    "P1":{"x":-1250,"y":3000,"z":1450}, "P2":{"x":1250,"y":3000,"z":1450},
+                    "P3":{"x":-1250,"y":15000,"z":1450}, "P4":{"x":1250,"y":15000,"z":1450},
+                },
+                "pointnet_example_reference":{
+                    "pcd_path":locate.get("pcd_path"),"result_json_path":raw_result.get("result_json_path"),
+                    "checkpoint_path":raw_result.get("checkpoint_path"),"board_count":raw_result.get("board_count"),
+                    "corner_ids":raw_result.get("corner_ids"),"timing":raw_result.get("timing"),
+                },
+            }
+        result=raw_result
+        if result.get("success"): result=self._normalize_radar_result(result)
+        self.round_data["radar_result"]=result
+        status="SUCCESS" if result.get("success") else "FAILED"
+        self.twin.set_parallel("radar",status,result.get("message",""),result); self.plc.send_message("RADAR_LOCATE",status,result.get("message",""),result)
+        return result
+
+    def _parallel_locate(self):
+        need_pick=not self.round_data.get("pick_result",{}).get("success")
+        need_radar=not self.round_data.get("radar_result",{}).get("success")
+        # Radar remains concurrent, but the robot branch runs on the caller/UI
+        # thread so every interpolated pose is rendered in order instead of a
+        # worker queue collapsing into the final position.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            fr=pool.submit(self._radar_task) if need_radar else None
+            pick=self._pick_task() if need_pick else self.round_data["pick_result"]
+            radar=fr.result() if fr else self.round_data["radar_result"]
+        summary={"pick":"SUCCESS" if pick.get("success") else "FAILED","radar":"SUCCESS" if radar.get("success") else "FAILED","pick_result":pick,"radar_result":radar}
+        # 四种组合均已分别发送PLC message；成功分支会被保留，下一次只重试失败分支。
+        if not pick.get("success") or not radar.get("success"):
+            raise RuntimeError(f"并行结果：插取={summary['pick']}，雷达={summary['radar']}；已保留成功分支，下一次只重试失败分支")
+        return summary
+
+    def _radar_to_camera(self):
+        radar=self.round_data["radar_result"]; assignments={}
+        points=radar["world_points"]
+        endpoint_y=[float(points[pid]["y"]) for pid in radar["corner_ids"]]
+        tail_y,head_y=min(endpoint_y),max(endpoint_y)
+        midpoint=(tail_y+head_y)/2.0
+        group_z={"TAIL":0.0,"HEAD":0.0}
+        for pid in radar["corner_ids"]:
+            p=points[pid]; group="TAIL" if float(p["y"]) <= midpoint else "HEAD"
+            group_z[group]=max(group_z[group],float(p["z"]))
+        for pid in radar["corner_ids"]:
+            p=points[pid]; x,y,z=float(p["x"]),float(p["y"]),float(p["z"])
+            group="TAIL" if y <= midpoint else "HEAD"
+            stop_y=tail_y if group=="TAIL" else head_y
+            # Photography remains one left-side pass: tail shot, then head shot.
+            pose={"x_mm":GANTRY_LEFT_X_MM,"y_mm":stop_y,"z_mm":group_z[group]+500.0,"roll_deg":0,"pitch_deg":0,"yaw_deg":-90.0}
+            assignments[pid]={
+                "robot_id":"PICK_ARM","camera_id":self._camera_for_role("corner","CAM_PICK"),
+                "capture_group":group,"radar_coarse_world_xyz_mm":[x,y,z],
+                "target_robot_pose_world":pose,
+            }
+        cmd=self.plc.send_command("SET_CORNER_CAPTURE_TARGETS",{"corner_count":len(assignments),"capture_count":2,"assignments":assignments})
+        ack=self.plc.wait_ack(cmd["command_id"],int((self.system_config.get("plc") or {}).get("ack_timeout_ms",5000)))
+        if not ack.get("success"): raise RuntimeError("PLC 未确认角点拍摄目标")
+        self.round_data["corner_assignments"]=assignments
+        return {"success":True,"assignments":assignments,"plc_ack":ack}
+
+    def _capture_corners(self):
+        images={}; meta={}; dimgs=self.debug_inputs.get("corner_depths") or {}; rimgs=self.debug_inputs.get("corner_images") or {}
+        assignments=self.round_data["corner_assignments"]
+        groups={name:[pid for pid,a in assignments.items() if a.get("capture_group")==name] for name in ("TAIL","HEAD")}
+        group_captures={}
+        for group in ("TAIL","HEAD"):
+            point_ids=groups[group]
+            if not point_ids: continue
+            first=assignments[point_ids[0]]; tag=f"CORNER_{group}"
+            self.robot.move_tool_world(first["robot_id"],first["target_robot_pose_world"],task=f"CAPTURE_{group}")
+            rgb_input=rimgs.get(group) or next((rimgs.get(pid) for pid in point_ids if rimgs.get(pid)),None)
+            depth_input=dimgs.get(group) or next((dimgs.get(pid) for pid in point_ids if dimgs.get(pid)),None)
+            if rgb_input and hasattr(self.camera,"set_tagged_image"): self.camera.set_tagged_image(tag,rgb_input)
+            if depth_input and hasattr(self.camera,"set_tagged_depth"): self.camera.set_tagged_depth(tag,depth_input)
+            cap=self._capture_rgbd(first["camera_id"],tag); group_captures[group]=deepcopy(cap)
+            for pid in point_ids:
+                a=assignments[pid]
+                # A real endpoint capture remains one physical RGB-D group.
+                # Offline module verification may additionally provide one
+                # labelled example image/depth per Pn so every .pt invocation
+                # has a known input and remains independently auditable.
+                point_rgb=rimgs.get(pid) or cap["rgb_path"]
+                point_depth=dimgs.get(pid) or cap["depth_path"]
+                images[pid]=point_rgb
+                meta[pid]={
+                    "camera_id":a["camera_id"],"capture_group":group,
+                    "camera_world_pose":deepcopy(cap["camera_world_pose"]),
+                    "rgb_path":point_rgb,"depth_path":point_depth,
+                    "depth_mode":(self.system_config.get("camera_corner_world") or {}).get("depth_mode","raw"),
+                    "demo":bool(cap.get("demo")),"source":cap.get("source"),
+                    "example_input":bool(self.debug_inputs.get("corner_inputs_example_only")),
+                    "demo_target_world_xyz_mm":deepcopy(a.get("radar_coarse_world_xyz_mm")),
+                }
+        self.round_data["corner_images"]=images; self.round_data["corner_capture_meta"]=meta
+        self.round_data["corner_group_captures"]=group_captures
+        return {"success":True,"physical_capture_count":len(group_captures),"capture_groups":groups,"image_paths_by_point":images,"capture_meta":meta}
+
+    def _corner_recognition(self):
+        ids=self.round_data["radar_result"]["corner_ids"]
+        meta=self.round_data.get("corner_capture_meta") or {}
+        if self.allow_demo and ids and all((meta.get(pid) or {}).get("demo") for pid in ids):
+            image_points={}
+            for pid in ids:
+                camera_id=meta[pid]["camera_id"]
+                intr=(((self.twin.snapshot().get("cameras") or {}).get(camera_id) or {}).get("intrinsics") or {})
+                image_points[pid]={
+                    "x":float(intr.get("cx",658.0)),"y":float(intr.get("cy",374.0)),
+                    "confidence":1.0,"status":"联调示例角点","point_name":pid,
+                    "image":self.round_data["corner_images"][pid],"source":"generated_demo_rgbd",
+                }
+            result={"success":True,"image_points":image_points,"source":"generated_demo_rgbd","message":"缺失角点数据已自动补齐；使用联调 RGB-D 中心标记"}
+        else:
+            started=perf_counter(); result=self.algorithms.corner_image_recognize(self.round_data["corner_images"],ids,self.current_cargo)
+            self._evidence("CORNER_YOLO",{"image_paths_by_point":self.round_data["corner_images"],"corner_ids":ids},result,started,model_invoked=True)
+        if result.get("source")=="generated_demo_rgbd":
+            started=perf_counter(); self._evidence("CORNER_YOLO",{"image_paths_by_point":self.round_data["corner_images"],"corner_ids":ids},result,started,model_invoked=False,note="联调中心点分支，角点.pt未调用",status="FALLBACK")
+        self.round_data["corner_recognition"]=result; return result
+
+    def _camera_to_world(self):
+        ids=self.round_data["radar_result"]["corner_ids"]
+        meta=self.round_data["corner_capture_meta"]
+        if self.allow_demo and ids and all((meta.get(pid) or {}).get("demo") for pid in ids):
+            world={}
+            for pid in ids:
+                xyz=meta[pid].get("demo_target_world_xyz_mm") or [0.0,0.0,0.0]
+                world[pid]={"x":float(xyz[0]),"y":float(xyz[1]),"z":float(xyz[2]),"source":"generated_demo_rgbd"}
+            result={
+                "success":True,"corner_ids":list(ids),"world_points":world,
+                "coordinate_frame":"world","coordinate_unit":"mm","source":"generated_demo_rgbd",
+                "message":"联调 RGB-D 已自动补齐；WORLD 角点沿用当前雷达粗点作为模拟相机测量值",
+                "production_warning":"该分支仅用于界面/流程联调，真实运行仍使用像素+深度+动态外参转换",
+            }
+        elif self.allow_demo and ids and all((meta.get(pid) or {}).get("example_input") for pid in ids):
+            # The bundled JPG/depth pairs are valid model-call examples, but
+            # they are not calibrated to this truck scene. Run the conversion
+            # for auditable I/O, then use the scene's coarse demo corners for
+            # layout so the two-column regions remain on the truck deck.
+            started=perf_counter()
+            converted=self.corner_world.convert(
+                (self.round_data["corner_recognition"].get("image_points") or {}),
+                meta,
+                self.round_data["radar_result"],
+                depth_mode=(self.system_config.get("camera_corner_world") or {}).get("depth_mode","raw"),
+            )
+            world={}
+            for pid in ids:
+                xyz=meta[pid].get("demo_target_world_xyz_mm") or [0.0,0.0,0.0]
+                world[pid]={"x":float(xyz[0]),"y":float(xyz[1]),"z":float(xyz[2]),"source":"example_rgbd_scene_aligned"}
+            result={
+                "success":True,"corner_ids":list(ids),"world_points":world,
+                "coordinate_frame":"world","coordinate_unit":"mm","source":"example_rgbd_scene_aligned",
+                "message":"联调示例 RGB-D 已完成转换调用；场景区域使用当前车辆粗点对齐，保持在车板两列内",
+                "raw_example_conversion":converted,
+                "production_warning":"示例图片/深度不属于当前车辆标定，正式运行不启用场景对齐分支",
+            }
+            self._evidence(
+                "CAMERA_WORLD",
+                {"image_points":self.round_data["corner_recognition"].get("image_points"),"capture_meta":meta,"scene_alignment_reference":self.round_data["radar_result"].get("world_points")},
+                result,started,note="示例RGB-D完成转换调用，但布局使用当前车辆粗点防止示例标定混入场景",status="FALLBACK",
+            )
+        else:
+            started=perf_counter()
+            result=self.corner_world.convert(
+                (self.round_data["corner_recognition"].get("image_points") or {}),
+                meta,
+                self.round_data["radar_result"],
+                depth_mode=(self.system_config.get("camera_corner_world") or {}).get("depth_mode","raw"),
+            )
+            self._evidence("CAMERA_WORLD",{"image_points":self.round_data["corner_recognition"].get("image_points"),"capture_meta":meta},result,started)
+        if result.get("source")=="generated_demo_rgbd":
+            started=perf_counter(); self._evidence("CAMERA_WORLD",{"capture_meta":meta},result,started,note="联调分支沿用雷达粗点，不是正式像素深度转换",status="FALLBACK")
+        self.round_data["camera_world_corners"]=result
+        self.twin.update_truck(corners=result["world_points"])
+        return result
+
+    def _initial_space_plan(self):
+        camera_result=self.round_data["camera_world_corners"]
+        started=perf_counter(); geometry=self.board_geometry.analyze(camera_result["world_points"],camera_result["corner_ids"])
+        snap=self.space.initialize_from_camera_geometry(geometry); self.truck_initialized=True
+        self.round_data["camera_board_geometry"]=geometry
+        self.twin.update_truck(board_mode=geometry["board_mode"],camera_board_geometry=geometry,regions=snap["regions"],occupied=snap["occupied"],available=snap["available"],remaining_space={"available_count":len(snap["available"]),"borrow_plan":snap.get("borrow_plan")})
+        result={"success":True,"geometry":geometry,"space":snap,"radar_used_for_board_judgement":False}
+        self._evidence("BOARD_GEOMETRY_PLAN",{"world_points":camera_result["world_points"],"corner_ids":camera_result["corner_ids"]},result,started)
+        return result
+
+    def _side_for_target(self, target):
+        target=target or {}
+        column=str(target.get("column") or "").strip().upper()
+        pose=target.get("final_world_pose") or target.get("nominal_world_pose") or {}
+        # Camera corner ordering can swap A/B labels, so select the physical
+        # rail from the target's WORLD X relative to the truck centre. Column
+        # is only a fallback for incomplete external targets.
+        truck_pose=((self.twin.snapshot().get("truck") or {}).get("pose") or {})
+        truck_x=float(truck_pose.get("x_mm",0.0) or 0.0)
+        if "x_mm" in pose or "x" in pose:
+            target_x=float(pose.get("x_mm",pose.get("x",0.0)) or 0.0)
+            right_side=target_x>truck_x
+        else:
+            right_side=column=="B"
+        outer_x=GANTRY_RIGHT_X_MM if right_side else GANTRY_LEFT_X_MM
+        yaw=90.0 if right_side else -90.0
+        return "PICK_ARM",self._camera_for_role("neighbor","CAM_PICK"),outer_x,yaw
+
+    @staticmethod
+    def _side_name(outer_x: float) -> str:
+        return "RIGHT" if float(outer_x)>0.0 else "LEFT"
+
+    def _move_gantry_to_target_side(self, target, target_z_mm: float, task: str, pitch_deg: float = 0.0):
+        """Travel on the two-rail gantry and lower on the selected side."""
+        rid,cam,outer_x,yaw=self._side_for_target(target)
+        pose=(target or {}).get("final_world_pose") or (target or {}).get("nominal_world_pose") or {}
+        target_y=float(pose.get("y_mm",0.0) or 0.0)
+        current=Pose6D.from_any((((self.twin.snapshot().get("devices") or {}).get(rid) or {}).get("pose") or {}))
+        clearance=max(GANTRY_CLEARANCE_Z_MM,float(target_z_mm)+350.0,current.z_mm)
+        side=self._side_name(outer_x); moves=[]
+
+        def move(pose_data, phase):
+            result=self.robot.move_tool_world(rid,pose_data,task=f"{task}_{phase}")
+            moves.append(result)
+            if not result.get("success"):
+                raise RuntimeError(result.get("message") or f"龙门架{phase}运动失败")
+
+        if abs(current.z_mm-clearance)>1.0:
+            move({"x_mm":current.x_mm,"y_mm":current.y_mm,"z_mm":clearance,"roll_deg":0.0,"pitch_deg":0.0,"yaw_deg":current.yaw_deg},"LIFT_CLEARANCE")
+        if abs(current.y_mm-target_y)>1.0:
+            move({"x_mm":current.x_mm,"y_mm":target_y,"z_mm":clearance,"roll_deg":0.0,"pitch_deg":0.0,"yaw_deg":current.yaw_deg},"LONGITUDINAL")
+        if abs(current.x_mm-outer_x)>1.0 or abs(current.yaw_deg-yaw)>1.0:
+            move({"x_mm":outer_x,"y_mm":target_y,"z_mm":clearance,"roll_deg":0.0,"pitch_deg":0.0,"yaw_deg":yaw},f"CROSSBEAM_TO_{side}")
+        lower={"x_mm":outer_x,"y_mm":target_y,"z_mm":float(target_z_mm),"roll_deg":0.0,"pitch_deg":float(pitch_deg),"yaw_deg":yaw}
+        move(lower,f"LOWER_{side}")
+        return {"success":True,"robot_id":rid,"camera_id":cam,"selected_side":side,"rail_x_mm":outer_x,"yaw_deg":yaw,"moves":moves,"final_pose":lower}
+
+    def _neighbor_pose(self):
+        started=perf_counter()
+        tentative=self.space.peek_next_target(self.current_cargo)
+        occupied=self.space.snapshot().get("occupied") or []
+        if not occupied:
+            result={"success":True,"source":"no_neighbor_first_position","compensation_world_mm":{"dx":0.0,"dy":0.0,"dz":0.0,"dyaw_deg":0.0},"message":"目标附近尚无已放托盘，8.2补偿为0"}
+        else:
+            rid,cam,outer_x,yaw=self._side_for_target(tentative); p=tentative["nominal_world_pose"]
+            gantry_move=self._move_gantry_to_target_side(tentative,float(p["z_mm"])+500.0,"NEIGHBOR_PALLET_POSE")
+            cap=self.camera.capture_rgb(cam,tag="neighbor_pose")
+            dbg=self.debug_inputs.get("neighbor_pose_measurement")
+            if not cap.get("success") and not self.allow_demo: raise RuntimeError("8.2 未取得临近托盘姿态 JPG")
+            result=self.neighbor_pose.analyze(cap.get("image_path",""),tentative,dbg)
+            result["camera_id"]=cam; result["camera_world_pose"]=cap.get("camera_world_pose")
+            result["gantry_move"]=gantry_move; result["selected_side"]=self._side_name(outer_x)
+        self.round_data["neighbor_pose"]=result; self.round_data["tentative_target"]=tentative
+        self._evidence("NEIGHBOR_POSE",{"image_path":result.get("image_path","") ,"target":tentative,"measurement":self.debug_inputs.get("neighbor_pose_measurement")},result,started,note="该接口当前没有正式视觉权重；有输入时消费外部/离线测量")
+        self.plc.send_message("NEIGHBOR_PALLET_POSE","SUCCESS",result.get("message",""),result)
+        return {"success":True,"tentative_target":tentative,"neighbor_pose":result}
+
+    def _target_confirm(self):
+        if not self.truck_initialized: raise RuntimeError("首轮相机车板模型尚未初始化")
+        started=perf_counter(); target=self.space.confirm_target(self.round_data.get("neighbor_pose"),first=(self.round_index==0),cargo=self.current_cargo)
+        self.round_data["placement_target"]=target
+        snap=self.space.snapshot(); self.twin.update_truck(current_target=target,regions=snap["regions"],occupied=snap["occupied"],available=snap["available"])
+        result={"success":True,"target":target,"message":"已依据可用空间、历史反馈和8.2临近托盘补偿锁定本轮目标"}
+        self._evidence("SPACE_TARGET",{"space":snap,"neighbor_pose":self.round_data.get("neighbor_pose"),"cargo":self.current_cargo},result,started)
+        return result
+
+    def _dynamic_monitor(self, phase: str):
+        target=self.round_data.get("placement_target") or {}
+        rid,cam,outer_x,yaw=self._side_for_target(target)
+        pose=target.get("final_world_pose") or {}
+        task="PRE_PLACE_DYNAMIC_MONITOR" if phase=="pre_place" else "POST_PLACE_BOTTOM_PALLET_DETECT"
+        gantry_move=self._move_gantry_to_target_side(target,float(pose.get("z_mm",0.0))+650.0,task,pitch_deg=-10.0)
+        tag="pre_place_monitor" if phase=="pre_place" else "post_place_bottom_pallet"
+        cap=self._capture_rgbd(cam,tag)
+        camera_path=self.debug_inputs.get("dynamic_camera_path") or str(PROJECT_ROOT/"examples"/"dynamic_monitoring"/"camera.json")
+        started=perf_counter(); result=self.dynamic_monitoring.analyze(
+            cap["rgb_path"],cap["depth_path"],camera_path,phase,
+            (self.current_cargo or {}).get("instance_id","cargo"),
+        )
+        result["gantry_move"]=gantry_move; result["selected_side"]=self._side_name(outer_x)
+        module_id="DYNAMIC_PRE_PLACE" if phase=="pre_place" else "DYNAMIC_POST_PLACE"
+        self._evidence(module_id,{"rgb_path":cap["rgb_path"],"depth_path":cap["depth_path"],"camera_path":camera_path,"camera_world_pose":cap.get("camera_world_pose")},result,started)
+        key="pre_place_monitor" if phase=="pre_place" else "post_place_bottom_pallet"
+        self.round_data[key]=result
+        self.plc.send_message(module_id,"SUCCESS",result.get("message","动态监测完成"),result)
+        return result
+
+    def _place(self):
+        target=self.round_data.get("placement_target")
+        if not target: raise RuntimeError("缺少8.3锁定的放置目标")
+        cmd=self.plc.send_command("SET_PLACE_POINT",target); ack=self.plc.wait_ack(cmd["command_id"],int((self.system_config.get("plc") or {}).get("ack_timeout_ms",5000)))
+        if not ack.get("success"): raise RuntimeError("PLC 未确认最终放置点")
+        final_cargo_pose=deepcopy(target.get("final_world_pose") or {})
+        if not final_cargo_pose: raise RuntimeError("8.3目标缺少最终货物WORLD位姿")
+        carry_move=self._move_gantry_to_target_side(
+            target,float(final_cargo_pose.get("z_mm",0.0))+1200.0,
+            "CARRY_TO_PLACEMENT_SIDE",
+        )
+        approach_cargo_pose=deepcopy(final_cargo_pose)
+        approach_cargo_pose["z_mm"]=float(approach_cargo_pose.get("z_mm",0.0))+700.0
+        extend_move=self._move_attached_cargo_world(approach_cargo_pose,"EXTEND_CARGO_FROM_OUTSIDE_TO_TARGET")
+        lower_move=self._move_attached_cargo_world(final_cargo_pose,"LOWER_CARGO_TO_TARGET")
+        if not lower_move.get("success"): raise RuntimeError(lower_move.get("message","货物下降到目标失败"))
+        result=self.robot.place(self.current_cargo,target)
+        if not result.get("success"): raise RuntimeError(result.get("message","放置失败"))
+        placed_cargo=self.twin.detach_cargo(final_cargo_pose,"PLACED")
+        self.twin.update_device("PICK_ARM",task="CARGO_RELEASED")
+        self.round_data["place_result"]=result
+        return {"success":True,"target":target,"selected_side":carry_move["selected_side"],"plc_ack":ack,"carry_move":carry_move,"extend_move":extend_move,"lower_move":lower_move,"place_result":result,"placed_cargo":placed_cargo}
+
+    def _post_region(self):
+        started=perf_counter()
+        target=self.round_data["placement_target"]; rid,cam,outer_x,yaw=self._side_for_target(target); p=target["final_world_pose"]
+        gantry_move=self._move_gantry_to_target_side(target,float(p["z_mm"])+500.0,"PALLET_BOARD_REGION_DEVIATION",pitch_deg=-10.0)
+        cap=self.camera.capture_rgb(cam,tag="region_deviation")
+        if not cap.get("success") and not self.allow_demo: raise RuntimeError("10.1 未取得托盘-车板区域偏差 JPG")
+        dev=self.region_deviation.analyze(cap.get("image_path",""),target,self.debug_inputs.get("post_region_measurement"))
+        # 两个相邻面观测：侧边到位 -> 向车板内侧伸入。
+        imgs=self.debug_inputs.get("images") or {}
+        if imgs.get("face_a") and hasattr(self.camera,"set_tagged_image"): self.camera.set_tagged_image("face_a",imgs["face_a"])
+        if imgs.get("face_b") and hasattr(self.camera,"set_tagged_image"): self.camera.set_tagged_image("face_b",imgs["face_b"])
+        faces=self.two_face.observe(self.current_cargo,target)
+        result={"success":True,"region_deviation":dev,"two_face_observation":faces,"camera_id":cam,"selected_side":self._side_name(outer_x),"gantry_move":gantry_move}
+        self._evidence("REGION_DEVIATION",{"image_path":cap.get("image_path","") ,"target":target,"measurement":self.debug_inputs.get("post_region_measurement")},dev,started,note="该接口当前没有正式视觉权重；示例消费外部测量")
+        self._evidence("TWO_FACE_CAPTURE",{"face_a":faces.get("face_a"),"face_b":faces.get("face_b"),"target":target},faces,started,note="当前只完成两个相邻面采集，没有识别模型")
+        self.round_data["post_region"]=result; self.plc.send_message("PALLET_BOARD_REGION_DEVIATION","SUCCESS",dev.get("message",""),dev); return result
+
+    def _post_cargo_offset(self):
+        target=self.round_data["placement_target"]; rid,cam,outer_x,yaw=self._side_for_target(target)
+        p=target["final_world_pose"]
+        gantry_move=self._move_gantry_to_target_side(target,float(p["z_mm"])+500.0,"PALLET_CARGO_POST_PLACE_OFFSET",pitch_deg=-10.0)
+        cap=self._capture_rgb(cam,"post_place_offset",required=True)
+        started=perf_counter(); result=self.algorithms.post_place_offset(cap["image_path"],self.current_cargo)
+        self._evidence("PALLET_CARGO_POST",{"image_path":cap["image_path"],"cargo":self.current_cargo},result,started)
+        if cap.get("demo"):
+            result["demo_input"]=True; result["input_source"]=cap.get("source")
+            result["message"]="联调示例图（非相机实拍）："+str(result.get("message") or "放置后偏移分析完成")
+        # 这是相机局部横向补偿量；未做方向标定前不直接写入WORLD XY。
+        signed=result.get("signed_center_offset_mm")
+        result["compensation_camera_horizontal_mm"]=None if signed in (None,"") else -float(signed)
+        result["applied_directly_to_world_next_target"]=False
+        result["selected_side"]=self._side_name(outer_x); result["gantry_move"]=gantry_move
+        self.round_data["post_cargo_offset"]=result
+        self.plc.send_message("PALLET_CARGO_POST_PLACE","SUCCESS",result.get("message",""),result); return result
+
+    def _feedback(self):
+        started=perf_counter()
+        reg=(self.round_data.get("post_region") or {}).get("region_deviation") or {}
+        fb=self.placement_comp.next_feedback_from_region(reg)
+        self.space.set_persistent_feedback(fb); self.twin.set_feedback_compensation(fb["dx"],fb["dy"],fb["dz"])
+        occupied=self.space.occupy_current(self.current_cargo["instance_id"]); snap=self.space.snapshot()
+        self.twin.update_truck(regions=snap["regions"],occupied=snap["occupied"],available=snap["available"],remaining_space={"available_count":len(snap["available"]),"borrow_plan":snap.get("borrow_plan")})
+        cargo_comp=(self.round_data.get("post_cargo_offset") or {}).get("compensation_camera_horizontal_mm")
+        data={"next_pallet_world_compensation_mm":fb,"cargo_on_pallet_camera_horizontal_compensation_mm":cargo_comp,"occupied_region":occupied,"available_count":len(snap["available"])}
+        self.plc.send_message("PLACEMENT_FEEDBACK","SUCCESS","偏差信息已返回PLC并更新下一托盘可用空间",data)
+        result={"success":True,**data}
+        self._evidence("PLACEMENT_FEEDBACK",{"region_result":reg,"post_cargo_offset":self.round_data.get("post_cargo_offset"),"space_before_update":snap},result,started)
+        return result
+
+    def _return(self):
+        # The next round always starts with staged cargo at the left-tail home.
+        # From a right-side placement, first lift, travel to the tail and cross
+        # there; never cut diagonally through the truck/load envelope.
+        home={"column":"A","final_world_pose":{"x_mm":GANTRY_LEFT_X_MM,"y_mm":1000.0,"z_mm":1800.0}}
+        gantry_return=self._move_gantry_to_target_side(home,1800.0,"RETURN_TO_LEFT_TAIL")
+        results=[self.robot.retract("PICK_ARM")]
+        return {"success":all(bool(x.get("success")) for x in results),"selected_side":"LEFT","gantry_return":gantry_return,"robot_returns":results}
+
+    def _advance_round_after_return(self):
+        self.completed.append(deepcopy(self.round_data))
+        self.round_index+=1; self.step_index=0; self.round_data={}
+        if self.round_index>=len(self.queue):
+            self.finished=True; self.running=False
+            return {"finished":True}
+        self._load_cargo_to_twin()
+        return {"finished":False,"next_round_skips":["3.2 RADAR","4 RADAR_TO_CAMERA","5 CAPTURE_CORNERS","6 CORNER_RECOGNITION","7 CAMERA_TO_WORLD","8.1 INITIAL_SPACE_PLAN"]}
+
+    def execute_next(self):
+        if self.finished: return self.snapshot()
+        if not self.running: self.start()
+        code,name=self.current_step; self.twin.set_phase(name,self.round_index+1)
+        try:
+            if code=="PRE_PICK_OFFSET": data=self._pre_pick_offset()
+            elif code=="PARALLEL_LOCATE": data=self._parallel_locate()
+            elif code=="PICK_ONLY":
+                data=self._pick_task()
+                if not data.get("success"): raise RuntimeError(data.get("message","插取失败"))
+            elif code=="RADAR_TO_CAMERA": data=self._radar_to_camera()
+            elif code=="CAPTURE_CORNERS": data=self._capture_corners()
+            elif code=="CORNER_RECOGNITION": data=self._corner_recognition()
+            elif code=="CAMERA_TO_WORLD": data=self._camera_to_world()
+            elif code=="INITIAL_SPACE_PLAN": data=self._initial_space_plan()
+            elif code=="NEIGHBOR_POSE": data=self._neighbor_pose()
+            elif code=="TARGET_CONFIRM": data=self._target_confirm()
+            elif code=="PRE_PLACE_MONITOR": data=self._dynamic_monitor("pre_place")
+            elif code=="PLACE": data=self._place()
+            elif code=="POST_PLACE_BOTTOM": data=self._dynamic_monitor("post_place_bottom_pallet")
+            elif code=="POST_REGION": data=self._post_region()
+            elif code=="POST_CARGO_OFFSET": data=self._post_cargo_offset()
+            elif code=="FEEDBACK": data=self._feedback()
+            elif code=="RETURN":
+                data=self._return()
+                if not data.get("success"):
+                    raise RuntimeError("机械臂返回失败")
+                # 先按当前轮保存第12步，再切换到下一轮，避免历史记录轮次错位。
+                self._record(code,name,"success",name,data)
+                advance=self._advance_round_after_return()
+                self._persist_database_snapshot()
+                if advance.get("finished") and self.loading_session_id:
+                    self.vehicle_db.finish_session(self.loading_session_id,"COMPLETED")
+                self._save()
+                return self.snapshot()
+            else: raise RuntimeError(code)
+            self._record(code,name,"success",name,data); self.step_index+=1
+            self.twin.set_alarm(None)
+            self.twin.set_phase(self.current_step[1],self.round_index+1)
+        except Exception as exc:
+            self._record(code,name,"failed",str(exc),{"error":str(exc),"parallel":deepcopy(self.twin.snapshot().get("parallel"))}); self.twin.set_alarm(str(exc)); raise
+        self._save(); return self.snapshot()
+
+    def _save(self):
+        STATE_FILE.parent.mkdir(parents=True,exist_ok=True)
+        STATE_FILE.write_text(json.dumps(self.twin.snapshot(),ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+        RESULT_FILE.write_text(json.dumps({"results":self.results},ensure_ascii=False,indent=2,default=str),encoding="utf-8")
+
+    def snapshot(self):
+        return {"running":self.running,"finished":self.finished,"round":self.round_index+1 if self.queue else 0,"total":len(self.queue),"completed":len(self.completed),"first_round":self.is_first_round,"step_code":self.current_step[0],"step_name":self.current_step[1],"current_cargo":deepcopy(self.current_cargo),"round_data":deepcopy(self.round_data),"twin":self.twin.snapshot(),"results":deepcopy(self.results),"calibration":self.calibration.diagnostic_summary(),"module_evidence":self.module_evidence.snapshot(),"database":{"backend":self.vehicle_db.backend,"location":self.vehicle_db.location,"path":self.vehicle_db.location,"session_id":self.loading_session_id}}

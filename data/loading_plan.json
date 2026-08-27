@@ -1,0 +1,13 @@
+{
+  "items": [
+    {
+      "cargo_code": "CARGO-001",
+      "cargo_name": "示例货物",
+      "quantity": 3,
+      "length_mm": 1200,
+      "width_mm": 1000,
+      "height_mm": 900,
+      "pallet_reference_width_mm": 1200
+    }
+  ]
+}

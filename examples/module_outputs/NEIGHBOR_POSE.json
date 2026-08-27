@@ -1,0 +1,1 @@
+{"status":"EXTERNAL_EXAMPLE","success":true,"source":"external_or_debug_measurement","compensation_world_mm":{"dx":-4.0,"dy":3.0,"dz":0.0,"dyaw_deg":-0.25},"warning":"当前没有正式视觉模型"}
