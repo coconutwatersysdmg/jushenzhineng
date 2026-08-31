@@ -10,7 +10,7 @@ from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QFrame, QLabel,
     QPushButton, QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QMessageBox,
-    QTabWidget, QToolButton,
+    QTabWidget, QToolButton, QSizePolicy,
 )
 
 from controllers.flow_controller import FlowController
@@ -75,9 +75,16 @@ class MainWindow(QMainWindow):
         body=QWidget(); body_l=QVBoxLayout(body); body_l.setContentsMargins(0,0,0,0); body_l.setSpacing(6); outer.addWidget(body); body.setVisible(expanded)
 
         def _set_expanded(opened):
-            body.setVisible(opened); toggle.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow)
+            body.setVisible(opened)
+            toggle.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow)
             if toggle.isChecked()!=opened: toggle.setChecked(opened)
+            f.setSizePolicy(
+                QSizePolicy.Policy.Preferred,
+                QSizePolicy.Policy.Preferred if opened else QSizePolicy.Policy.Maximum,
+            )
+            f.updateGeometry()
 
+        _set_expanded(expanded)
         toggle.toggled.connect(_set_expanded)
         title_label.mousePressEvent=lambda _event: toggle.setChecked(not toggle.isChecked())
         return f,body_l,toggle
@@ -119,10 +126,10 @@ class MainWindow(QMainWindow):
         main.setStretchFactor(0,2); main.setStretchFactor(1,5); main.setStretchFactor(2,3)
         main.setSizes([320,820,480])
 
-        f,l=self._card("货物 / 托盘实时数据")
+        f,l,_=self._collapsible_card("货物 / 托盘实时数据",expanded=True)
         self.cargo_table=QTableWidget(0,2); self.cargo_table.setHorizontalHeaderLabels(["字段","值"]); self.cargo_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.cargo_table); ll.addWidget(f,1)
 
-        f,l=self._card("车辆 / 相机最终车板 WORLD 数据")
+        f,l,_=self._collapsible_card("车辆 / 相机最终车板 WORLD 数据",expanded=True)
         self.truck_table=QTableWidget(0,2); self.truck_table.setHorizontalHeaderLabels(["字段","值"]); self.truck_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.truck_table)
         self.corner_table=QTableWidget(0,4); self.corner_table.setHorizontalHeaderLabels(["角点","X","Y","Z"]); self.corner_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.corner_table); ll.addWidget(f,2)
 
@@ -139,15 +146,15 @@ class MainWindow(QMainWindow):
         device_page=QWidget(); device_layout=QVBoxLayout(device_page); device_layout.setContentsMargins(5,5,5,5); device_layout.setSpacing(7)
         space_page=QWidget(); space_layout=QVBoxLayout(space_page); space_layout.setContentsMargins(5,5,5,5)
 
-        f,l=self._card("设备 / 单机械臂与挂载相机实时 WORLD 坐标")
+        f,l,_=self._collapsible_card("设备 / 单机械臂与挂载相机实时 WORLD 坐标",expanded=True)
         self.device_table=QTableWidget(0,7); self.device_table.setMinimumHeight(130); self.device_table.setHorizontalHeaderLabels(["设备","类型","父设备","状态","WORLD XYZ","RPY","当前动作"]); self.device_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); self.device_table.horizontalHeader().setStretchLastSection(True); l.addWidget(self.device_table)
         device_layout.addWidget(f,3)
 
-        f,l=self._card("空间管理 · 相机几何 · 两列 × 1.2m")
+        f,l,_=self._collapsible_card("空间管理 · 相机几何 · 两列 × 1.2m",expanded=True)
         self.space_table=QTableWidget(0,7); self.space_table.setHorizontalHeaderLabels(["盲码","板段","列","中心XYZ","支撑块","状态","货物"]); self.space_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.space_table)
         self.comp=QLabel("补偿：-"); self.comp.setWordWrap(True); l.addWidget(self.comp); space_layout.addWidget(f,1)
 
-        f,l=self._card("并行状态 / PLC Message / 标定状态")
+        f,l,_=self._collapsible_card("并行状态 / PLC Message / 标定状态",expanded=True)
         self.parallel_label=QLabel("-"); self.parallel_label.setWordWrap(True); l.addWidget(self.parallel_label)
         self.cal_label=QLabel("-"); self.cal_label.setMaximumHeight(38); self.cal_label.setStyleSheet("color:#9ec8dc"); l.addWidget(self.cal_label)
         self.database_label=QLabel("车辆数据库：等待装载会话")
@@ -175,7 +182,7 @@ class MainWindow(QMainWindow):
         module_layout.addWidget(self.current_module_title)
 
         io_splitter=QSplitter(Qt.Orientation.Horizontal); io_splitter.setChildrenCollapsible(False)
-        input_card,input_layout=self._card("本次输入（数据 + 图片）")
+        input_card,input_layout,_=self._collapsible_card("本次输入（数据 + 图片）",expanded=True)
         self.module_input_preview=QLabel("该步骤执行后显示输入图片")
         self.module_input_preview.setAlignment(Qt.AlignmentFlag.AlignCenter); self.module_input_preview.setMinimumHeight(125)
         self.module_input_preview.setStyleSheet("background:#06101d;border:1px solid #244b72;color:#6f8ca5")
@@ -184,7 +191,7 @@ class MainWindow(QMainWindow):
         self.module_input_data.setPlaceholderText("当前步骤的图像路径、深度图、点云、位姿、参数等输入将显示在这里")
         input_layout.addWidget(self.module_input_data,3); io_splitter.addWidget(input_card)
 
-        output_card,output_layout=self._card("本次输出（数据 + 图片）")
+        output_card,output_layout,_=self._collapsible_card("本次输出（数据 + 图片）",expanded=True)
         self.module_output_preview=QLabel("该步骤执行后显示输出图片")
         self.module_output_preview.setAlignment(Qt.AlignmentFlag.AlignCenter); self.module_output_preview.setMinimumHeight(125)
         self.module_output_preview.setStyleSheet("background:#06101d;border:1px solid #244b72;color:#6f8ca5")
@@ -197,8 +204,8 @@ class MainWindow(QMainWindow):
         self._module_rows=[]; self._selected_module_id=""; self._latest_module_id=""
 
         bottom=QSplitter(Qt.Orientation.Horizontal); bottom.setChildrenCollapsible(False); self.body_splitter.addWidget(bottom)
-        f,l=self._card("总体结果（每一步自动保存）"); self.results=QTextEdit(); self.results.setReadOnly(True); self.results.setMinimumHeight(110); l.addWidget(self.results); bottom.addWidget(f)
-        f,l=self._card("运行日志 / 报警"); self.logs=QTextEdit(); self.logs.setReadOnly(True); self.logs.setMinimumHeight(110); l.addWidget(self.logs); bottom.addWidget(f); bottom.setSizes([1000,900])
+        f,l,_=self._collapsible_card("总体结果（每一步自动保存）",expanded=True); self.results=QTextEdit(); self.results.setReadOnly(True); self.results.setMinimumHeight(110); l.addWidget(self.results); bottom.addWidget(f)
+        f,l,_=self._collapsible_card("运行日志 / 报警",expanded=True); self.logs=QTextEdit(); self.logs.setReadOnly(True); self.logs.setMinimumHeight(110); l.addWidget(self.logs); bottom.addWidget(f); bottom.setSizes([1000,900])
         self.body_splitter.setStretchFactor(0,5); self.body_splitter.setStretchFactor(1,1); self.body_splitter.setSizes([820,145])
 
     def _on_qml_status(self,status):
