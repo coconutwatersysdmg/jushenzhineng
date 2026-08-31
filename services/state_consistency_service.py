@@ -15,9 +15,10 @@ class StateConsistencyService:
         try:
             import cv2
             import numpy as np
+            from utils.cv_io import read_image
         except ImportError:
             return {"success": False, "same_state": False, "message": "状态一致性检测需要 opencv-python/numpy"}
-        a = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE); b = cv2.imread(str(c), cv2.IMREAD_GRAYSCALE)
+        a = read_image(p, cv2.IMREAD_GRAYSCALE); b = read_image(c, cv2.IMREAD_GRAYSCALE)
         if a is None or b is None:
             return {"success": False, "same_state": False, "message": "状态图读取失败"}
         b = cv2.resize(b, (a.shape[1], a.shape[0]))

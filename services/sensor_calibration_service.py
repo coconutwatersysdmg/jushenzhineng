@@ -189,7 +189,8 @@ class SensorCalibrationService:
         except ImportError as exc:
             raise RuntimeError("读取角点深度图需要 opencv-python") from exc
         path = Path(depth_path)
-        depth = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+        from utils.cv_io import read_image
+        depth = read_image(path, cv2.IMREAD_UNCHANGED)
         if depth is None:
             raise RuntimeError(f"无法读取深度图：{path}")
         if depth.ndim > 2:

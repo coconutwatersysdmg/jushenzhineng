@@ -88,8 +88,9 @@ def detect_from_files(color_path, depth_path, camera_path):
     color_path = Path(color_path).expanduser().resolve()
     depth_path = Path(depth_path).expanduser().resolve()
     camera_path = Path(camera_path).expanduser().resolve()
-    color = cv2.imread(str(color_path), cv2.IMREAD_COLOR)
-    depth = cv2.imread(str(depth_path), cv2.IMREAD_UNCHANGED)
+    from utils.cv_io import read_image
+    color = read_image(color_path, cv2.IMREAD_COLOR)
+    depth = read_image(depth_path, cv2.IMREAD_UNCHANGED)
     if color is None or depth is None:
         raise DetectorError("图像读取失败")
     if depth.ndim == 3 and depth.shape[2] == 1:

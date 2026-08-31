@@ -10,6 +10,7 @@ from typing import Any, Dict
 import cv2
 
 from algorithm_modules.dynamic_monitoring_module import detect_from_files
+from utils.cv_io import read_image, write_image
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -37,7 +38,7 @@ class DynamicMonitoringService:
         output_dir = self.result_root / self._safe(result_tag) / f"{phase}_{stamp}"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        image = cv2.imread(str(Path(rgb_path).resolve()), cv2.IMREAD_COLOR)
+        image = read_image(Path(rgb_path).resolve(), cv2.IMREAD_COLOR)
         if image is None:
             raise RuntimeError(f"无法读取动态监测结果图源文件：{rgb_path}")
         bx1, by1, bx2, by2 = result["bottom_edge_xyxy_px"]
@@ -49,7 +50,7 @@ class DynamicMonitoringService:
         cv2.putText(image, f"{phase} offset={result['offset_deg']:.3f} deg", (28, 48),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, (60, 255, 255), 2, cv2.LINE_AA)
         image_path = output_dir / "dynamic_monitor_result.jpg"
-        if not cv2.imwrite(str(image_path), image, [cv2.IMWRITE_JPEG_QUALITY, 94]):
+        if not write_image(image_path, image, [cv2.IMWRITE_JPEG_QUALITY, 94]):
             raise RuntimeError(f"动态监测结果图写入失败：{image_path}")
 
         result.update({

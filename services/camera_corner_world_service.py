@@ -73,7 +73,8 @@ class CameraCornerWorldService:
             if isinstance(source_size, (list, tuple)) and len(source_size) >= 2:
                 try:
                     import cv2
-                    depth_image = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+                    from utils.cv_io import read_image
+                    depth_image = read_image(depth_path, cv2.IMREAD_UNCHANGED)
                     if depth_image is not None:
                         depth_size = [int(depth_image.shape[1]), int(depth_image.shape[0])]
                         if float(source_size[0]) > 0 and float(source_size[1]) > 0:

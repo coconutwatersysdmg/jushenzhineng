@@ -379,8 +379,10 @@ def analyze_image(
     cfg: Config = DEFAULT_CONFIG,
 ) -> dict:
     """读取一张图片并返回检测结果，不写文件。"""
+    from utils.cv_io import read_image
+
     image_path = Path(image_path)
-    image = cv2.imread(str(image_path))
+    image = read_image(image_path)
 
     if image is None:
         raise RuntimeError(f"图片读取失败：{image_path}")

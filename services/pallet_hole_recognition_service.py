@@ -86,7 +86,8 @@ class PalletHoleRecognitionService:
             )
 
         output_path = output_dir / "pallet_holes_result.jpg"
-        if not cv2.imwrite(str(output_path), image):
+        from utils.cv_io import write_image
+        if not write_image(output_path, image):
             raise RuntimeError(f"托盘插孔识别结果图保存失败：{output_path}")
         return str(output_path.resolve())
 
@@ -136,8 +137,9 @@ class PalletHoleRecognitionService:
             import numpy as np
         except ImportError as exc:
             raise RuntimeError("托盘 RGB-D 识别需要 opencv-python 和 numpy") from exc
-        rgb = cv2.imread(str(rgb_path), cv2.IMREAD_COLOR)
-        depth = cv2.imread(str(depth_path), cv2.IMREAD_UNCHANGED)
+        from utils.cv_io import read_image
+        rgb = read_image(rgb_path, cv2.IMREAD_COLOR)
+        depth = read_image(depth_path, cv2.IMREAD_UNCHANGED)
         if rgb is None:
             raise RuntimeError(f"无法读取托盘 RGB 图：{rgb_path}")
         if depth is None:

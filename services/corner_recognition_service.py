@@ -134,7 +134,8 @@ class CornerRecognitionService:
         except ImportError as exc:
             raise RuntimeError("保存角点识别结果图需要 opencv-python") from exc
         source = Path(str(detection.get("image") or ""))
-        image = cv2.imread(str(source), cv2.IMREAD_COLOR)
+        from utils.cv_io import read_image, write_image
+        image = read_image(source, cv2.IMREAD_COLOR)
         if image is None:
             raise RuntimeError(f"无法读取角点结果图源文件：{source}")
         x1, y1, x2, y2 = [int(round(float(v))) for v in detection["bbox_xyxy"]]
@@ -153,7 +154,7 @@ class CornerRecognitionService:
             cv2.LINE_AA,
         )
         output_path = output_dir / f"{point_name}_result.jpg"
-        if not cv2.imwrite(str(output_path), image):
+        if not write_image(output_path, image):
             raise RuntimeError(f"角点识别结果图保存失败：{output_path}")
         return str(output_path.resolve())
 

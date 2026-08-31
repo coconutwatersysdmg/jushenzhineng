@@ -43,7 +43,8 @@ def ensure_demo_pre_pick_image(path: Path = DEMO_PRE_PICK_IMAGE) -> Path:
                 cv2.FONT_HERSHEY_SIMPLEX, 0.65, (100, 170, 220), 2, cv2.LINE_AA)
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    if not cv2.imwrite(str(path), image, [cv2.IMWRITE_JPEG_QUALITY, 94]):
+    from utils.cv_io import write_image
+    if not write_image(path, image, [cv2.IMWRITE_JPEG_QUALITY, 94]):
         raise RuntimeError(f"步骤2联调示例图写入失败：{path}")
     return path
 
@@ -78,7 +79,8 @@ def ensure_demo_rgb_image(tag: str, path: Path | None = None) -> Path:
     cv2.putText(image, "AUTO-FILLED SYNTHETIC INPUT", (125, 690),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.72, (100, 170, 220), 2, cv2.LINE_AA)
     path.parent.mkdir(parents=True, exist_ok=True)
-    if not cv2.imwrite(str(path), image, [cv2.IMWRITE_JPEG_QUALITY, 93]):
+    from utils.cv_io import write_image
+    if not write_image(path, image, [cv2.IMWRITE_JPEG_QUALITY, 93]):
         raise RuntimeError(f"联调相机示例图写入失败：{path}")
     return path
 
@@ -112,8 +114,9 @@ def ensure_demo_corner_rgbd(tag: str) -> tuple[Path, Path]:
     depth[:80, :] = 0
 
     rgb_path.parent.mkdir(parents=True, exist_ok=True)
-    if not cv2.imwrite(str(rgb_path), image, [cv2.IMWRITE_JPEG_QUALITY, 93]):
+    from utils.cv_io import write_image
+    if not write_image(rgb_path, image, [cv2.IMWRITE_JPEG_QUALITY, 93]):
         raise RuntimeError(f"角点联调 RGB 写入失败：{rgb_path}")
-    if not cv2.imwrite(str(depth_path), depth):
+    if not write_image(depth_path, depth):
         raise RuntimeError(f"角点联调深度写入失败：{depth_path}")
     return rgb_path.resolve(), depth_path.resolve()

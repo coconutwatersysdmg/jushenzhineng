@@ -14,9 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-import cv2
-
 from algorithm_modules.pallet_overhang_detection_module import pallet_overhang_detection as algo
+from utils.cv_io import read_image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = PROJECT_ROOT / "config" / "system_config.json"
@@ -47,7 +46,7 @@ class PalletCargoOffsetService:
     def _analyze_detail(self, image_path: str | Path) -> Dict[str, Any]:
         """复用用户模块同一套边界提取逻辑，补充模块内部已计算但原 JSON 未暴露的几何量。"""
         path = Path(image_path).expanduser().resolve()
-        image = cv2.imread(str(path))
+        image = read_image(path)
         if image is None:
             raise RuntimeError(f"偏移检测图片读取失败：{path}")
 
