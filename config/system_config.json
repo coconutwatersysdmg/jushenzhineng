@@ -1,7 +1,24 @@
 {
   "runtime": {
+    "device_mode": "mock",
     "allow_demo_device_data": true,
     "allow_unimplemented_vision_measurement_zero": true
+  },
+  "devices": {
+    "plc": {
+      "ip": "192.168.6.6",
+      "port": 502
+    },
+    "livox": {
+      "config_file": "config/livox_config.ini"
+    },
+    "gantry": {
+      "allow_real_motion": false,
+      "world_to_gantry": {}
+    },
+    "camera": {
+      "backend": "realsense_d435i"
+    }
   },
   "database": {
     "enabled": true,

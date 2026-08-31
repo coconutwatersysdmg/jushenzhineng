@@ -5,3 +5,4 @@ opencv-python>=4.8
 numpy>=1.24
 torch>=2.0
 open3d>=0.18
+pymodbus>=3.6,<4

@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from core.digital_twin_state import DigitalTwinState
 from core.geometry import Pose6D, parent_pose_for_child
-from devices.mock_devices import MockPLCAdapter, MockRobotAdapter, MockRadarAdapter, MockArmCameraAdapter
+from devices.device_factory import create_device_adapters
 from services.algorithm_facade import AlgorithmFacade
 from services.sensor_calibration_service import SensorCalibrationService
 from services.camera_corner_world_service import CameraCornerWorldService
@@ -84,10 +84,24 @@ class FlowController:
         self.system_config = self._load_json(SYSTEM_CONFIG_FILE)
         self.allow_demo = bool((self.system_config.get("runtime") or {}).get("allow_demo_device_data", True))
         self.twin = twin or DigitalTwinState()
-        self.plc = plc or MockPLCAdapter(self.twin)
-        self.robot = robot or MockRobotAdapter(self.twin, self.plc)
-        self.radar = radar or MockRadarAdapter(self.twin)
-        self.camera = camera or MockArmCameraAdapter(self.twin)
+        if plc is None or robot is None or radar is None or camera is None:
+            mode, built_plc, built_robot, built_radar, built_camera = create_device_adapters(
+                self.twin, self.system_config
+            )
+            self.device_mode = mode
+            self.plc = plc or built_plc
+            self.robot = robot or built_robot
+            self.radar = radar or built_radar
+            self.camera = camera or built_camera
+        else:
+            self.device_mode = str((self.system_config.get("runtime") or {}).get("device_mode") or "mock")
+            self.plc = plc
+            self.robot = robot
+            self.radar = radar
+            self.camera = camera
+        # Real hardware mode must not synthesize demo frames behind the scenes.
+        if str(self.device_mode).lower() == "real":
+            self.allow_demo = False
         if hasattr(self.camera, "set_demo_enabled"):
             self.camera.set_demo_enabled(self.allow_demo)
         self.algorithms = algorithms or AlgorithmFacade()
@@ -858,4 +872,4 @@ class FlowController:
         RESULT_FILE.write_text(json.dumps({"results":self.results},ensure_ascii=False,indent=2,default=str),encoding="utf-8")
 
     def snapshot(self):
-        return {"running":self.running,"finished":self.finished,"round":self.round_index+1 if self.queue else 0,"total":len(self.queue),"completed":len(self.completed),"first_round":self.is_first_round,"step_code":self.current_step[0],"step_name":self.current_step[1],"current_cargo":deepcopy(self.current_cargo),"round_data":deepcopy(self.round_data),"twin":self.twin.snapshot(),"results":deepcopy(self.results),"calibration":self.calibration.diagnostic_summary(),"module_evidence":self.module_evidence.snapshot(),"database":{"backend":self.vehicle_db.backend,"location":self.vehicle_db.location,"path":self.vehicle_db.location,"session_id":self.loading_session_id}}
+        return {"running":self.running,"finished":self.finished,"round":self.round_index+1 if self.queue else 0,"total":len(self.queue),"completed":len(self.completed),"first_round":self.is_first_round,"step_code":self.current_step[0],"step_name":self.current_step[1],"current_cargo":deepcopy(self.current_cargo),"round_data":deepcopy(self.round_data),"twin":self.twin.snapshot(),"results":deepcopy(self.results),"calibration":self.calibration.diagnostic_summary(),"module_evidence":self.module_evidence.snapshot(),"device_mode":getattr(self,"device_mode","mock"),"allow_demo":bool(self.allow_demo),"database":{"backend":self.vehicle_db.backend,"location":self.vehicle_db.location,"path":self.vehicle_db.location,"session_id":self.loading_session_id}}

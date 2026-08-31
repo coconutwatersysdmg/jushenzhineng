@@ -13,6 +13,11 @@ build/
 
 # Runtime / generated data
 runtime/
+data/lidar/*.pcd
+data/lidar/**/*.pcd
+
+# Livox build leftovers
+third_party/livox_runtime/*.obj
 
 # IDE / OS
 .vscode/

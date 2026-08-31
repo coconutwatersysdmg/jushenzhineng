@@ -451,7 +451,7 @@ class MainWindow(QMainWindow):
         cal=s.get("calibration") or {}
         intr="参考/占位" if "PLACEHOLDER" in str(cal.get("intrinsic_parameter_status","")).upper() else str(cal.get("intrinsic_parameter_status","-"))
         extr="占位" if "PLACEHOLDER" in str(cal.get("coordinate_parameter_status","")).upper() else str(cal.get("coordinate_parameter_status","-"))
-        self.cal_label.setText(f"标定：内参={intr}｜外参={extr}｜运动相机=实时位姿×安装外参")
+        self.cal_label.setText(f"设备模式：{str(s.get('device_mode') or 'mock').upper()}｜标定：内参={intr}｜外参={extr}｜运动相机=实时位姿×安装外参")
         self.cal_label.setToolTip(json.dumps(cal,ensure_ascii=False,indent=2))
         db=s.get("database") or {}; db_location=str(db.get("location") or db.get("path") or "-")
         db_name=("MySQL" if str(db.get("backend")).lower()=="mysql" else "SQLite")

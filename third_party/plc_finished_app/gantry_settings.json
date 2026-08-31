@@ -1,0 +1,41 @@
+{
+  "plc_ip": "192.168.6.6",
+  "plc_port": "502",
+  "default_speed": 30.0,
+  "axis_default_speeds": {
+    "X": 30.0,
+    "Y": 50.0,
+    "Z": 30.0,
+    "R": 30.0
+  },
+  "axis_step": {
+    "XYZ": 50.0,
+    "R": 10.0
+  },
+  "soft_limits": {
+    "X": [
+      0.0,
+      500.0
+    ],
+    "Y": [
+      0.0,
+      1300.0
+    ],
+    "Z": [
+      0.0,
+      380.0
+    ],
+    "R": [
+      -180.0,
+      180.0
+    ]
+  },
+  "r_forbidden_zones": [],
+  "work_origin": {
+    "X": 0.0,
+    "Y": 0.0,
+    "Z": 0.0,
+    "R": 0.0
+  },
+  "r_forbidden_zones_enabled": false
+}
