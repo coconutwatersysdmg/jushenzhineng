@@ -158,11 +158,41 @@ def require_open3d():
 
 
 def read_point_cloud(path: str | Path):
+    """Read a PCD even when the Windows path contains non-ASCII characters.
+
+    Open3D's ``io.read_point_cloud`` can raise ``UnicodeDecodeError`` for paths
+    that include Chinese folder names.  Copy to an ASCII-only temp file first.
+    """
+    import shutil
+    import tempfile
+
     backend = require_open3d()
-    point_cloud = backend.io.read_point_cloud(str(path))
-    if len(point_cloud.points) == 0:
-        raise ValueError(f"点云为空或读取失败：{path}")
-    return point_cloud
+    source = Path(path).expanduser().resolve()
+    if not source.is_file():
+        raise FileNotFoundError(f"点云文件不存在：{source}")
+
+    def _load(candidate: Path):
+        cloud = backend.io.read_point_cloud(str(candidate))
+        if len(cloud.points) == 0:
+            raise ValueError(f"点云为空或读取失败：{source}")
+        return cloud
+
+    try:
+        source_text = str(source)
+    except Exception:
+        source_text = ""
+    needs_ascii_copy = any(ord(ch) > 127 for ch in source_text)
+    if not needs_ascii_copy:
+        try:
+            return _load(source)
+        except UnicodeDecodeError:
+            needs_ascii_copy = True
+
+    suffix = source.suffix if source.suffix else ".pcd"
+    with tempfile.TemporaryDirectory(prefix="jushen_pcd_") as tmp_dir:
+        temp_path = Path(tmp_dir) / f"input{suffix}"
+        shutil.copy2(source, temp_path)
+        return _load(temp_path)
 
 
 def write_json(path: str | Path, payload) -> None:
