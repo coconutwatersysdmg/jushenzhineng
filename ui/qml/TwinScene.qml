@@ -667,20 +667,46 @@ Item {
     }
 
     Rectangle {
+        id: sceneInfoPanel
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.margins: 10
-        width: Math.min(parent.width < 800 ? 270 : 350,parent.width-20)
-        height: 78
+        // Keep clear of the right view panel; wrap long axis/process text inside the box.
+        width: Math.min(parent.width < 800 ? 300 : 420, Math.max(220, parent.width - viewPanel.width - 36))
+        height: sceneInfoColumn.implicitHeight + 18
         radius: 7
         color: "#ce0b1824"
         border.color: "#35667f"
+        border.width: 1
+        clip: true
         Column {
-            anchors.centerIn: parent
-            spacing: 2
-            Text { color:"#dcecff"; font.pixelSize:root.width < 800 ? 11 : 13; text:"数字孪生 · world/mm → Scene/m" }
-            Text { color:"#8ad6ff"; font.pixelSize:root.width < 800 ? 10 : 12; text:"视角："+root.viewName+"   4/6角点："+root.cornerArray().length }
-            Text { color:"#a9c7d5"; font.pixelSize:root.width < 800 ? 9 : 11; text:"X右 · Y车尾→车头 · Z向上｜双侧龙门架 · 左侧一次拍照 · 按目标物理左右选放货侧" }
+            id: sceneInfoColumn
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: 9
+            spacing: 3
+            Text {
+                width: parent.width
+                color: "#dcecff"
+                font.pixelSize: root.width < 800 ? 11 : 13
+                wrapMode: Text.WordWrap
+                text: "数字孪生 · world/mm → Scene/m"
+            }
+            Text {
+                width: parent.width
+                color: "#8ad6ff"
+                font.pixelSize: root.width < 800 ? 10 : 12
+                wrapMode: Text.WordWrap
+                text: "视角：" + root.viewName + "   4/6角点：" + root.cornerArray().length
+            }
+            Text {
+                width: parent.width
+                color: "#a9c7d5"
+                font.pixelSize: root.width < 800 ? 9 : 11
+                wrapMode: Text.WordWrap
+                text: "X右 · Y车尾→车头 · Z向上｜双侧龙门架 · 左侧一次拍照 · 按目标物理左右选放货侧"
+            }
         }
     }
 
