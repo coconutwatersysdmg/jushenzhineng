@@ -49,6 +49,22 @@
       "example_output": "examples/module_outputs/CORNER_YOLO.json"
     },
     {
+      "module_id": "CORNER_REVIEW",
+      "name": "角点人工审核/手动矫正",
+      "flow_stage": "6",
+      "category": "人工审核界面",
+      "implementation": "CornerReviewDialog",
+      "example_inputs": {
+        "image_paths_by_point": {
+          "P1": "examples/corner_net/20251225_125040_525.jpg",
+          "P2": "examples/corner_net/20251225_125129_401.jpg",
+          "P3": "examples/corner_net/20251225_125153_482.jpg",
+          "P4": "examples/corner_net/20251225_125040_525_P4.jpg"
+        }
+      },
+      "example_output": "examples/module_outputs/CORNER_REVIEW.json"
+    },
+    {
       "module_id": "CAMERA_WORLD",
       "name": "像素+深度+动态外参转 WORLD",
       "flow_stage": "7",

@@ -52,7 +52,7 @@ class FlowController:
         ("PARALLEL_LOCATE", "3. 并行：3.1插孔插取 + 3.2雷达找车"),
         ("RADAR_TO_CAMERA", "4. 雷达粗点 -> PLC -> 机械臂挂载相机"),
         ("CAPTURE_CORNERS", "5. 左外侧单次通过：车尾/车头各1组 RGB-D"),
-        ("CORNER_RECOGNITION", "6. 角点 .pt 像素识别"),
+        ("CORNER_RECOGNITION", "6. 角点 .pt 像素识别 / 人工审核矫正"),
         ("CAMERA_TO_WORLD", "7. 像素+深度+动态外参 -> WORLD"),
         ("INITIAL_SPACE_PLAN", "8.1 相机判断平/高低板 + 两列×1.2m盲码规划"),
         ("NEIGHBOR_POSE", "8.2 拍临近托盘姿态 / 计算当前补偿"),
@@ -141,6 +141,10 @@ class FlowController:
         self.debug_inputs: Dict[str, Any] = {}
         self.state_listener = None
         self.truck_initialized = False
+        self.corner_review_callback = None
+        review_cfg = self.system_config.get("corner_review") or {}
+        self.corner_review_enabled = bool(review_cfg.get("enabled", True))
+        self.corner_review_auto_accept_demo = bool(review_cfg.get("auto_accept_demo", False))
         self.plc.connect()
         if hasattr(self.robot, "motion_callback"):
             self.robot.motion_callback = self._notify_motion
@@ -548,6 +552,68 @@ class FlowController:
         self.round_data["corner_group_captures"]=group_captures
         return {"success":True,"physical_capture_count":len(group_captures),"capture_groups":groups,"image_paths_by_point":images,"capture_meta":meta}
 
+    def set_corner_review_callback(self, callback):
+        """UI registers a blocking human-review dialog here for step 6."""
+        self.corner_review_callback = callback if callable(callback) else None
+
+    def _apply_corner_review(self, recognition: Dict[str, Any]) -> Dict[str, Any]:
+        """Optional human review/correction after .pt corner recognition."""
+        if not self.corner_review_enabled:
+            recognition = deepcopy(recognition)
+            recognition["reviewed"] = False
+            recognition["review_skipped"] = True
+            recognition["message"] = str(recognition.get("message") or "") + "｜人工审核已关闭"
+            return recognition
+        source = str(recognition.get("source") or recognition.get("recognition_source") or "")
+        if self.corner_review_auto_accept_demo and source in {"generated_demo_rgbd"}:
+            recognition = deepcopy(recognition)
+            recognition["reviewed"] = True
+            recognition["review_skipped"] = True
+            recognition["corrected_count"] = 0
+            recognition["message"] = str(recognition.get("message") or "") + "｜联调角点自动通过人工审核"
+            return recognition
+        if self.corner_review_callback is None:
+            recognition = deepcopy(recognition)
+            recognition["reviewed"] = False
+            recognition["review_skipped"] = True
+            recognition["message"] = str(recognition.get("message") or "") + "｜无界面审核回调，已跳过人工审核"
+            return recognition
+        ids = list(recognition.get("corner_ids") or self.round_data["radar_result"]["corner_ids"])
+        image_points = recognition.get("image_points") or {}
+        for pid in ids:
+            point = dict(image_points.get(pid) or {})
+            if not point.get("image"):
+                point["image"] = (self.round_data.get("corner_images") or {}).get(pid)
+                image_points[pid] = point
+        reviewed = self.corner_review_callback(
+            image_points,
+            ids,
+            str((self.current_cargo or {}).get("instance_id") or f"round{self.round_index+1}"),
+        )
+        if not isinstance(reviewed, Mapping) or not reviewed.get("success"):
+            raise RuntimeError(str((reviewed or {}).get("message") or "角点人工审核未通过"))
+        merged = deepcopy(recognition)
+        merged.update(deepcopy(reviewed))
+        merged["success"] = True
+        merged["recognition_source"] = recognition.get("recognition_source") or recognition.get("source")
+        merged["model_path"] = recognition.get("model_path")
+        merged["result_dir"] = recognition.get("result_dir")
+        started = perf_counter()
+        self._evidence(
+            "CORNER_REVIEW",
+            {
+                "corner_ids": ids,
+                "model_image_points": recognition.get("image_points"),
+                "corrected_point_ids": reviewed.get("corrected_point_ids") or [],
+            },
+            merged,
+            started,
+            model_invoked=False,
+            note="角点人工审核/手动矫正",
+            status="SUCCESS",
+        )
+        return merged
+
     def _corner_recognition(self):
         ids=self.round_data["radar_result"]["corner_ids"]
         meta=self.round_data.get("corner_capture_meta") or {}
@@ -561,12 +627,13 @@ class FlowController:
                     "confidence":1.0,"status":"联调示例角点","point_name":pid,
                     "image":self.round_data["corner_images"][pid],"source":"generated_demo_rgbd",
                 }
-            result={"success":True,"image_points":image_points,"source":"generated_demo_rgbd","message":"缺失角点数据已自动补齐；使用联调 RGB-D 中心标记"}
+            result={"success":True,"corner_ids":list(ids),"image_points":image_points,"source":"generated_demo_rgbd","message":"缺失角点数据已自动补齐；使用联调 RGB-D 中心标记"}
         else:
             started=perf_counter(); result=self.algorithms.corner_image_recognize(self.round_data["corner_images"],ids,self.current_cargo)
             self._evidence("CORNER_YOLO",{"image_paths_by_point":self.round_data["corner_images"],"corner_ids":ids},result,started,model_invoked=True)
         if result.get("source")=="generated_demo_rgbd":
             started=perf_counter(); self._evidence("CORNER_YOLO",{"image_paths_by_point":self.round_data["corner_images"],"corner_ids":ids},result,started,model_invoked=False,note="联调中心点分支，角点.pt未调用",status="FALLBACK")
+        result=self._apply_corner_review(result)
         self.round_data["corner_recognition"]=result; return result
 
     def _camera_to_world(self):

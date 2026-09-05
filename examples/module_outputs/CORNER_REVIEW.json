@@ -1,0 +1,7 @@
+{
+  "success": true,
+  "reviewed": true,
+  "corrected_count": 1,
+  "corrected_point_ids": ["P2"],
+  "message": "角点人工审核通过示例"
+}

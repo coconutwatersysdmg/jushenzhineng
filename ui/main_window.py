@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 from controllers.flow_controller import FlowController
 from ui.twin_bridge import TwinBridge
 from ui.debug_dialog import DebugInputDialog
+from ui.corner_review_dialog import run_corner_review
 
 PROJECT_ROOT=Path(__file__).resolve().parents[1]
 QML_FILE=PROJECT_ROOT/"ui"/"qml"/"TwinScene.qml"
@@ -31,7 +32,7 @@ class MainWindow(QMainWindow):
         (3,"3.1 插取 ∥ 3.2 雷达"),
         (4,"雷达点 → PLC → 相机"),
         (5,"角点 RGB-D"),
-        (6,"角点识别"),
+        (6,"角点识别 / 人工审核"),
         (7,"转换 WORLD"),
         (8,"8.1 规划 · 8.2 补偿 · 8.3 锁定"),
         (9,"放置前监测 / 计算位置 / 放置"),
@@ -52,6 +53,7 @@ class MainWindow(QMainWindow):
         self._step_busy=False
         self.motionSnapshot.connect(self._apply_motion_snapshot)
         self.controller.set_state_listener(self.motionSnapshot.emit)
+        self.controller.set_corner_review_callback(self._review_corners)
         self.timer=QTimer(self); self.timer.setInterval(900); self.timer.timeout.connect(self._auto_tick)
         self.setWindowTitle("具身智能装载数字孪生 · 单机械臂携货 / 挂载相机角点识别")
         screen=self.screen().availableGeometry()
@@ -346,6 +348,9 @@ class MainWindow(QMainWindow):
         self._latest_module_id=latest_id
         row_index=next((i for i,item in enumerate(self._module_rows) if str(item.get("module_id") or "")==target_id),len(self._module_rows)-1)
         self.module_table.selectRow(row_index); self._show_module_detail(row_index)
+
+    def _review_corners(self, image_points, corner_ids, result_tag="review"):
+        return run_corner_review(image_points, corner_ids, parent=self, result_tag=result_tag)
 
     def _start(self):
         try: self.controller.set_debug_inputs(self.debug_inputs); self.controller.start(); self._refresh()

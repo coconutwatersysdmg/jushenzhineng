@@ -43,6 +43,10 @@
     "depth_sample_window": 5,
     "coarse_radar_warning_mm": 800.0
   },
+  "corner_review": {
+    "enabled": true,
+    "auto_accept_demo": false
+  },
   "camera_board_geometry": {
     "row_length_mm": 1200.0,
     "high_low_height_threshold_mm": 80.0,
