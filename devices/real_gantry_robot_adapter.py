@@ -52,9 +52,11 @@ class RealGantryRobotAdapter(RobotAdapter):
         if blocked is not None:
             self.twin.update_device(robot_id, status="HOLD", task="MAP_REQUIRED")
             if hasattr(self.plc, "send_message"):
+                # TODO: 与PLC交互 — 未配映射时告知 PLC/孪生：真机运动被拦截
                 self.plc.send_message("ROBOT", "BLOCKED", blocked["message"], {"robot_id": robot_id, "pose": pose})
             return blocked
 
+        # TODO: 与PLC交互 — 真机：按 WORLD 位姿请求龙门架运动（需已配 world_to_gantry）
         cmd = self.plc.send_command(
             "MOVE_TOOL_WORLD",
             {"robot_id": robot_id, "pose": pose, "task": task, "gantry": self.world_to_gantry},
@@ -63,6 +65,7 @@ class RealGantryRobotAdapter(RobotAdapter):
             return cmd
         # Mapping-enabled path still needs a concrete Modbus absolute move call;
         # keep the twin pose update only after a successful PLC write is wired.
+        # TODO: 与PLC交互 — 真机：等 PLC 确认运动指令；后续还需接真实绝对定位写寄存器
         ack = self.plc.wait_ack(cmd["command_id"])
         if not ack.get("success"):
             return ack
@@ -77,12 +80,16 @@ class RealGantryRobotAdapter(RobotAdapter):
         blocked = self._require_mapping("FORK_PALLET")
         if blocked is not None:
             return blocked
+        # TODO: 与PLC交互 — 真机：下发插取托盘
         cmd = self.plc.send_command("FORK_PALLET", deepcopy(pallet_result or {}))
+        # TODO: 与PLC交互 — 真机：等插取 ACK
         return self.plc.wait_ack(cmd["command_id"]) if cmd.get("success") else cmd
 
     def place(self, cargo: dict, target: dict) -> dict:
         blocked = self._require_mapping("PLACE")
         if blocked is not None:
             return blocked
+        # TODO: 与PLC交互 — 真机：下发放货
         cmd = self.plc.send_command("PLACE", {"cargo": cargo, "target": target})
+        # TODO: 与PLC交互 — 真机：等放货 ACK
         return self.plc.wait_ack(cmd["command_id"]) if cmd.get("success") else cmd

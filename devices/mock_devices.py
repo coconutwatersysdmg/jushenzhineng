@@ -50,7 +50,9 @@ class MockRobotAdapter(RobotAdapter):
         self.motion_callback = None
 
     def move_tool_world(self, robot_id: str, pose: dict, task: str = "") -> dict:
+        # TODO: 与PLC交互 — 请求机械臂按 WORLD 位姿运动（拍照位/运货位等都走这里）
         cmd = self.plc.send_command("MOVE_TOOL_WORLD", {"robot_id": robot_id, "pose": pose, "task": task})
+        # TODO: 与PLC交互 — 等 PLC 确认运动指令（mock 立刻 ACK，再播数字孪生轨迹）
         ack = self.plc.wait_ack(cmd["command_id"])
         if not ack.get("success"):
             return ack
@@ -94,14 +96,18 @@ class MockRobotAdapter(RobotAdapter):
         return self.move_tool_world(robot_id, target, task="RETRACT")
 
     def fork_pallet(self, pallet_result: dict) -> dict:
+        # TODO: 与PLC交互 — 下发插取托盘动作给 PLC
         cmd = self.plc.send_command("FORK_PALLET", pallet_result)
+        # TODO: 与PLC交互 — 等 PLC 确认插取完成
         ack = self.plc.wait_ack(cmd["command_id"])
         if ack.get("success"):
             self.twin.update_device("PICK_ARM", task="PALLET_PICKED")
         return {"success": bool(ack.get("success")), "message": "托盘插取完成" if ack.get("success") else "托盘插取失败"}
 
     def place(self, cargo: dict, target: dict) -> dict:
+        # TODO: 与PLC交互 — 下发放货动作给 PLC
         cmd = self.plc.send_command("PLACE_CARGO", {"cargo": cargo, "target": target})
+        # TODO: 与PLC交互 — 等 PLC 确认放货完成
         ack = self.plc.wait_ack(cmd["command_id"])
         if ack.get("success"):
             pose = target.get("final_world_pose") or {}

@@ -1,4 +1,5 @@
 {
+  "_todo": "TODO 现场联调前改本文件：runtime.device_mode=real；devices.plc 填现场 PLC IP/端口；devices.gantry 配 world_to_gantry 并 allow_real_motion=true；plc.ack_timeout_ms 按现场调",
   "runtime": {
     "device_mode": "mock",
     "allow_demo_device_data": true,
@@ -6,6 +7,7 @@
   },
   "devices": {
     "plc": {
+      "_todo": "TODO: 与PLC交互 — 填写现场 PLC 的 Modbus TCP 地址（默认示例 192.168.6.6:502）",
       "ip": "192.168.6.6",
       "port": 502
     },
@@ -13,6 +15,7 @@
       "config_file": "config/livox_config.ini"
     },
     "gantry": {
+      "_todo": "TODO: 与PLC交互 — 填写 WORLD→龙门架 XYZR 映射后才允许真机运动；allow_real_motion 现场确认后再开",
       "allow_real_motion": false,
       "world_to_gantry": {}
     },
@@ -54,6 +57,7 @@
     "min_second_section_remaining_mm": 600.0
   },
   "plc": {
+    "_todo": "TODO: 与PLC交互 — 现场按 PLC 响应速度调整 ACK 超时（毫秒）",
     "ack_timeout_ms": 5000
   }
 }

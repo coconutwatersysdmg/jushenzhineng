@@ -32,6 +32,7 @@ RESULT_FILE = PROJECT_ROOT / "runtime" / "overall_results.json"
 STATE_FILE = PROJECT_ROOT / "runtime" / "twin_state.json"
 DEVICE_CONFIG_FILE = PROJECT_ROOT / "config" / "device_config.json"
 SYSTEM_CONFIG_FILE = PROJECT_ROOT / "config" / "system_config.json"
+# TODO: 与PLC交互 — 现场装备配置就在上面这个文件；改 device_mode / devices.plc / devices.gantry 后重启程序
 GANTRY_LEFT_X_MM = -3500.0
 GANTRY_RIGHT_X_MM = 3500.0
 GANTRY_CLEARANCE_Z_MM = 4800.0
@@ -145,6 +146,7 @@ class FlowController:
         review_cfg = self.system_config.get("corner_review") or {}
         self.corner_review_enabled = bool(review_cfg.get("enabled", True))
         self.corner_review_auto_accept_demo = bool(review_cfg.get("auto_accept_demo", False))
+        # TODO: 与PLC交互 — 启动时连接 PLC（mock 假连；real 用 system_config.json 的 devices.plc）
         self.plc.connect()
         if hasattr(self.robot, "motion_callback"):
             self.robot.motion_callback = self._notify_motion
@@ -342,6 +344,7 @@ class FlowController:
             result["message"]="联调示例图（非相机实拍）："+str(result.get("message") or "偏移分析完成")
         self.round_data["pre_pick_offset"]=result
         status="SUCCESS" if result.get("should_fork") else "FAILED"
+        # TODO: 与PLC交互 — 上报插取前货托偏移检测结果（可否插取）
         self.plc.send_message("PALLET_OFFSET_PRE_PICK",status,result.get("message",status),result)
         if not result.get("should_fork"): raise RuntimeError(result.get("message") or "插取前偏移不合格")
         return result
@@ -395,7 +398,9 @@ class FlowController:
                 result["message"]="托盘插取完成，货物已绑定 PICK_ARM 并进入随动运载状态"
         self.round_data["pick_result"]=result
         status="SUCCESS" if result.get("success") else "FAILED"
-        self.twin.set_parallel("pick",status,result.get("message",""),result); self.plc.send_message("PALLET_PICK",status,result.get("message",""),result)
+        self.twin.set_parallel("pick",status,result.get("message",""),result)
+        # TODO: 与PLC交互 — 上报插孔定位/插取结果（3.1 并行支路）
+        self.plc.send_message("PALLET_PICK",status,result.get("message",""),result)
         return result
 
     @staticmethod
@@ -469,7 +474,9 @@ class FlowController:
         if result.get("success"): result=self._normalize_radar_result(result)
         self.round_data["radar_result"]=result
         status="SUCCESS" if result.get("success") else "FAILED"
-        self.twin.set_parallel("radar",status,result.get("message",""),result); self.plc.send_message("RADAR_LOCATE",status,result.get("message",""),result)
+        self.twin.set_parallel("radar",status,result.get("message",""),result)
+        # TODO: 与PLC交互 — 上报雷达粗定位角点结果（3.2 并行支路）
+        self.plc.send_message("RADAR_LOCATE",status,result.get("message",""),result)
         return result
 
     def _parallel_locate(self):
@@ -509,7 +516,9 @@ class FlowController:
                 "capture_group":group,"radar_coarse_world_xyz_mm":[x,y,z],
                 "target_robot_pose_world":pose,
             }
+        # TODO: 与PLC交互 — 把雷达粗点换算成车尾/车头拍照目标位，下发给 PLC
         cmd=self.plc.send_command("SET_CORNER_CAPTURE_TARGETS",{"corner_count":len(assignments),"capture_count":2,"assignments":assignments})
+        # TODO: 与PLC交互 — 等 PLC 确认已收到角点拍摄目标（超时见 plc.ack_timeout_ms）
         ack=self.plc.wait_ack(cmd["command_id"],int((self.system_config.get("plc") or {}).get("ack_timeout_ms",5000)))
         if not ack.get("success"): raise RuntimeError("PLC 未确认角点拍摄目标")
         self.round_data["corner_assignments"]=assignments
@@ -767,6 +776,7 @@ class FlowController:
             result["gantry_move"]=gantry_move; result["selected_side"]=self._side_name(outer_x)
         self.round_data["neighbor_pose"]=result; self.round_data["tentative_target"]=tentative
         self._evidence("NEIGHBOR_POSE",{"image_path":result.get("image_path","") ,"target":tentative,"measurement":self.debug_inputs.get("neighbor_pose_measurement")},result,started,note="该接口当前没有正式视觉权重；有输入时消费外部/离线测量")
+        # TODO: 与PLC交互 — 上报临近托盘姿态/补偿测量结果（8.2）
         self.plc.send_message("NEIGHBOR_PALLET_POSE","SUCCESS",result.get("message",""),result)
         return {"success":True,"tentative_target":tentative,"neighbor_pose":result}
 
@@ -797,13 +807,17 @@ class FlowController:
         self._evidence(module_id,{"rgb_path":cap["rgb_path"],"depth_path":cap["depth_path"],"camera_path":camera_path,"camera_world_pose":cap.get("camera_world_pose")},result,started)
         key="pre_place_monitor" if phase=="pre_place" else "post_place_bottom_pallet"
         self.round_data[key]=result
+        # TODO: 与PLC交互 — 上报放货前/放货后动态监测结果给 PLC
         self.plc.send_message(module_id,"SUCCESS",result.get("message","动态监测完成"),result)
         return result
 
     def _place(self):
         target=self.round_data.get("placement_target")
         if not target: raise RuntimeError("缺少8.3锁定的放置目标")
-        cmd=self.plc.send_command("SET_PLACE_POINT",target); ack=self.plc.wait_ack(cmd["command_id"],int((self.system_config.get("plc") or {}).get("ack_timeout_ms",5000)))
+        # TODO: 与PLC交互 — 把最终放置点下发给 PLC，再驱动放货
+        cmd=self.plc.send_command("SET_PLACE_POINT",target)
+        # TODO: 与PLC交互 — 等 PLC 确认最终放置点已接收
+        ack=self.plc.wait_ack(cmd["command_id"],int((self.system_config.get("plc") or {}).get("ack_timeout_ms",5000)))
         if not ack.get("success"): raise RuntimeError("PLC 未确认最终放置点")
         final_cargo_pose=deepcopy(target.get("final_world_pose") or {})
         if not final_cargo_pose: raise RuntimeError("8.3目标缺少最终货物WORLD位姿")
@@ -838,7 +852,9 @@ class FlowController:
         result={"success":True,"region_deviation":dev,"two_face_observation":faces,"camera_id":cam,"selected_side":self._side_name(outer_x),"gantry_move":gantry_move}
         self._evidence("REGION_DEVIATION",{"image_path":cap.get("image_path","") ,"target":target,"measurement":self.debug_inputs.get("post_region_measurement")},dev,started,note="该接口当前没有正式视觉权重；示例消费外部测量")
         self._evidence("TWO_FACE_CAPTURE",{"face_a":faces.get("face_a"),"face_b":faces.get("face_b"),"target":target},faces,started,note="当前只完成两个相邻面采集，没有识别模型")
-        self.round_data["post_region"]=result; self.plc.send_message("PALLET_BOARD_REGION_DEVIATION","SUCCESS",dev.get("message",""),dev); return result
+        self.round_data["post_region"]=result
+        # TODO: 与PLC交互 — 上报托盘相对车板区域偏差（10.1）
+        self.plc.send_message("PALLET_BOARD_REGION_DEVIATION","SUCCESS",dev.get("message",""),dev); return result
 
     def _post_cargo_offset(self):
         target=self.round_data["placement_target"]; rid,cam,outer_x,yaw=self._side_for_target(target)
@@ -856,6 +872,7 @@ class FlowController:
         result["applied_directly_to_world_next_target"]=False
         result["selected_side"]=self._side_name(outer_x); result["gantry_move"]=gantry_move
         self.round_data["post_cargo_offset"]=result
+        # TODO: 与PLC交互 — 上报放货后货托偏移（相机局部补偿量）
         self.plc.send_message("PALLET_CARGO_POST_PLACE","SUCCESS",result.get("message",""),result); return result
 
     def _feedback(self):
@@ -867,6 +884,7 @@ class FlowController:
         self.twin.update_truck(regions=snap["regions"],occupied=snap["occupied"],available=snap["available"],remaining_space={"available_count":len(snap["available"]),"borrow_plan":snap.get("borrow_plan")})
         cargo_comp=(self.round_data.get("post_cargo_offset") or {}).get("compensation_camera_horizontal_mm")
         data={"next_pallet_world_compensation_mm":fb,"cargo_on_pallet_camera_horizontal_compensation_mm":cargo_comp,"occupied_region":occupied,"available_count":len(snap["available"])}
+        # TODO: 与PLC交互 — 把本轮偏差反馈给 PLC，并用于修正下一托盘目标/空间
         self.plc.send_message("PLACEMENT_FEEDBACK","SUCCESS","偏差信息已返回PLC并更新下一托盘可用空间",data)
         result={"success":True,**data}
         self._evidence("PLACEMENT_FEEDBACK",{"region_result":reg,"post_cargo_offset":self.round_data.get("post_cargo_offset"),"space_before_update":snap},result,started)

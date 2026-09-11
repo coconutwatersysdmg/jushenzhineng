@@ -40,12 +40,15 @@ def create_device_adapters(
         from devices.real_livox_radar_adapter import RealLivoxRadarAdapter
         from devices.real_plc_adapter import RealPlcAdapter
 
+        # TODO: 与PLC交互 — 读 config/system_config.json 的 devices.plc（现场 IP/端口）创建真机适配器
         plc = RealPlcAdapter(twin, device_cfg.get("plc") or {})
+        # TODO: 与PLC交互 — 读 devices.gantry（world_to_gantry / allow_real_motion）后才向 PLC 发真运动
         robot = RealGantryRobotAdapter(twin, plc, device_cfg.get("gantry") or {})
         radar = RealLivoxRadarAdapter(twin, device_cfg.get("livox") or {})
         camera = RealArmCameraAdapter(twin, device_cfg.get("camera") or {})
         return mode, plc, robot, radar, camera
 
+    # TODO: 与PLC交互 — mock 模式：本地假 PLC，不读现场 IP；现场测试请把 runtime.device_mode 改为 real
     plc = MockPLCAdapter(twin)
     robot = MockRobotAdapter(twin, plc)
     radar = MockRadarAdapter(twin)

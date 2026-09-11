@@ -30,6 +30,7 @@ class RealPlcAdapter(PLCAdapter):
 
     def __init__(self, twin: DigitalTwinState, config: Mapping[str, Any] | None = None):
         self.twin = twin
+        # TODO: 与PLC交互 — 配置来自 config/system_config.json → devices.plc（现场填 IP/端口）
         self.config = dict(config or {})
         self.ip = str(self.config.get("ip") or self.config.get("plc_ip") or "192.168.6.6")
         self.port = int(self.config.get("port") or self.config.get("plc_port") or 502)
@@ -38,6 +39,7 @@ class RealPlcAdapter(PLCAdapter):
         self._client = None
 
     def connect(self):
+        # TODO: 与PLC交互 — 按配置 IP/端口连现场 PLC（Modbus TCP），失败则整机真机流程起不来
         _ensure_plc_import_path()
         try:
             from plc_readonly_core import PlcModeClient
@@ -73,6 +75,7 @@ class RealPlcAdapter(PLCAdapter):
             return {"success": False, "message": f"PLC 连接异常：{exc}"}
 
     def send_command(self, command: str, payload: dict) -> dict:
+        # TODO: 与PLC交互 — 下发业务指令到 PLC（当前多为编排记账；真写入由龙门架适配器补齐）
         if not self.connected:
             linked = self.connect()
             if not linked.get("success"):
@@ -93,6 +96,7 @@ class RealPlcAdapter(PLCAdapter):
         }
 
     def wait_ack(self, command_id: str, timeout_ms: int = 5000) -> dict:
+        # TODO: 与PLC交互 — 等待 PLC 确认指令；超时见 system_config.json 的 plc.ack_timeout_ms
         if command_id not in self.commands:
             return {"success": False, "message": "未知 PLC command_id"}
         # Book-keeping ACK for flow orchestration. Real motion completion is
