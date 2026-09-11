@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from core.digital_twin_state import DigitalTwinState
 from devices.base import PLCAdapter
+from devices.gantry_modbus_motion import GantryModbusMotion
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PLC_APP_DIR = PROJECT_ROOT / "third_party" / "plc_finished_app"
@@ -22,11 +23,7 @@ def _ensure_plc_import_path() -> None:
 
 
 class RealPlcAdapter(PLCAdapter):
-    """Connect / message / command bookkeeping for the gantry PLC.
-
-    Motion writes are owned by RealGantryRobotAdapter so WORLD→XYZR mapping can
-    stay explicit and safe.
-    """
+    """连接 PLC，并提供与 finished_app console 相同的绝对定位写入。"""
 
     def __init__(self, twin: DigitalTwinState, config: Mapping[str, Any] | None = None):
         self.twin = twin
@@ -37,6 +34,7 @@ class RealPlcAdapter(PLCAdapter):
         self.connected = False
         self.commands: dict[str, dict] = {}
         self._client = None
+        self._motion: GantryModbusMotion | None = None
 
     def connect(self):
         # TODO: 与PLC交互 — 按配置 IP/端口连现场 PLC（Modbus TCP），失败则整机真机流程起不来
@@ -61,6 +59,16 @@ class RealPlcAdapter(PLCAdapter):
             except Exception:
                 snapshot = None
             self._client = client
+            self._motion = GantryModbusMotion(self.ip, self.port)
+            if not self._motion.open():
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                self._client = None
+                self._motion = None
+                self.twin.update_device("PLC", status="OFFLINE", task="MOTION_CONNECT_FAILED")
+                return {"success": False, "message": f"PLC 运动通道连接失败：{self.ip}:{self.port}"}
             self.connected = True
             self.twin.update_device("PLC", status="ONLINE", task=f"CONNECTED {self.ip}:{self.port}")
             return {
@@ -75,7 +83,7 @@ class RealPlcAdapter(PLCAdapter):
             return {"success": False, "message": f"PLC 连接异常：{exc}"}
 
     def send_command(self, command: str, payload: dict) -> dict:
-        # TODO: 与PLC交互 — 下发业务指令到 PLC（当前多为编排记账；真写入由龙门架适配器补齐）
+        # TODO: 与PLC交互 — 下发业务指令；MOVE 类由 move_absolute_xyzr 真写入
         if not self.connected:
             linked = self.connect()
             if not linked.get("success"):
@@ -96,20 +104,52 @@ class RealPlcAdapter(PLCAdapter):
         }
 
     def wait_ack(self, command_id: str, timeout_ms: int = 5000) -> dict:
-        # TODO: 与PLC交互 — 等待 PLC 确认指令；超时见 config/system_config.py 的 plc.ack_timeout_ms
+        # TODO: 与PLC交互 — 编排层 ACK；真机到位在 move_absolute_xyzr 内等待
         if command_id not in self.commands:
             return {"success": False, "message": "未知 PLC command_id"}
-        # Book-keeping ACK for flow orchestration. Real motion completion is
-        # verified inside RealGantryRobotAdapter when mapping is enabled.
         self.commands[command_id]["status"] = "ACK"
         self.twin.update_device("PLC", task="ACK")
         return {"success": True, "command_id": command_id, "ack": True, "timeout_ms": timeout_ms}
+
+    def move_absolute_xyzr(
+        self,
+        targets: Mapping[str, float],
+        speed: float = 30.0,
+        timeout_s: float = 60.0,
+        soft_limits: Mapping[str, Any] | None = None,
+    ) -> dict:
+        """TODO: 与PLC交互 — 按 finished_app 时序写 XYZR 目标并等轴到位。"""
+        if not self.connected or self._motion is None:
+            linked = self.connect()
+            if not linked.get("success"):
+                return linked
+        assert self._motion is not None
+        try:
+            result = self._motion.move_absolute(
+                targets,
+                speed=speed,
+                timeout_s=timeout_s,
+                soft_limits=soft_limits,
+            )
+            self.twin.update_device("PLC", task="ABS_MOVE_DONE")
+            self.twin.add_message("PLC", "SUCCESS", result.get("message", "绝对定位完成"), result)
+            return result
+        except Exception as exc:
+            self.twin.update_device("PLC", status="FAILED", task="ABS_MOVE_FAILED")
+            self.twin.add_message("PLC", "FAILED", str(exc), {"targets": dict(targets)})
+            return {"success": False, "message": str(exc), "targets": dict(targets)}
 
     def send_message(self, module: str, status: str, message: str, data: dict | None = None) -> dict:
         self.twin.add_message(module, status, message, data)
         return {"success": True, "module": module, "status": status, "message": message, "data": data}
 
     def close(self):
+        if self._motion is not None:
+            try:
+                self._motion.close()
+            except Exception:
+                pass
+            self._motion = None
         if self._client is not None:
             try:
                 self._client.close()

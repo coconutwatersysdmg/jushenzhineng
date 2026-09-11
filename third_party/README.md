@@ -11,8 +11,9 @@
 # Real mode notes
 # - Radar: devices/real_livox_radar_adapter.py -> services/livox_service.py
 # - PLC connect: devices/real_plc_adapter.py -> plc_readonly_core / engineering core
-# - Robot motion: devices/real_gantry_robot_adapter.py refuses WORLD motion until
-#   devices.gantry.allow_real_motion=true and world_to_gantry is configured
+# - Robot motion: devices/real_gantry_robot_adapter.py
+#     requires allow_real_motion=true, world_to_gantry.placeholder=false,
+#     then writes XYZR via devices/gantry_modbus_motion.py (same registers as console)
 # - Camera: devices/real_arm_camera_adapter.py is a D435i stub; install pyrealsense2
 #
 # Standalone PLC console (axis jog / absolute move debugging):
