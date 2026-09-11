@@ -12,9 +12,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from config.system_config import get_system_config
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL_PATH = PROJECT_ROOT / "models" / "pallet_hole_best.pt"
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "system_config.json"
 DEFAULT_INTRINSIC_PATH = PROJECT_ROOT / "config" / "sensor_coordinate_config" / "camera_intrinsic.json"
 DEFAULT_RESULT_ROOT = PROJECT_ROOT / "runtime" / "recognition_results" / "pallet_hole"
 
@@ -111,12 +112,7 @@ class PalletHoleRecognitionService:
 
     @staticmethod
     def _load_config() -> Dict[str, Any]:
-        if DEFAULT_CONFIG_PATH.is_file():
-            try:
-                return json.loads(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        return {}
+        return get_system_config()
 
     def _ensure_model(self):
         if self._model is not None:

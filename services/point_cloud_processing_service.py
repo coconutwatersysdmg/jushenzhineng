@@ -16,9 +16,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
+from config.system_config import get_system_config
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "system_config.json"
 DEFAULT_RESULT_ROOT = PROJECT_ROOT / "runtime" / "point_cloud_results"
 DEFAULT_CHECKPOINT = (
     PROJECT_ROOT
@@ -39,8 +40,9 @@ class PointCloudProcessingService:
         result_root: Optional[str | Path] = None,
         config_path: Optional[str | Path] = None,
     ) -> None:
-        self.config_path = Path(config_path or DEFAULT_CONFIG_PATH)
-        self.system_config = self._load_json(self.config_path)
+        # config_path 保留仅为兼容旧调用；配置已改为 config/system_config.py
+        self.config_path = Path(config_path) if config_path else PROJECT_ROOT / "config" / "system_config.py"
+        self.system_config = get_system_config()
         pc_cfg = self.system_config.get("point_cloud", {}) if isinstance(self.system_config, dict) else {}
 
         configured_checkpoint = checkpoint_path or pc_cfg.get("checkpoint_path") or DEFAULT_CHECKPOINT

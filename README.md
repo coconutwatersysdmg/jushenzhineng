@@ -221,7 +221,7 @@ start_digital_twin.bat
 
 推荐双击 `start_digital_twin.bat`：它固定使用项目 `venv`，首次冷启动会立即显示启动画面。再次双击不会被残留锁拦截，而会自动恢复、前置并提醒已经运行的主窗口。启动阶段、PID、耗时和正常退出记录在 `runtime/startup.log`；Python/Qt 原生崩溃信息记录在 `runtime/startup_fault.log`。
 
-当 `config/system_config.json` 的 `allow_demo_device_data=true` 且步骤2没有选择 `pre_pick_offset` JPG 时，系统会自动生成并使用 `examples/demo_pre_pick_offset.jpg`。结果会明确标记 `demo_input=true` 和“联调示例图（非相机实拍）”；关闭联调数据后仍严格要求真实 `CAM_PICK` 图片。
+当 `config/system_config.py` 的 `allow_demo_device_data=True` 且步骤2没有选择 `pre_pick_offset` JPG 时，系统会自动生成并使用 `examples/demo_pre_pick_offset.jpg`。结果会明确标记 `demo_input=true` 和“联调示例图（非相机实拍）”；关闭联调数据后仍严格要求真实 `CAM_PICK` 图片。
 
 联调模式会继续为缺失的 `P1~P6` 角点生成带对齐 `uint16` 深度的 RGB-D，并为 8.2、10.1、10.2 与两面观测补齐明确标记的示例帧。调试窗口或真实相机传入的文件始终优先；`allow_demo_device_data=false` 时不会生成任何示例输入。
 

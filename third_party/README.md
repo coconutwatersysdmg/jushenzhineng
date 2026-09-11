@@ -3,7 +3,7 @@
 # livox_runtime/     Livox Mid360 capture exe + SDK DLL + mid360s_config.json
 # plc_finished_app/  Verified gantry PLC console / engineering Modbus core
 #
-# Digital twin default mode is still mock. Switch in config/system_config.json:
+# Digital twin default mode is still mock. Switch in config/system_config.py:
 #
 #   "runtime": { "device_mode": "mock" }   # local demo
 #   "runtime": { "device_mode": "real" }   # hardware adapters

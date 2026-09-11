@@ -40,7 +40,7 @@ class RealGantryRobotAdapter(RobotAdapter):
             "task": task,
             "message": (
                 "真机机械臂运动已接入接口，但 WORLD→龙门架 XYZR 映射尚未启用。"
-                "请在 config/system_config.json 的 devices.gantry 中配置 "
+                "请在 config/system_config.py 的 devices.gantry 中配置 "
                 "world_to_gantry，并设置 allow_real_motion=true 后再发运动。"
                 "当前可先用 device_mode=mock 做完整流程演示；"
                 "也可单独运行 third_party/plc_finished_app/plc_finished_console.py 做轴调试。"

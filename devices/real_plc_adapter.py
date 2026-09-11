@@ -30,7 +30,7 @@ class RealPlcAdapter(PLCAdapter):
 
     def __init__(self, twin: DigitalTwinState, config: Mapping[str, Any] | None = None):
         self.twin = twin
-        # TODO: 与PLC交互 — 配置来自 config/system_config.json → devices.plc（现场填 IP/端口）
+        # TODO: 与PLC交互 — 配置来自 config/system_config.py → devices.plc（现场填 IP/端口）
         self.config = dict(config or {})
         self.ip = str(self.config.get("ip") or self.config.get("plc_ip") or "192.168.6.6")
         self.port = int(self.config.get("port") or self.config.get("plc_port") or 502)
@@ -96,7 +96,7 @@ class RealPlcAdapter(PLCAdapter):
         }
 
     def wait_ack(self, command_id: str, timeout_ms: int = 5000) -> dict:
-        # TODO: 与PLC交互 — 等待 PLC 确认指令；超时见 system_config.json 的 plc.ack_timeout_ms
+        # TODO: 与PLC交互 — 等待 PLC 确认指令；超时见 config/system_config.py 的 plc.ack_timeout_ms
         if command_id not in self.commands:
             return {"success": False, "message": "未知 PLC command_id"}
         # Book-keeping ACK for flow orchestration. Real motion completion is

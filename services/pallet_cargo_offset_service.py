@@ -15,26 +15,22 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from algorithm_modules.pallet_overhang_detection_module import pallet_overhang_detection as algo
+from config.system_config import get_system_config
 from utils.cv_io import read_image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = PROJECT_ROOT / "config" / "system_config.json"
 RESULT_ROOT = PROJECT_ROOT / "runtime" / "pallet_cargo_offset_results"
 
 
 class PalletCargoOffsetService:
-    def __init__(self, config_path: Path = CONFIG_PATH, result_root: Path = RESULT_ROOT):
-        self.config_path = Path(config_path)
+    def __init__(self, config_path: Path | None = None, result_root: Path = RESULT_ROOT):
+        # config_path 保留仅为兼容旧调用；配置已改为 config/system_config.py
+        self.config_path = Path(config_path) if config_path else PROJECT_ROOT / "config" / "system_config.py"
         self.result_root = Path(result_root)
         self.config = self._load_config()
 
     def _load_config(self) -> Dict[str, Any]:
-        if self.config_path.is_file():
-            try:
-                return json.loads(self.config_path.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        return {}
+        return get_system_config()
 
     @property
     def cfg(self) -> algo.Config:

@@ -9,14 +9,15 @@ from pathlib import Path
 
 import pymysql
 
+from config.system_config import get_system_config
+
 
 PROJECT_ROOT=Path(__file__).resolve().parents[1]
 DEFAULT_DB=PROJECT_ROOT/"runtime"/"vehicle_loading.db"
-SYSTEM_CONFIG=PROJECT_ROOT/"config"/"system_config.json"
 
 
 def _system_database_config():
-    try: return dict(json.loads(SYSTEM_CONFIG.read_text(encoding="utf-8")).get("database") or {})
+    try: return dict(get_system_config().get("database") or {})
     except Exception: return {}
 
 

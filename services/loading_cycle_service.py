@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from adapters.mock_adapters import MockCameraAdapter, MockRadarAdapter, MockRobotAdapter
+from config.system_config import get_system_config
 from services.corner_recognition_service import CornerRecognitionService
 from services.deviation_monitoring_service import DeviationMonitoringService
 from services.pallet_hole_recognition_service import PalletHoleRecognitionService
@@ -26,7 +27,6 @@ from services.truck_bed_planning_service import TruckBedPlanningService
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 STATE_FILE = PROJECT_ROOT / "runtime" / "loading_cycle_state.json"
-CONFIG_FILE = PROJECT_ROOT / "config" / "system_config.json"
 
 
 class LoadingCycleService:
@@ -101,12 +101,7 @@ class LoadingCycleService:
 
     @staticmethod
     def _load_config() -> Dict[str, Any]:
-        if CONFIG_FILE.is_file():
-            try:
-                return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        return {}
+        return get_system_config()
 
     @property
     def step_code(self) -> str:

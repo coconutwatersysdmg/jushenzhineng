@@ -26,13 +26,13 @@ from services.dynamic_monitoring_service import DynamicMonitoringService
 from services.module_evidence_service import ModuleEvidenceService
 from services.vehicle_database_service import create_vehicle_database_service
 from utils.demo_assets import ensure_demo_pre_pick_image
+from config.system_config import get_system_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RESULT_FILE = PROJECT_ROOT / "runtime" / "overall_results.json"
 STATE_FILE = PROJECT_ROOT / "runtime" / "twin_state.json"
 DEVICE_CONFIG_FILE = PROJECT_ROOT / "config" / "device_config.json"
-SYSTEM_CONFIG_FILE = PROJECT_ROOT / "config" / "system_config.json"
-# TODO: 与PLC交互 — 现场装备配置就在上面这个文件；改 device_mode / devices.plc / devices.gantry 后重启程序
+# TODO: 与PLC交互 — 现场装备配置在 config/system_config.py（可直接写注释的 Python 配置）
 GANTRY_LEFT_X_MM = -3500.0
 GANTRY_RIGHT_X_MM = 3500.0
 GANTRY_CLEARANCE_Z_MM = 4800.0
@@ -82,7 +82,7 @@ class FlowController:
 
     def __init__(self, twin=None, plc=None, robot=None, radar=None, camera=None, algorithms=None):
         self.device_config = self._load_json(DEVICE_CONFIG_FILE)
-        self.system_config = self._load_json(SYSTEM_CONFIG_FILE)
+        self.system_config = get_system_config()
         self.allow_demo = bool((self.system_config.get("runtime") or {}).get("allow_demo_device_data", True))
         self.twin = twin or DigitalTwinState()
         if plc is None or robot is None or radar is None or camera is None:
@@ -146,7 +146,7 @@ class FlowController:
         review_cfg = self.system_config.get("corner_review") or {}
         self.corner_review_enabled = bool(review_cfg.get("enabled", True))
         self.corner_review_auto_accept_demo = bool(review_cfg.get("auto_accept_demo", False))
-        # TODO: 与PLC交互 — 启动时连接 PLC（mock 假连；real 用 system_config.json 的 devices.plc）
+        # TODO: 与PLC交互 — 启动时连接 PLC（mock 假连；real 用 config/system_config.py 的 devices.plc）
         self.plc.connect()
         if hasattr(self.robot, "motion_callback"):
             self.robot.motion_callback = self._notify_motion

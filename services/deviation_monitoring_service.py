@@ -7,19 +7,19 @@ import math
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
+from config.system_config import get_system_config
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CONFIG_PATH = PROJECT_ROOT / "config" / "system_config.json"
 
 
 class DeviationMonitoringService:
-    def __init__(self, config_path: Path = CONFIG_PATH):
-        self.config_path = Path(config_path)
+    def __init__(self, config_path: Path | None = None):
+        # config_path 保留仅为兼容旧调用；配置已改为 config/system_config.py
+        self.config_path = Path(config_path) if config_path else PROJECT_ROOT / "config" / "system_config.py"
         self.config = self._load_config()
 
     def _load_config(self) -> Dict[str, Any]:
-        if self.config_path.is_file():
-            return json.loads(self.config_path.read_text(encoding="utf-8"))
-        return {}
+        return get_system_config()
 
     def evaluate_pallet_cargo(self, measurement: Dict[str, Any], stage: str) -> Dict[str, Any]:
         gate = self.config.get("deviation_gate", {}).get("pallet_cargo", {})
