@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
-"""外接设备统一配置（现场联调主要改这一个文件）。
-
-配置已与现场可联机项目 ``Automatic loading system`` 对齐：
+"""
 - PLC：192.168.6.6:502，工作原点 XYZR=0
 - Livox：host_ip=192.168.1.50
 - D435i：1280x720@30，外参 config/camera_extrinsic.json
@@ -15,11 +13,9 @@ from typing import Any, Dict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-# ---------------------------------------------------------------------------
-# 现场联调优先改这里（迁自 Automatic loading system）
-# ---------------------------------------------------------------------------
 
-# "mock" = 本地假设备；"real" = PLC/雷达/相机真机适配器
+
+# TODO 开启真机。"mock" = 本地假设备；"real" = PLC/雷达/相机真机适配器
 DEVICE_MODE = "real"
 
 # ---- PLC（Modbus TCP）---- 对应 gantry_settings.json
@@ -29,7 +25,7 @@ PLC = {
     "ack_timeout_ms": 5000,
 }
 
-# ---- 龙门架 / 真机运动 ---- 对应 gantry_settings.json
+# TODO PLC---- 龙门架 / 真机运动 ---- 对应 gantry_settings.json
 GANTRY = {
     "allow_real_motion": True,
     "default_speed": 30.0,
@@ -58,9 +54,9 @@ GANTRY = {
     },
     "r_forbidden_zones_enabled": False,
     "r_forbidden_zones": [],
-    # WORLD→XYZR：零点已与现场工作原点对齐；scale 仍待点动确认
+    # TODO 待确认方向，由于目前没确认车头在哪，先打开看看了
     "world_to_gantry": {
-        "placeholder": True,
+        "placeholder": False,
         "world_origin_mm": {"x": -3500.0, "y": 0.0, "z": 0.0},
         "gantry_origin_xyzr": {"X": 0.0, "Y": 0.0, "Z": 0.0, "R": 0.0},
         "axis_map": {
@@ -77,7 +73,7 @@ GANTRY = {
     },
 }
 
-# ---- Livox Mid360 雷达 ---- 对应 livox_mid360s 配置
+# TODO 雷达，对应 livox_mid360s配置
 LIVOX = {
     "use_live_capture": True,
     "exe_path": "third_party/livox_runtime/livox_realtime_select_and_move.exe",
@@ -104,7 +100,7 @@ LIVOX = {
     },
 }
 
-# ---- 相机 D435i ---- 对应 config.ini [camera] + camera_extrinsic.json
+# TODO 相机配置 D435i
 CAMERA = {
     "enabled": True,
     "backend": "realsense",
