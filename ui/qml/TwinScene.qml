@@ -545,11 +545,11 @@ Item {
         // High/low deck surfaces from 6 corners.
         Node {
             id: highLowVisual
-            visible: st.truck && (String(st.truck.board_mode).toUpperCase().indexOf("HIGH") >= 0)
+            visible: !!(st.truck && String(st.truck.board_mode || "").toUpperCase().indexOf("HIGH") >= 0)
             property var highSurface: root.boardSurface(["P1","P2","P3","P4"])
             property var lowSurface: root.boardSurface(["P3","P4","P5","P6"])
-            Model { visible:highLowVisual.highSurface.valid===true; source:"#Cube"; position:Qt.vector3d(root.m(highLowVisual.highSurface.cx),root.m(highLowVisual.highSurface.cz)+0.03,root.m(highLowVisual.highSurface.cy)); scale:root.cubeScaleMm(highLowVisual.highSurface.width,60,highLowVisual.highSurface.length); materials:PrincipledMaterial{baseColor:"#a66b3f";opacity:0.74;roughness:0.58} }
-            Model { visible:highLowVisual.lowSurface.valid===true; source:"#Cube"; position:Qt.vector3d(root.m(highLowVisual.lowSurface.cx),root.m(highLowVisual.lowSurface.cz)+0.03,root.m(highLowVisual.lowSurface.cy)); scale:root.cubeScaleMm(highLowVisual.lowSurface.width,60,highLowVisual.lowSurface.length); materials:PrincipledMaterial{baseColor:"#567d8e";opacity:0.74;roughness:0.58} }
+            Model { visible: !!(highLowVisual.highSurface && highLowVisual.highSurface.valid); source:"#Cube"; position:Qt.vector3d(root.m(highLowVisual.highSurface.cx),root.m(highLowVisual.highSurface.cz)+0.03,root.m(highLowVisual.highSurface.cy)); scale:root.cubeScaleMm(highLowVisual.highSurface.width,60,highLowVisual.highSurface.length); materials:PrincipledMaterial{baseColor:"#a66b3f";opacity:0.74;roughness:0.58} }
+            Model { visible: !!(highLowVisual.lowSurface && highLowVisual.lowSurface.valid); source:"#Cube"; position:Qt.vector3d(root.m(highLowVisual.lowSurface.cx),root.m(highLowVisual.lowSurface.cz)+0.03,root.m(highLowVisual.lowSurface.cy)); scale:root.cubeScaleMm(highLowVisual.lowSurface.width,60,highLowVisual.lowSurface.length); materials:PrincipledMaterial{baseColor:"#567d8e";opacity:0.74;roughness:0.58} }
         }
 
         // Loading regions two columns x 1.2m.
@@ -579,12 +579,13 @@ Item {
 
         // Current placement target.
         Node {
-            visible: st.truck && st.truck.current_target && st.truck.current_target.final_world_pose
+            id: targetMarker
+            visible: !!(st.truck && st.truck.current_target && st.truck.current_target.final_world_pose)
             property var pp: st.truck && st.truck.current_target ? st.truck.current_target.final_world_pose || ({}) : ({})
             position: root.worldPos(pp)
             property real targetLengthMm: Math.max(600,Number(st.cargo && st.cargo.length_mm || 1200))
             property real targetWidthMm: Math.max(500,Number(st.cargo && st.cargo.width_mm || 1000))
-            Model { source:"#Cube"; position:Qt.vector3d(0,0.035,0); scale:root.cubeScaleMm(targetLengthMm,70,targetWidthMm); materials:PrincipledMaterial{baseColor:"#ffd33d";opacity:0.32;emissiveFactor:Qt.vector3d(0.22,0.14,0.01);roughness:0.48} }
+            Model { source:"#Cube"; position:Qt.vector3d(0,0.035,0); scale:root.cubeScaleMm(targetMarker.targetLengthMm,70,targetMarker.targetWidthMm); materials:PrincipledMaterial{baseColor:"#ffd33d";opacity:0.32;emissiveFactor:Qt.vector3d(0.22,0.14,0.01);roughness:0.48} }
             Model { source:"#Cylinder"; position:Qt.vector3d(0,0.18,0); scale:root.cylScaleM(0.52,0.36); materials:PrincipledMaterial{baseColor:"#ffd33d";emissiveFactor:Qt.vector3d(0.42,0.28,0.01)} }
             Model { source:"#Cylinder"; position:Qt.vector3d(0,0.78,0); scale:root.cylScaleM(0.075,1.20); materials:PrincipledMaterial{baseColor:"#fff0a2";emissiveFactor:Qt.vector3d(0.30,0.22,0.04)} }
         }

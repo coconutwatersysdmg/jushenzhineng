@@ -27,7 +27,7 @@ class RealPlcAdapter(PLCAdapter):
 
     def __init__(self, twin: DigitalTwinState, config: Mapping[str, Any] | None = None):
         self.twin = twin
-        # TODO: 与PLC交互 — 配置来自 config/system_config.py → devices.plc（现场填 IP/端口）
+        # TODO: 与PLC交互 — 配置来自 config/external_devices_config.py → PLC
         self.config = dict(config or {})
         self.ip = str(self.config.get("ip") or self.config.get("plc_ip") or "192.168.6.6")
         self.port = int(self.config.get("port") or self.config.get("plc_port") or 502)

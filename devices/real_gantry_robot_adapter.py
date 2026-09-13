@@ -39,8 +39,8 @@ class RealGantryRobotAdapter(RobotAdapter):
                 "success": False,
                 "task": task,
                 "message": (
-                    "真机运动未启用：请在 config/system_config.py 将 "
-                    "devices.gantry.allow_real_motion=True（标定确认后再开）。"
+                "真机运动未启用：请在 config/external_devices_config.py 将 "
+                "GANTRY.allow_real_motion=True（标定确认后再开）。"
                 ),
             }
         if not self.world_to_gantry:
@@ -48,8 +48,8 @@ class RealGantryRobotAdapter(RobotAdapter):
                 "success": False,
                 "task": task,
                 "message": (
-                    "缺少 world_to_gantry。请在 config/system_config.py 填写 "
-                    "WORLD→XYZR 映射后再发运动。"
+                    "缺少 world_to_gantry。请在 config/external_devices_config.py 填写 "
+                    "GANTRY.world_to_gantry 后再发运动。"
                 ),
             }
         if bool(self.world_to_gantry.get("placeholder", False)):

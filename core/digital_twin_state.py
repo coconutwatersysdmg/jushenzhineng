@@ -9,10 +9,10 @@ from typing import Any, Dict
 import json
 
 from .geometry import Pose6D, compose_pose, parent_pose_for_child, relative_pose
+from config.external_devices_config import get_device_layout_config
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEVICE_CONFIG = PROJECT_ROOT / "config" / "device_config.json"
 CAMERA_INTRINSIC_CONFIG = PROJECT_ROOT / "config" / "sensor_coordinate_config" / "camera_intrinsic.json"
 
 
@@ -25,12 +25,10 @@ class DigitalTwinState:
 
     @staticmethod
     def _load_device_config():
-        if DEVICE_CONFIG.is_file():
-            try:
-                return json.loads(DEVICE_CONFIG.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        return {}
+        try:
+            return get_device_layout_config()
+        except Exception:
+            return {}
 
     @staticmethod
     def _load_intrinsic_config():

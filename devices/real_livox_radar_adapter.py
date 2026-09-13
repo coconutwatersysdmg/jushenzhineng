@@ -18,9 +18,10 @@ class RealLivoxRadarAdapter(RadarAdapter):
     def __init__(self, twin: DigitalTwinState, config: Mapping[str, Any] | None = None):
         self.twin = twin
         self.config = dict(config or {})
-        config_file = self.config.get("config_file") or (PROJECT_ROOT / "config" / "livox_config.ini")
-        self.service = LivoxService(project_root=PROJECT_ROOT, config_file=config_file)
+        # 统一外接设备配置已内含采集参数；不再依赖 livox_config.ini
+        self.service = LivoxService(project_root=PROJECT_ROOT, config_file=None)
         self.pcd_path = ""
+        self.use_live_capture = bool(self.config.get("use_live_capture", True))
 
     def set_point_cloud_path(self, path: str):
         self.pcd_path = str(path or "")
@@ -28,7 +29,12 @@ class RealLivoxRadarAdapter(RadarAdapter):
     def locate_truck(self, cargo: dict) -> dict:
         self.twin.update_device("RADAR", status="ONLINE", task="LIVOX_CAPTURE")
         override = Path(str((cargo or {}).get("point_cloud_path") or self.pcd_path or ""))
-        if override.is_file():
+        # 真采模式下忽略 examples 联调 PCD，避免“没改雷达也 SUCCESS”
+        override_text = str(override).replace("\\", "/")
+        allow_override = override.is_file() and not (
+            self.use_live_capture and ("/examples/" in f"/{override_text}" or "example" in override_text.lower())
+        )
+        if allow_override:
             path = str(override.resolve())
             self.twin.update_device("RADAR", task="PCD_READY")
             return {
@@ -60,7 +66,12 @@ class RealLivoxRadarAdapter(RadarAdapter):
             return {
                 "success": False,
                 "return_code": result.return_code,
-                "message": f"Livox 采集失败：{detail or '未生成 PCD'}",
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "message": (
+                    f"Livox 采集失败（return_code={result.return_code}）："
+                    f"{detail or '未生成 PCD。请检查雷达网线、host_ip 与电脑网卡 IPv4 是否一致。'}"
+                ),
             }
 
         path = str(Path(result.pcd_path).resolve())

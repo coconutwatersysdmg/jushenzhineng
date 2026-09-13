@@ -6,3 +6,5 @@ numpy>=1.24
 torch>=2.0
 open3d>=0.18
 pymodbus>=3.6,<4
+# Intel RealSense D435i（现场真机相机；无相机时可不安）
+pyrealsense2>=2.54

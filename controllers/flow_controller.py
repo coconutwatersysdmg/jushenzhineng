@@ -27,12 +27,12 @@ from services.module_evidence_service import ModuleEvidenceService
 from services.vehicle_database_service import create_vehicle_database_service
 from utils.demo_assets import ensure_demo_pre_pick_image
 from config.system_config import get_system_config
+from config.external_devices_config import get_device_layout_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RESULT_FILE = PROJECT_ROOT / "runtime" / "overall_results.json"
 STATE_FILE = PROJECT_ROOT / "runtime" / "twin_state.json"
-DEVICE_CONFIG_FILE = PROJECT_ROOT / "config" / "device_config.json"
-# TODO: 与PLC交互 — 现场装备配置在 config/system_config.py（可直接写注释的 Python 配置）
+# TODO: 与PLC交互 — 外接设备统一配置：config/external_devices_config.py
 GANTRY_LEFT_X_MM = -3500.0
 GANTRY_RIGHT_X_MM = 3500.0
 GANTRY_CLEARANCE_Z_MM = 4800.0
@@ -81,7 +81,7 @@ class FlowController:
     ]
 
     def __init__(self, twin=None, plc=None, robot=None, radar=None, camera=None, algorithms=None):
-        self.device_config = self._load_json(DEVICE_CONFIG_FILE)
+        self.device_config = get_device_layout_config()
         self.system_config = get_system_config()
         self.allow_demo = bool((self.system_config.get("runtime") or {}).get("allow_demo_device_data", True))
         self.twin = twin or DigitalTwinState()
@@ -231,6 +231,7 @@ class FlowController:
 
     def set_debug_inputs(self, values: Dict[str, Any]):
         self.debug_inputs=deepcopy(values or {})
+        self._apply_live_radar_policy()
         if hasattr(self.radar,"set_point_cloud_path"):
             self.radar.set_point_cloud_path(self.debug_inputs.get("point_cloud_path", ""))
         pallet_rgb=self.debug_inputs.get("pallet_rgb", ""); pallet_depth=self.debug_inputs.get("pallet_depth", "")
@@ -246,6 +247,28 @@ class FlowController:
             if hasattr(self.camera,"set_tagged_depth"): self.camera.set_tagged_depth(tag,path)
         for tag,path in (self.debug_inputs.get("depths") or {}).items():
             if hasattr(self.camera,"set_tagged_depth"): self.camera.set_tagged_depth(tag,path)
+
+    def _use_live_radar(self) -> bool:
+        if str(getattr(self, "device_mode", "mock")).lower() != "real":
+            return False
+        livox = (self.system_config.get("devices") or {}).get("livox") or {}
+        return bool(livox.get("use_live_capture", True))
+
+    def _apply_live_radar_policy(self):
+        """真机 + use_live_capture：丢掉离线示例 PCD，强制走 Livox 实采。"""
+        if not self._use_live_radar():
+            return
+        self.debug_inputs["point_cloud_example_only"] = False
+        pcd = str(self.debug_inputs.get("point_cloud_path") or "").replace("\\", "/")
+        # 默认联调 PCD 在 examples/ 下；清掉后 RealLivox 才会 capture_once
+        if (not pcd) or ("/examples/" in f"/{pcd}") or ("example" in pcd.lower()):
+            self.debug_inputs["point_cloud_path"] = ""
+        self.twin.add_message(
+            "RADAR",
+            "INFO",
+            "已切换真雷达实采：忽略离线示例 PCD，将调用 Livox Mid360 采集",
+            {"use_live_capture": True, "host_config": "config/external_devices_config.py → LIVOX.host_ip"},
+        )
 
     def default_debug_inputs(self):
         return self.module_evidence.example_debug_inputs()
@@ -314,6 +337,9 @@ class FlowController:
 
     def _capture_rgb(self, camera_id: str, tag: str, required=True):
         cap=self.camera.capture_rgb(camera_id,tag=tag)
+        # 真机适配器常用 rgb_path；流程统一吃 image_path
+        if isinstance(cap, dict) and not cap.get("image_path") and cap.get("rgb_path"):
+            cap["image_path"]=cap["rgb_path"]
         if not cap.get("success") and self.allow_demo and tag == "pre_pick_offset":
             demo_path=ensure_demo_pre_pick_image()
             cap={
@@ -326,6 +352,8 @@ class FlowController:
                 "source":"generated_demo_image",
             }
         if required and not cap.get("success"): raise RuntimeError(f"{camera_id} 未取得 {tag} JPG")
+        if required and not cap.get("image_path"):
+            raise RuntimeError(f"{camera_id} 取得了 {tag} 结果但缺少 image_path/rgb_path")
         return cap
 
     def _capture_rgbd(self, camera_id: str, tag: str):
@@ -452,8 +480,9 @@ class FlowController:
         locate=self.radar.locate_truck(self.current_cargo)
         started=perf_counter(); raw_result=self.algorithms.radar_process(locate,self.current_cargo) if locate.get("success") else locate
         model_invoked=bool(locate.get("pcd_path"))
-        example_only=bool(model_invoked and self.debug_inputs.get("point_cloud_example_only"))
-        self._evidence("POINTNET_TRUCK",{"pcd_path":locate.get("pcd_path","") ,"example_only":example_only},raw_result,started,model_invoked=model_invoked,note=("离线PCD已完成真实推理；因不属于当前场景标定，仅展示输入输出，不将其坐标发送给机械臂" if example_only else "雷达仅用于相机粗搜索；最终板型由相机角点判断") if model_invoked else "无PCD，PointNet++未调用",status="SUCCESS" if raw_result.get("success") else "FAILED")
+        # 真雷达实采时禁止再替换成联调粗点
+        example_only=bool(model_invoked and self.debug_inputs.get("point_cloud_example_only") and not self._use_live_radar())
+        self._evidence("POINTNET_TRUCK",{"pcd_path":locate.get("pcd_path","") ,"example_only":example_only,"live_radar":self._use_live_radar(),"locate_source":locate.get("source")},raw_result,started,model_invoked=model_invoked,note=("离线PCD已完成真实推理；因不属于当前场景标定，仅展示输入输出，不将其坐标发送给机械臂" if example_only else ("Livox实采点云已处理" if self._use_live_radar() else "雷达仅用于相机粗搜索；最终板型由相机角点判断")) if model_invoked else "无PCD，PointNet++未调用",status="SUCCESS" if raw_result.get("success") else "FAILED")
         if example_only:
             raw_result={
                 "success":True,"demo":True,

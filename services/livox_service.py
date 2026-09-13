@@ -31,6 +31,14 @@ class LivoxService:
         self.settings = self._load_settings()
 
     def _load_settings(self) -> dict[str, str]:
+        # 优先读统一外接设备配置；失败再回退 ini
+        try:
+            from config.external_devices_config import get_livox_runtime_settings, sync_livox_mid360_json
+
+            sync_livox_mid360_json(self.project_root)
+            return get_livox_runtime_settings()
+        except Exception:
+            pass
         parser = configparser.ConfigParser()
         if self.config_file.exists():
             parser.read(self.config_file, encoding="utf-8")
@@ -51,8 +59,9 @@ class LivoxService:
         candidates = (key, key.replace("_", " "), key.replace("_", "-"))
         for candidate in candidates:
             value = section.get(candidate)  # type: ignore[attr-defined]
-            if value is not None:
-                return str(value)
+            # ConfigParser 可能返回 None；空串也回退默认，避免后续路径拼接炸掉
+            if value is not None and str(value).strip() != "":
+                return str(value).strip()
         return default
 
     def _resolve_path(self, value: str | Path) -> Path:
@@ -80,6 +89,13 @@ class LivoxService:
         timeout_sec: int | None = None,
     ) -> LivoxCaptureResult:
         """Capture one PCD file and return the output path plus point count."""
+
+        try:
+            from config.external_devices_config import sync_livox_mid360_json
+
+            sync_livox_mid360_json(self.project_root)
+        except Exception:
+            pass
 
         exe_path = self.exe_path
         config_path = self.lidar_config_path
@@ -117,15 +133,17 @@ class LivoxService:
             timeout=timeout,
         )
 
-        point_count = self._parse_point_count(completed.stdout + "\n" + completed.stderr)
+        stdout = completed.stdout if completed.stdout is not None else ""
+        stderr = completed.stderr if completed.stderr is not None else ""
+        point_count = self._parse_point_count(stdout + "\n" + stderr)
 
         return LivoxCaptureResult(
             success=completed.returncode == 0 and pcd_path.exists(),
             pcd_path=pcd_path,
             point_count=point_count,
             return_code=int(completed.returncode),
-            stdout=completed.stdout,
-            stderr=completed.stderr,
+            stdout=stdout,
+            stderr=stderr,
         )
 
     def capture_timestamped(self, capture_ms: int | None = None) -> LivoxCaptureResult:

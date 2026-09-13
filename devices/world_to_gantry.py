@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """WORLD 位姿 → 龙门架 PLC 轴坐标 XYZR。
 
-配置来自 config/system_config.py → devices.gantry.world_to_gantry。
+配置来自 config/external_devices_config.py → GANTRY.world_to_gantry。
 现场标定后把 placeholder 改为 False，并填真实零点/比例。
 """
 from __future__ import annotations
@@ -17,7 +17,7 @@ def transform_world_to_gantry(pose: Mapping[str, Any], mapping: Mapping[str, Any
     """把软件 WORLD 位姿换成 PLC 轴目标 ``{X,Y,Z,R}``。"""
     cfg = dict(mapping or {})
     if not cfg:
-        raise WorldToGantryError("world_to_gantry 为空，请先在 config/system_config.py 填写映射")
+        raise WorldToGantryError("world_to_gantry 为空，请先在 config/external_devices_config.py 填写映射")
     if bool(cfg.get("placeholder", False)):
         raise WorldToGantryError(
             "world_to_gantry.placeholder=True（仍是占位假数据）。"
