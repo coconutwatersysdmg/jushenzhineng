@@ -1,10 +1,20 @@
-PySide6>=6.7,<7
-PyMySQL>=1.1,<2
-ultralytics>=8.3.249,<9
-opencv-python>=4.8
-numpy>=1.24
-torch>=2.0
-open3d>=0.18
-pymodbus>=3.6,<4
-# Intel RealSense D435i（现场真机相机；无相机时可不安）
-pyrealsense2>=2.54
+# 巨神智能 jushenzhineng_v3 — 便携 runtime 依赖（Windows / Python 3.12）
+# 版本来自本项目已验证的 venv 冻结结果；不要随意升级核心包。
+#
+# 说明：
+# - 当前验证环境中的 torch 为 CPU wheel（torch==2.13.0）。
+# - 若现场需要 CUDA GPU 推理，请在开发机用匹配驱动的 CUDA 版 PyTorch wheel
+#   重建 runtime，而不是在目标机临时 pip 升级。
+
+PySide6==6.8.3
+PyMySQL==1.2.0
+numpy==2.5.2
+opencv-python==5.0.0.93
+torch==2.13.0
+torchvision==0.28.0
+ultralytics==8.4.130
+open3d==0.19.0
+pymodbus==3.15.0
+Pillow==12.3.0
+# Intel RealSense D435i 的 Python 绑定（硬件驱动仍需在 Windows 上单独安装）
+pyrealsense2>=2.54,<3

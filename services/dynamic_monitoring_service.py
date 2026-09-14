@@ -14,7 +14,7 @@ from utils.cv_io import read_image, write_image
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RESULT_ROOT = PROJECT_ROOT / "runtime" / "dynamic_monitoring_results"
+RESULT_ROOT = PROJECT_ROOT / "workdir" / "dynamic_monitoring_results"
 
 
 class DynamicMonitoringService:

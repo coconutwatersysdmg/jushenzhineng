@@ -13,7 +13,7 @@ from pymysql.constants import CLIENT
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SQLITE = PROJECT_ROOT / "runtime" / "vehicle_loading.db"
+DEFAULT_SQLITE = PROJECT_ROOT / "workdir" / "vehicle_loading.db"
 MYSQL_SCHEMA = PROJECT_ROOT / "database" / "vehicle_centered_schema_mysql.sql"
 
 TABLES = (

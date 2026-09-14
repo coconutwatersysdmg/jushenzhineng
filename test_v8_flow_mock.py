@@ -5,7 +5,7 @@ import cv2
 
 from controllers.flow_controller import FlowController
 
-TMP=Path('runtime/test_v8_inputs'); TMP.mkdir(parents=True,exist_ok=True)
+TMP=Path('workdir/test_v8_inputs'); TMP.mkdir(parents=True,exist_ok=True)
 rgb=np.zeros((720,1280,3),dtype=np.uint8); rgb[:]=180
 depth=np.full((720,1280),1000,dtype=np.uint16)
 rgb_path=TMP/'dummy.jpg'; dep_path=TMP/'dummy_depth.png'; cv2.imwrite(str(rgb_path),rgb); cv2.imwrite(str(dep_path),depth)

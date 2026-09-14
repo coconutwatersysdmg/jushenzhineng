@@ -7,12 +7,19 @@ __pycache__/
 *.pyd
 .Python
 *.egg-info/
-.eggs/
+.eggs
 dist/
 build/
 
-# Runtime / generated data
+# Portable Python runtime (built by tools/build_runtime.bat; copy with delivery folder)
 runtime/
+tools/_cache/
+
+# Generated work data / logs (formerly mixed into runtime/)
+workdir/
+logs/
+
+# Legacy generated lidar scans
 data/lidar/*.pcd
 data/lidar/**/*.pcd
 

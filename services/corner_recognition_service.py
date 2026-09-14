@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL_PATH = PROJECT_ROOT / "models" / "corner_service.pt"
-DEFAULT_RESULT_ROOT = PROJECT_ROOT / "runtime" / "recognition_results" / "corner"
+DEFAULT_RESULT_ROOT = PROJECT_ROOT / "workdir" / "recognition_results" / "corner"
 ALL_POINT_NAMES = tuple(f"P{i}" for i in range(1, 9))
 
 

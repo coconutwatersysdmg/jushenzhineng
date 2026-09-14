@@ -30,8 +30,8 @@ from config.system_config import get_system_config
 from config.external_devices_config import get_device_layout_config
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RESULT_FILE = PROJECT_ROOT / "runtime" / "overall_results.json"
-STATE_FILE = PROJECT_ROOT / "runtime" / "twin_state.json"
+RESULT_FILE = PROJECT_ROOT / "workdir" / "overall_results.json"
+STATE_FILE = PROJECT_ROOT / "workdir" / "twin_state.json"
 # TODO: 与PLC交互 — 外接设备统一配置：config/external_devices_config.py
 GANTRY_LEFT_X_MM = -3500.0
 GANTRY_RIGHT_X_MM = 3500.0

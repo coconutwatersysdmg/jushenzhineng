@@ -17,7 +17,7 @@ from config.system_config import get_system_config
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODEL_PATH = PROJECT_ROOT / "models" / "pallet_hole_best.pt"
 DEFAULT_INTRINSIC_PATH = PROJECT_ROOT / "config" / "sensor_coordinate_config" / "camera_intrinsic.json"
-DEFAULT_RESULT_ROOT = PROJECT_ROOT / "runtime" / "recognition_results" / "pallet_hole"
+DEFAULT_RESULT_ROOT = PROJECT_ROOT / "workdir" / "recognition_results" / "pallet_hole"
 
 
 class PalletHoleRecognitionService:

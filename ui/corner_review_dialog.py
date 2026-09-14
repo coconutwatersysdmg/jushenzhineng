@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 from utils.cv_io import read_image, write_image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-REVIEW_ROOT = PROJECT_ROOT / "runtime" / "recognition_results" / "corner_review"
+REVIEW_ROOT = PROJECT_ROOT / "workdir" / "recognition_results" / "corner_review"
 
 
 class CornerCanvas(QLabel):

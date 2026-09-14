@@ -12,9 +12,9 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-VENV_PYTHON = PROJECT_ROOT / "venv" / "Scripts" / "python.exe"
-STARTUP_LOG = PROJECT_ROOT / "runtime" / "startup.log"
-FAULT_LOG = PROJECT_ROOT / "runtime" / "startup_fault.log"
+RUNTIME_PYTHON = PROJECT_ROOT / "runtime" / "python.exe"
+STARTUP_LOG = PROJECT_ROOT / "logs" / "startup.log"
+FAULT_LOG = PROJECT_ROOT / "logs" / "startup_fault.log"
 INSTANCE_SERVER_NAME = "jushenzhineng-v8-main-window"
 INSTANCE_MUTEX_NAME = "Local\\JushenzhinengV8MainWindow"
 _FAULT_STREAM = None
@@ -30,25 +30,26 @@ def _log_startup(message: str) -> None:
 
 
 def _redirect_to_project_python() -> None:
-    """Make ``python main.py`` and double-click use the project environment.
+    """Make ``python main.py`` and double-click use the portable project runtime.
 
     Windows may associate ``.py`` files (and the ``python`` command) with a
-    global interpreter that does not contain PySide6.  Replace that process
-    with the checked project interpreter before importing any GUI dependency.
+    global interpreter that does not contain project dependencies.  Replace
+    that process with ``runtime\\python.exe`` before importing GUI code.
     """
-    if os.name != "nt" or not VENV_PYTHON.is_file():
+    if os.name != "nt" or not RUNTIME_PYTHON.is_file():
         return
-    if os.environ.get("JUSHEN_VENV_BOOTSTRAPPED") == "1":
+    if os.environ.get("JUSHEN_RUNTIME_BOOTSTRAPPED") == "1":
         return
     try:
         current = Path(sys.executable).resolve()
-        target = VENV_PYTHON.resolve()
+        target = RUNTIME_PYTHON.resolve()
         if current == target:
             return
         _log_startup(f"BOOTSTRAP_REDIRECT from={current} to={target}")
         environment = os.environ.copy()
-        environment["JUSHEN_VENV_BOOTSTRAPPED"] = "1"
+        environment["JUSHEN_RUNTIME_BOOTSTRAPPED"] = "1"
         environment.setdefault("PYTHONUTF8", "1")
+        environment.setdefault("PYTHONNOUSERSITE", "1")
         os.chdir(PROJECT_ROOT)
         os.execve(
             str(target),

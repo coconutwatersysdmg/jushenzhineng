@@ -11,8 +11,8 @@ from typing import Any, Dict, Mapping
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = PROJECT_ROOT / "examples" / "module_io_manifest.json"
-EVIDENCE_ROOT = PROJECT_ROOT / "runtime" / "module_call_evidence"
-SUMMARY_PATH = PROJECT_ROOT / "runtime" / "module_call_summary.json"
+EVIDENCE_ROOT = PROJECT_ROOT / "workdir" / "module_call_evidence"
+SUMMARY_PATH = PROJECT_ROOT / "workdir" / "module_call_summary.json"
 
 
 class ModuleEvidenceService:

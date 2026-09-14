@@ -26,7 +26,7 @@ from services.point_cloud_processing_service import PointCloudProcessingService
 from services.truck_bed_planning_service import TruckBedPlanningService
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-STATE_FILE = PROJECT_ROOT / "runtime" / "loading_cycle_state.json"
+STATE_FILE = PROJECT_ROOT / "workdir" / "loading_cycle_state.json"
 
 
 class LoadingCycleService:

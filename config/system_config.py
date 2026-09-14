@@ -38,7 +38,7 @@ SYSTEM_CONFIG: Dict[str, Any] = {
         "password_env": "JUSHEN_MYSQL_PASSWORD",
         "auto_start": False,
         "initialize_schema": False,
-        "path": "runtime/vehicle_loading.db",
+        "path": "workdir/vehicle_loading.db",
         "center_entity": "truck",
     },
     "pallet_cargo_offset": {

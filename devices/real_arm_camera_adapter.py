@@ -38,7 +38,7 @@ class RealArmCameraAdapter(ArmCameraAdapter):
         self.fps = int(self.config.get("fps", 30))
         self._depth_scale_mm = float(self.config.get("depth_unit_mm", 1.0))
 
-        capture_dir = Path(str(self.config.get("capture_dir") or "runtime/camera_captures"))
+        capture_dir = Path(str(self.config.get("capture_dir") or "workdir/camera_captures"))
         self.capture_dir = capture_dir if capture_dir.is_absolute() else (PROJECT_ROOT / capture_dir)
 
         extrinsic = Path(str(self.config.get("extrinsic_file") or "config/camera_extrinsic.json"))

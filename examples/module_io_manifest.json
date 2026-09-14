@@ -1,6 +1,6 @@
 {
   "version": "v8-module-evidence-1",
-  "description": "系统启动自动加载的全部模型/算法模块示例输入输出；实时流程调用后由 runtime/module_call_evidence 追加真实证据。",
+  "description": "系统启动自动加载的全部模型/算法模块示例输入输出；实时流程调用后由 workdir/module_call_evidence 追加真实证据。",
   "modules": [
     {
       "module_id": "PALLET_OVERHANG_PRE",

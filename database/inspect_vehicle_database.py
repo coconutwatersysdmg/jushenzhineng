@@ -13,7 +13,7 @@ from config.system_config import get_system_config
 
 
 PROJECT_ROOT=Path(__file__).resolve().parents[1]
-DEFAULT_DB=PROJECT_ROOT/"runtime"/"vehicle_loading.db"
+DEFAULT_DB=PROJECT_ROOT/"workdir"/"vehicle_loading.db"
 
 
 def _system_database_config():

@@ -1,6 +1,6 @@
 # 车辆中心装载数据库
 
-当前运行代码默认直连本机 MySQL 8.3：`127.0.0.1:3306/jushenzhineng`。应用使用仅授权该业务库的 `jushen_app` 账号；MySQL 由机器上的 `MySQL83` Windows 服务管理，应用不再启动项目独立实例。SQLite `runtime/vehicle_loading.db` 保留用于测试和回退。
+当前运行代码默认直连本机 MySQL 8.3：`127.0.0.1:3306/jushenzhineng`。应用使用仅授权该业务库的 `jushen_app` 账号；MySQL 由机器上的 `MySQL83` Windows 服务管理，应用不再启动项目独立实例。SQLite `workdir/vehicle_loading.db` 保留用于测试和回退。
 
 ## 数据中心关系
 
@@ -45,19 +45,19 @@ vehicle（车辆主档）
 查看当前配置的数据库（默认 MySQL）：
 
 ```powershell
-.\venv\Scripts\python.exe database\inspect_vehicle_database.py
+.\runtime\python.exe database\inspect_vehicle_database.py
 ```
 
 指定车辆：
 
 ```powershell
-.\venv\Scripts\python.exe database\inspect_vehicle_database.py --truck-id TRUCK-01
+.\runtime\python.exe database\inspect_vehicle_database.py --truck-id TRUCK-01
 ```
 
 显式查看旧 SQLite：
 
 ```powershell
-.\venv\Scripts\python.exe database\inspect_vehicle_database.py --driver sqlite --db runtime\vehicle_loading.db
+.\runtime\python.exe database\inspect_vehicle_database.py --driver sqlite --db workdir\vehicle_loading.db
 ```
 
 ## 正式数据库迁移
@@ -67,7 +67,7 @@ SQLite 版适合当前单机数字孪生。MySQL 8 建表脚本为 `database/veh
 从 SQLite 迁移到本机 MySQL：
 
 ```powershell
-.\venv\Scripts\python.exe database\migrate_sqlite_to_mysql.py --user root
+.\runtime\python.exe database\migrate_sqlite_to_mysql.py --user root
 ```
 
 脚本会交互读取密码，默认创建数据库 `jushenzhineng`，不会把密码写入项目。目标库已有业务数据时默认停止；只有显式添加 `--replace` 才会清空目标业务表后重新迁移。

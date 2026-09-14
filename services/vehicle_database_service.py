@@ -19,7 +19,7 @@ from pymysql.constants import CLIENT
 
 
 PROJECT_ROOT=Path(__file__).resolve().parents[1]
-DEFAULT_DB_PATH=PROJECT_ROOT/"runtime"/"vehicle_loading.db"
+DEFAULT_DB_PATH=PROJECT_ROOT/"workdir"/"vehicle_loading.db"
 SCHEMA_PATH=PROJECT_ROOT/"database"/"vehicle_centered_schema.sql"
 MYSQL_SCHEMA_PATH=PROJECT_ROOT/"database"/"vehicle_centered_schema_mysql.sql"
 

@@ -87,35 +87,26 @@ open3d
 
 ## 4. 命令行运行
 
-假设模块位于：
-
-```text
-C:\Users\15316\Desktop\Algorithm_modules\point_cloud_segment_module
-```
-
-从模块的上一级目录执行：
+在项目根目录执行（使用便携 runtime）：
 
 ```bat
-conda activate project
-cd /d "C:\Users\15316\Desktop\Algorithm_modules"
-
-python -m point_cloud_segment_module.point_cloud_pipeline ^
-"C:\Users\15316\Desktop\Algorithm_modules\point_cloud_segment_module\data" ^
---checkpoint "C:\Users\15316\Desktop\Algorithm_modules\point_cloud_segment_module\checkpoints\best_model.pth" ^
+runtime\python.exe -m algorithm_modules.point_cloud_segment_module.point_cloud_pipeline ^
+"algorithm_modules\point_cloud_segment_module\data" ^
+--checkpoint "algorithm_modules\point_cloud_segment_module\checkpoints\best_model.pth" ^
 --device cuda ^
 --num-point 49152 ^
--o "C:\Users\15316\Desktop\Algorithm_modules\point_cloud_segment_module\output"
+-o "algorithm_modules\point_cloud_segment_module\output"
 ```
 
 也可以处理单个 PCD：
 
 ```bat
-python -m point_cloud_segment_module.point_cloud_pipeline ^
-"C:\Users\15316\Desktop\Algorithm_modules\point_cloud_segment_module\data\1-1.pcd" ^
---checkpoint "C:\Users\15316\Desktop\Algorithm_modules\point_cloud_segment_module\checkpoints\best_model.pth" ^
+runtime\python.exe -m algorithm_modules.point_cloud_segment_module.point_cloud_pipeline ^
+"algorithm_modules\point_cloud_segment_module\data\1-1.pcd" ^
+--checkpoint "algorithm_modules\point_cloud_segment_module\checkpoints\best_model.pth" ^
 --device cuda ^
 --num-point 49152 ^
--o "C:\Users\15316\Desktop\Algorithm_modules\point_cloud_segment_module\output"
+-o "algorithm_modules\point_cloud_segment_module\output"
 ```
 
 ## 5. 参数怎么改

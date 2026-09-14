@@ -166,7 +166,7 @@ borrow = 1200 - R
 
 - 启动时只准备 `examples/module_io_manifest.json` 中的联调输入源，未到流程步骤的模型/模块不提前显示。
 - 右侧“模型输入/输出”页只列出本轮已实际执行项，并自动选中最新调用。当前项分开显示本次输入数据/图片和输出数据/图片。
-- 每次真实流程调用写入 `runtime/module_call_evidence/<module_id>/`，汇总写入 `runtime/module_call_summary.json`。只有实际执行 `.pt/.pth` 推理时才标记模型已调用，联调回退不会伪装成模型输出。
+- 每次真实流程调用写入 `workdir/module_call_evidence/<module_id>/`，汇总写入 `workdir/module_call_summary.json`。只有实际执行 `.pt/.pth` 推理时才标记模型已调用，联调回退不会伪装成模型输出。
 - 自动示例会调用 `pallet_hole_best.pt`、点云 `best_model.pth`、`corner_service.pt`。77MB 离线 PCD 会真实执行 PointNet++，但因为不属于当前场景的雷达→WORLD 标定，其输出只作为可视证据，不直接发送给机械臂。
 - 默认角点 JPG/深度会真实调用角点识别和像素深度转换，但因示例图不属于当前车辆标定，联调场景的最终区域使用当前车辆粗点对齐，防止示例坐标把两列区域移到车外。
 - 8.2、10.1 仍是无正式权重的外部测量接口；货物两面模块当前只完成图像采集。界面对此明确标注。
@@ -214,12 +214,22 @@ python test_v8_cargo_inventory.py
 
 ## 11. 启动
 
-```bash
-pip install -r requirements.txt
-start_digital_twin.bat
+Windows 便携运行（推荐）：
+
+```bat
+tools\build_runtime.bat
+启动软件.bat
 ```
 
-推荐双击 `start_digital_twin.bat`：它固定使用项目 `venv`，首次冷启动会立即显示启动画面。再次双击不会被残留锁拦截，而会自动恢复、前置并提醒已经运行的主窗口。启动阶段、PID、耗时和正常退出记录在 `runtime/startup.log`；Python/Qt 原生崩溃信息记录在 `runtime/startup_fault.log`。
+调试看报错：
+
+```bat
+启动软件_调试模式.bat
+```
+
+详细说明见 `README_运行说明.txt`。
+
+推荐双击 `启动软件.bat`（或兼容入口 `start_digital_twin.bat`）：固定使用项目内 `runtime\python.exe` / `pythonw.exe`，不依赖系统 Python、Anaconda 或旧 `venv`。首次冷启动会立即显示启动画面。再次双击不会被残留锁拦截，而会自动恢复、前置并提醒已经运行的主窗口。启动阶段、PID、耗时和正常退出记录在 `logs/startup.log`；Python/Qt 原生崩溃信息记录在 `logs/startup_fault.log`。
 
 当 `config/system_config.py` 的 `allow_demo_device_data=True` 且步骤2没有选择 `pre_pick_offset` JPG 时，系统会自动生成并使用 `examples/demo_pre_pick_offset.jpg`。结果会明确标记 `demo_input=true` 和“联调示例图（非相机实拍）”；关闭联调数据后仍严格要求真实 `CAM_PICK` 图片。
 

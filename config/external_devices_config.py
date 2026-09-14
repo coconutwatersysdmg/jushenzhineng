@@ -117,7 +117,7 @@ CAMERA = {
     # 旧标定包路径（内参等，可选）
     "calibration_dir": "config/sensor_coordinate_config",
     "intrinsic_file": "config/sensor_coordinate_config/camera_intrinsic.json",
-    "capture_dir": "runtime/camera_captures",
+    "capture_dir": "workdir/camera_captures",
 }
 
 # ---- 设备布局：臂 / 相机挂载 / 雷达位姿 / 拍摄角色 ----

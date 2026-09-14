@@ -11,7 +11,7 @@ class MockAlgorithms:
         return {'success':True,'image_points':{k:{'x':320.0,'y':240.0,'confidence':0.9} for k in radar_result['corner_ids']}}
 
 def main():
-    root=Path(__file__).resolve().parent/'runtime'/'test_v7_images'; root.mkdir(parents=True,exist_ok=True)
+    root=Path(__file__).resolve().parent/'workdir'/'test_v7_images'; root.mkdir(parents=True,exist_ok=True)
     p=root/'dummy.jpg'; Image.new('RGB',(640,480),'white').save(p)
     ctl=FlowController(algorithms=MockAlgorithms())
     ctl.set_plan([{'cargo_code':'C1','cargo_name':'货物','quantity':2,'length_mm':1200,'width_mm':1000,'height_mm':900,'pallet_reference_width_mm':1200}])

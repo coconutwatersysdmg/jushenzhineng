@@ -20,7 +20,7 @@ from config.system_config import get_system_config
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_RESULT_ROOT = PROJECT_ROOT / "runtime" / "point_cloud_results"
+DEFAULT_RESULT_ROOT = PROJECT_ROOT / "workdir" / "point_cloud_results"
 DEFAULT_CHECKPOINT = (
     PROJECT_ROOT
     / "algorithm_modules"

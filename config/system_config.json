@@ -34,7 +34,7 @@
     "password_env": "JUSHEN_MYSQL_PASSWORD",
     "auto_start": false,
     "initialize_schema": false,
-    "path": "runtime/vehicle_loading.db",
+    "path": "workdir/vehicle_loading.db",
     "center_entity": "truck"
   },
   "pallet_cargo_offset": {

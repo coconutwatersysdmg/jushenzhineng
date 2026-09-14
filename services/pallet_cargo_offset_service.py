@@ -19,7 +19,7 @@ from config.system_config import get_system_config
 from utils.cv_io import read_image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-RESULT_ROOT = PROJECT_ROOT / "runtime" / "pallet_cargo_offset_results"
+RESULT_ROOT = PROJECT_ROOT / "workdir" / "pallet_cargo_offset_results"
 
 
 class PalletCargoOffsetService:
