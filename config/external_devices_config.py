@@ -1,8 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-- PLC：192.168.6.6:502，工作原点 XYZR=0
-- Livox：host_ip=192.168.1.50
-- D435i：1280x720@30，外参 config/camera_extrinsic.json
+外接设备参数（IP、端口、轴限位、外参路径、布局等）。
+
+开关类配置请改：config/feature_switches.py
+  - DEVICE_MODE
+  - ALLOW_REAL_MOTION
+  - USE_LIVE_LIDAR_CAPTURE
+  - ALLOW_DEMO_DEVICE_DATA
+  - 实验室算法开关等
 """
 from __future__ import annotations
 
@@ -13,10 +18,16 @@ from typing import Any, Dict
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
+from config.feature_switches import (
+    ALLOW_REAL_MOTION,
+    DEVICE_MODE,
+    USE_LIVE_LIDAR_CAPTURE,
+)
 
 
-# TODO 开启真机。"mock" = 本地假设备；"real" = PLC/雷达/相机真机适配器
-DEVICE_MODE = "real"
+
+# DEVICE_MODE / ALLOW_REAL_MOTION / USE_LIVE_LIDAR_CAPTURE
+# 权威定义在 config/feature_switches.py，此处仅引用。
 
 # ---- PLC（Modbus TCP）---- 对应 gantry_settings.json
 PLC = {
@@ -27,7 +38,7 @@ PLC = {
 
 # TODO PLC---- 龙门架 / 真机运动 ---- 对应 gantry_settings.json
 GANTRY = {
-    "allow_real_motion": True,
+    "allow_real_motion": bool(ALLOW_REAL_MOTION),
     "default_speed": 30.0,
     "move_timeout_s": 60.0,
     "axis_default_speeds": {
@@ -75,7 +86,7 @@ GANTRY = {
 
 # TODO 雷达，对应 livox_mid360s配置
 LIVOX = {
-    "use_live_capture": True,
+    "use_live_capture": bool(USE_LIVE_LIDAR_CAPTURE),
     "exe_path": "third_party/livox_runtime/livox_realtime_select_and_move.exe",
     "mid360_json_path": "third_party/livox_runtime/mid360s_config.json",
     "save_dir": "data/lidar",

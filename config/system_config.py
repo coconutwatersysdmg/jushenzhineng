@@ -17,14 +17,20 @@ from config.external_devices_config import (
     sync_livox_mid360_json,
     sync_plc_gantry_settings_json,
 )
+from config.feature_switches import (
+    ALLOW_DEMO_DEVICE_DATA,
+    ALLOW_UNIMPLEMENTED_VISION_MEASUREMENT_ZERO,
+    CORNER_REVIEW_AUTO_ACCEPT_DEMO,
+    CORNER_REVIEW_ENABLED,
+)
 
 
 SYSTEM_CONFIG: Dict[str, Any] = {
     "runtime": {
-        # 设备模式来自 external_devices_config.DEVICE_MODE
+        # 设备模式 / Mock 开关来自 config/feature_switches.py
         "device_mode": DEVICE_MODE,
-        "allow_demo_device_data": True,
-        "allow_unimplemented_vision_measurement_zero": True,
+        "allow_demo_device_data": bool(ALLOW_DEMO_DEVICE_DATA),
+        "allow_unimplemented_vision_measurement_zero": bool(ALLOW_UNIMPLEMENTED_VISION_MEASUREMENT_ZERO),
     },
     "devices": get_devices_section_for_system_config(),
     "database": {
@@ -51,8 +57,8 @@ SYSTEM_CONFIG: Dict[str, Any] = {
         "coarse_radar_warning_mm": 800.0,
     },
     "corner_review": {
-        "enabled": True,
-        "auto_accept_demo": False,
+        "enabled": bool(CORNER_REVIEW_ENABLED),
+        "auto_accept_demo": bool(CORNER_REVIEW_AUTO_ACCEPT_DEMO),
     },
     "camera_board_geometry": {
         "row_length_mm": 1200.0,
@@ -76,6 +82,14 @@ def get_system_config() -> Dict[str, Any]:
         pass
     cfg = deepcopy(SYSTEM_CONFIG)
     cfg["runtime"]["device_mode"] = DEVICE_MODE
+    cfg["runtime"]["allow_demo_device_data"] = bool(ALLOW_DEMO_DEVICE_DATA)
+    cfg["runtime"]["allow_unimplemented_vision_measurement_zero"] = bool(
+        ALLOW_UNIMPLEMENTED_VISION_MEASUREMENT_ZERO
+    )
+    cfg["corner_review"] = {
+        "enabled": bool(CORNER_REVIEW_ENABLED),
+        "auto_accept_demo": bool(CORNER_REVIEW_AUTO_ACCEPT_DEMO),
+    }
     cfg["devices"] = get_devices_section_for_system_config()
     cfg["plc"] = {"ack_timeout_ms": int(PLC.get("ack_timeout_ms", 5000))}
     return cfg

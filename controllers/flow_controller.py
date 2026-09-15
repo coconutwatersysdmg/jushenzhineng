@@ -28,6 +28,7 @@ from services.vehicle_database_service import create_vehicle_database_service
 from utils.demo_assets import ensure_demo_pre_pick_image
 from config.system_config import get_system_config
 from config.external_devices_config import get_device_layout_config
+from config.feature_switches import USE_LAB_CAMERA_ALGO, USE_LAB_LIDAR_ALGO
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RESULT_FILE = PROJECT_ROOT / "workdir" / "overall_results.json"
@@ -482,7 +483,34 @@ class FlowController:
         model_invoked=bool(locate.get("pcd_path"))
         # 真雷达实采时禁止再替换成联调粗点
         example_only=bool(model_invoked and self.debug_inputs.get("point_cloud_example_only") and not self._use_live_radar())
-        self._evidence("POINTNET_TRUCK",{"pcd_path":locate.get("pcd_path","") ,"example_only":example_only,"live_radar":self._use_live_radar(),"locate_source":locate.get("source")},raw_result,started,model_invoked=model_invoked,note=("离线PCD已完成真实推理；因不属于当前场景标定，仅展示输入输出，不将其坐标发送给机械臂" if example_only else ("Livox实采点云已处理" if self._use_live_radar() else "雷达仅用于相机粗搜索；最终板型由相机角点判断")) if model_invoked else "无PCD，PointNet++未调用",status="SUCCESS" if raw_result.get("success") else "FAILED")
+        algo_note = (
+            "实验室几何雷达算法"
+            if (model_invoked and USE_LAB_LIDAR_ALGO)
+            else (
+                "离线PCD已完成真实推理；因不属于当前场景标定，仅展示输入输出，不将其坐标发送给机械臂"
+                if example_only
+                else (
+                    "Livox实采点云已处理"
+                    if self._use_live_radar()
+                    else "雷达仅用于相机粗搜索；最终板型由相机角点判断"
+                )
+            )
+        )
+        self._evidence(
+            "POINTNET_TRUCK",
+            {
+                "pcd_path":locate.get("pcd_path",""),
+                "example_only":example_only,
+                "live_radar":self._use_live_radar(),
+                "locate_source":locate.get("source"),
+                "use_lab_lidar_algo":bool(USE_LAB_LIDAR_ALGO),
+            },
+            raw_result,
+            started,
+            model_invoked=model_invoked,
+            note=algo_note if model_invoked else "无PCD，点云算法未调用",
+            status="SUCCESS" if raw_result.get("success") else "FAILED",
+        )
         if example_only:
             raw_result={
                 "success":True,"demo":True,
@@ -562,7 +590,8 @@ class FlowController:
             point_ids=groups[group]
             if not point_ids: continue
             first=assignments[point_ids[0]]; tag=f"CORNER_{group}"
-            self.robot.move_tool_world(first["robot_id"],first["target_robot_pose_world"],task=f"CAPTURE_{group}")
+            moved=self.robot.move_tool_world(first["robot_id"],first["target_robot_pose_world"],task=f"CAPTURE_{group}")
+            plc_pose=self._plc_pose_for_lab_camera(moved, first.get("target_robot_pose_world") or {})
             rgb_input=rimgs.get(group) or next((rimgs.get(pid) for pid in point_ids if rimgs.get(pid)),None)
             depth_input=dimgs.get(group) or next((dimgs.get(pid) for pid in point_ids if dimgs.get(pid)),None)
             if rgb_input and hasattr(self.camera,"set_tagged_image"): self.camera.set_tagged_image(tag,rgb_input)
@@ -585,10 +614,31 @@ class FlowController:
                     "demo":bool(cap.get("demo")),"source":cap.get("source"),
                     "example_input":bool(self.debug_inputs.get("corner_inputs_example_only")),
                     "demo_target_world_xyz_mm":deepcopy(a.get("radar_coarse_world_xyz_mm")),
+                    "plc_pose":deepcopy(plc_pose),
+                    "depth_scale_mm":cap.get("depth_scale_mm"),
                 }
         self.round_data["corner_images"]=images; self.round_data["corner_capture_meta"]=meta
         self.round_data["corner_group_captures"]=group_captures
         return {"success":True,"physical_capture_count":len(group_captures),"capture_groups":groups,"image_paths_by_point":images,"capture_meta":meta}
+
+    @staticmethod
+    def _plc_pose_for_lab_camera(moved: Mapping[str, Any] | None, target_world_pose: Mapping[str, Any]) -> Dict[str, float]:
+        """提取实验室相机算法需要的 PLC XYZR。优先用运动返回的 gantry_xyzr。"""
+        moved = moved or {}
+        raw = moved.get("gantry_xyzr") or moved.get("plc_pose")
+        if isinstance(raw, Mapping):
+            if all(k in raw for k in ("X", "Y", "Z", "R")):
+                return {"x": float(raw["X"]), "y": float(raw["Y"]), "z": float(raw["Z"]), "r": float(raw["R"])}
+            if all(k in raw for k in ("x", "y", "z", "r")):
+                return {k: float(raw[k]) for k in ("x", "y", "z", "r")}
+        # mock / 无 gantry 返回时：用目标 WORLD 近似（实验室轴对齐场景可用）
+        pose = target_world_pose or {}
+        return {
+            "x": float(pose.get("x_mm", pose.get("x", 0.0)) or 0.0),
+            "y": float(pose.get("y_mm", pose.get("y", 0.0)) or 0.0),
+            "z": float(pose.get("z_mm", pose.get("z", 0.0)) or 0.0),
+            "r": float(pose.get("yaw_deg", pose.get("yaw", pose.get("R", pose.get("r", -80.0)))) or -80.0),
+        }
 
     def set_corner_review_callback(self, callback):
         """UI registers a blocking human-review dialog here for step 6."""
@@ -655,6 +705,36 @@ class FlowController:
     def _corner_recognition(self):
         ids=self.round_data["radar_result"]["corner_ids"]
         meta=self.round_data.get("corner_capture_meta") or {}
+        if USE_LAB_CAMERA_ALGO and not (
+            self.allow_demo and ids and all((meta.get(pid) or {}).get("demo") for pid in ids)
+        ):
+            started=perf_counter()
+            result=self.algorithms.lab_corner_world_recognize(
+                ids,
+                meta,
+                self.round_data.get("corner_group_captures") or {},
+            )
+            self._evidence(
+                "CORNER_YOLO",
+                {
+                    "image_paths_by_point":self.round_data.get("corner_images"),
+                    "corner_ids":ids,
+                    "use_lab_camera_algo":True,
+                },
+                result,
+                started,
+                model_invoked=True,
+                note="实验室 cam_yolo_lab：YOLO+深度+外参直接出 WORLD",
+                status="SUCCESS" if result.get("success") else "FAILED",
+            )
+            # 实验室路径已得到 WORLD，跳过像素审核（审核面向像素修正）
+            result=deepcopy(result)
+            result["reviewed"]=False
+            result["review_skipped"]=True
+            self.round_data["corner_recognition"]=result
+            if result.get("success") and result.get("world_points"):
+                self.round_data["lab_camera_world_corners"]=deepcopy(result)
+            return result
         if self.allow_demo and ids and all((meta.get(pid) or {}).get("demo") for pid in ids):
             image_points={}
             for pid in ids:
@@ -668,7 +748,7 @@ class FlowController:
             result={"success":True,"corner_ids":list(ids),"image_points":image_points,"source":"generated_demo_rgbd","message":"缺失角点数据已自动补齐；使用联调 RGB-D 中心标记"}
         else:
             started=perf_counter(); result=self.algorithms.corner_image_recognize(self.round_data["corner_images"],ids,self.current_cargo)
-            self._evidence("CORNER_YOLO",{"image_paths_by_point":self.round_data["corner_images"],"corner_ids":ids},result,started,model_invoked=True)
+            self._evidence("CORNER_YOLO",{"image_paths_by_point":self.round_data["corner_images"],"corner_ids":ids,"use_lab_camera_algo":False},result,started,model_invoked=True)
         if result.get("source")=="generated_demo_rgbd":
             started=perf_counter(); self._evidence("CORNER_YOLO",{"image_paths_by_point":self.round_data["corner_images"],"corner_ids":ids},result,started,model_invoked=False,note="联调中心点分支，角点.pt未调用",status="FALLBACK")
         result=self._apply_corner_review(result)
@@ -677,6 +757,26 @@ class FlowController:
     def _camera_to_world(self):
         ids=self.round_data["radar_result"]["corner_ids"]
         meta=self.round_data["corner_capture_meta"]
+        # 实验室相机开关：识别步骤已直接产出 WORLD，这里透传，避免二次变换
+        lab_ready=self.round_data.get("lab_camera_world_corners")
+        if USE_LAB_CAMERA_ALGO and isinstance(lab_ready, Mapping) and lab_ready.get("success") and lab_ready.get("world_points"):
+            started=perf_counter()
+            result={
+                "success":True,
+                "source":"lab_yolo_d435i_world",
+                "coordinate_frame":"world",
+                "coordinate_unit":"mm",
+                "corner_ids":list(ids),
+                "world_points":deepcopy(lab_ready.get("world_points")),
+                "details":deepcopy(lab_ready.get("details") or {}),
+                "radar_used_for_final_geometry":False,
+                "message":"实验室相机算法 WORLD 结果透传（未再跑现场 CameraCornerWorldService）",
+                "use_lab_camera_algo":True,
+            }
+            self._evidence("CAMERA_WORLD",{"capture_meta":meta,"use_lab_camera_algo":True},result,started,note="实验室一体 WORLD 透传")
+            self.round_data["camera_world_corners"]=result
+            self.twin.update_truck(corners=result["world_points"])
+            return result
         if self.allow_demo and ids and all((meta.get(pid) or {}).get("demo") for pid in ids):
             world={}
             for pid in ids:

@@ -1,0 +1,35 @@
+{
+  "description": "D435i camera to forklift R-axis end frame, millimetres; runtime reference pose is PLC R=-80 deg (same physical pose as calibration label 100 deg)",
+  "t_e_from_c": [
+    [
+      0.9991883187,
+      0.0272882136,
+      0.0296320306,
+      -13.6295461406
+    ],
+    [
+      -0.0278917656,
+      0.9994078475,
+      0.020149533,
+      -200.3265036509
+    ],
+    [
+      -0.0290646392,
+      -0.0209596676,
+      0.9993577633,
+      263.1185919638
+    ],
+    [
+      0,
+      0,
+      0,
+      1
+    ]
+  ],
+  "plc_reference_r_deg": -80.0,
+  "r_axis_center_offset_mm": [
+    104.0,
+    166.0,
+    270.0
+  ]
+}
