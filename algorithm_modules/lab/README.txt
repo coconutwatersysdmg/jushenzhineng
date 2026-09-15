@@ -9,10 +9,12 @@ cam_yolo_lab/  实验室 YOLO 角点 + camera_extrinsic.json + weights/best.pt
 ----
 统一在：config/feature_switches.py
 
-  USE_LAB_LIDAR_ALGO   = False  # True=实验室雷达；False=现场 PointNet++
-  USE_LAB_CAMERA_ALGO  = False  # True=实验室 YOLO WORLD；False=现场 corner_service.pt
+前端顶部「运行模式」三选一：
+  完全模拟(sim) / 实验室(lab) / 完全真实(field)
 
-默认均为 False（现场算法）。改开关后需重启软件。
+也可单独改：
+  USE_LAB_LIDAR_ALGO / USE_LAB_CAMERA_ALGO
+但会被「运行模式」覆盖；推荐直接用界面切换。
 
 说明
 ----

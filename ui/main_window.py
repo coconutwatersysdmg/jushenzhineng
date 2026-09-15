@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 from PySide6.QtCore import QEventLoop, Qt, QTimer, QUrl, Signal
@@ -10,13 +11,19 @@ from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QFrame, QLabel,
     QPushButton, QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QMessageBox,
-    QTabWidget, QToolButton, QSizePolicy,
+    QTabWidget, QToolButton, QSizePolicy, QComboBox,
 )
 
 from controllers.flow_controller import FlowController
 from ui.twin_bridge import TwinBridge
 from ui.debug_dialog import DebugInputDialog
 from ui.corner_review_dialog import run_corner_review
+from config.feature_switches import (
+    apply_run_profile,
+    get_run_profile,
+    list_run_profiles,
+)
+import config.feature_switches as feature_switches
 
 PROJECT_ROOT=Path(__file__).resolve().parents[1]
 QML_FILE=PROJECT_ROOT/"ui"/"qml"/"TwinScene.qml"
@@ -51,6 +58,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.controller=FlowController(); self.bridge=TwinBridge(); self.debug_inputs=self.controller.default_debug_inputs()
         self._step_busy=False
+        self._profile_changing=False
         self.motionSnapshot.connect(self._apply_motion_snapshot)
         self.controller.set_state_listener(self.motionSnapshot.emit)
         self.controller.set_corner_review_callback(self._review_corners)
@@ -100,12 +108,29 @@ class MainWindow(QMainWindow):
         QLabel#sectionTitle{font-size:14px;font-weight:700;color:#74d8ff}
         QPushButton{background:#12395f;border:1px solid #2a78bd;border-radius:5px;padding:7px 11px}
         QPushButton:hover{background:#194a78} QPushButton#primary{background:#0b72d0;font-weight:700}
+        QComboBox{background:#102a46;border:1px solid #2a78bd;border-radius:5px;padding:5px 8px;min-width:160px}
+        QComboBox::drop-down{border:0;width:22px}
+        QComboBox QAbstractItemView{background:#0c1b2e;border:1px solid #2a78bd;selection-background-color:#194a78}
         QTableWidget,QTextEdit{background:#06101d;border:1px solid #244b72;border-radius:4px}
         QHeaderView::section{background:#102a46;color:#dcecff;padding:5px;border:0}
         """)
         lay=QVBoxLayout(root); lay.setContentsMargins(12,10,12,10); lay.setSpacing(8)
         top=QHBoxLayout(); title=QLabel("具身智能装载数字孪生"); title.setObjectName("title"); top.addWidget(title)
-        top.addStretch(1); self.phase=QLabel("IDLE"); self.phase.setStyleSheet("font-size:15px;font-weight:700;color:#5ad0ff"); top.addWidget(self.phase)
+        top.addStretch(1)
+        mode_label=QLabel("运行模式"); mode_label.setStyleSheet("color:#9ec8dc;font-weight:600")
+        top.addWidget(mode_label)
+        self.profile_combo=QComboBox()
+        for item in list_run_profiles():
+            self.profile_combo.addItem(f"{item['title']}", item["id"])
+            idx=self.profile_combo.count()-1
+            self.profile_combo.setItemData(idx, item.get("subtitle") or "", Qt.ItemDataRole.ToolTipRole)
+        current=str(feature_switches.RUN_PROFILE or "field")
+        found=self.profile_combo.findData(current)
+        if found>=0: self.profile_combo.setCurrentIndex(found)
+        self.profile_combo.currentIndexChanged.connect(self._on_run_profile_changed)
+        self._sync_profile_combo_tooltip()
+        top.addWidget(self.profile_combo)
+        self.phase=QLabel("IDLE"); self.phase.setStyleSheet("font-size:15px;font-weight:700;color:#5ad0ff"); top.addWidget(self.phase)
         self.progress=QLabel("0/0"); self.progress.setStyleSheet("font-size:18px;font-weight:700"); top.addWidget(self.progress); lay.addLayout(top)
 
         f,l,self.flow_toggle=self._collapsible_card("流程链路",expanded=False)
@@ -228,6 +253,69 @@ class MainWindow(QMainWindow):
             except Exception: pass
         if not self.controller.queue:
             self.controller.set_plan([{"cargo_code":"CARGO-001","cargo_name":"货物","quantity":3,"length_mm":1200,"width_mm":1000,"height_mm":900,"pallet_reference_width_mm":1200}])
+
+    def _sync_profile_combo_tooltip(self):
+        profile=get_run_profile(self.profile_combo.currentData())
+        tip=f"{profile.get('title')}：{profile.get('subtitle')}"
+        switches=profile.get("switches") or {}
+        tip += (
+            f"\nDEVICE_MODE={switches.get('DEVICE_MODE')}"
+            f"\nLAB_LIDAR={switches.get('USE_LAB_LIDAR_ALGO')}"
+            f"  LAB_CAMERA={switches.get('USE_LAB_CAMERA_ALGO')}"
+            f"\nALLOW_DEMO={switches.get('ALLOW_DEMO_DEVICE_DATA')}"
+            f"  REAL_MOTION={switches.get('ALLOW_REAL_MOTION')}"
+        )
+        self.profile_combo.setToolTip(tip)
+
+    def _on_run_profile_changed(self, _index: int = 0):
+        if self._profile_changing:
+            return
+        profile_id=str(self.profile_combo.currentData() or "field")
+        if profile_id == str(feature_switches.RUN_PROFILE or ""):
+            self._sync_profile_combo_tooltip()
+            return
+        if self.controller.running or self._step_busy or self.timer.isActive():
+            reply=QMessageBox.question(
+                self,
+                "切换运行模式",
+                "当前流程正在运行。切换模式会重置控制器并重建设备连接，是否继续？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                self._profile_changing=True
+                found=self.profile_combo.findData(str(feature_switches.RUN_PROFILE or "field"))
+                if found>=0: self.profile_combo.setCurrentIndex(found)
+                self._profile_changing=False
+                return
+        self._apply_run_profile(profile_id)
+
+    def _apply_run_profile(self, profile_id: str):
+        self.timer.stop()
+        self._step_busy=False
+        old_plan=list(getattr(self.controller, "queue", []) or [])
+        old_debug=deepcopy(getattr(self.controller, "debug_inputs", {}) or self.debug_inputs)
+        applied=apply_run_profile(profile_id, persist=True)
+        self.controller=FlowController()
+        self.controller.set_state_listener(self.motionSnapshot.emit)
+        self.controller.set_corner_review_callback(self._review_corners)
+        if old_plan:
+            self.controller.set_plan(old_plan)
+        else:
+            self._load_plan()
+        if old_debug:
+            self.debug_inputs=old_debug
+            self.controller.set_debug_inputs(old_debug)
+        else:
+            self.debug_inputs=self.controller.default_debug_inputs()
+        self._sync_profile_combo_tooltip()
+        self.controller.twin.add_message(
+            "RUN_PROFILE",
+            "INFO",
+            f"已切换运行模式：{applied.get('title')}（{applied.get('id')}）",
+            applied.get("switches") or {},
+        )
+        self._refresh()
 
     @staticmethod
     def _first_image(value):
@@ -463,7 +551,12 @@ class MainWindow(QMainWindow):
         cal=s.get("calibration") or {}
         intr="参考/占位" if "PLACEHOLDER" in str(cal.get("intrinsic_parameter_status","")).upper() else str(cal.get("intrinsic_parameter_status","-"))
         extr="占位" if "PLACEHOLDER" in str(cal.get("coordinate_parameter_status","")).upper() else str(cal.get("coordinate_parameter_status","-"))
-        self.cal_label.setText(f"设备模式：{str(s.get('device_mode') or 'mock').upper()}｜标定：内参={intr}｜外参={extr}｜运动相机=实时位姿×安装外参")
+        profile=get_run_profile()
+        self.cal_label.setText(
+            f"运行模式：{profile.get('title')}（{profile.get('id')}）｜"
+            f"设备：{str(s.get('device_mode') or 'mock').upper()}｜"
+            f"标定：内参={intr}｜外参={extr}｜运动相机=实时位姿×安装外参"
+        )
         self.cal_label.setToolTip(json.dumps(cal,ensure_ascii=False,indent=2))
         db=s.get("database") or {}; db_location=str(db.get("location") or db.get("path") or "-")
         db_name=("MySQL" if str(db.get("backend")).lower()=="mysql" else "SQLite")

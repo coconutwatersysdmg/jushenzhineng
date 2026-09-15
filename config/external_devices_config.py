@@ -264,13 +264,17 @@ def sync_plc_gantry_settings_json(project_root: Path | None = None) -> Path:
 
 
 def get_devices_section_for_system_config() -> Dict[str, Any]:
+    import config.feature_switches as fs
+
+    gantry = deepcopy(GANTRY)
+    gantry["allow_real_motion"] = bool(fs.ALLOW_REAL_MOTION)
     return {
         "plc": {
             "ip": PLC["ip"],
             "port": PLC["port"],
         },
         "livox": {
-            "use_live_capture": bool(LIVOX.get("use_live_capture", True)),
+            "use_live_capture": bool(fs.USE_LIVE_LIDAR_CAPTURE),
             "exe_path": LIVOX["exe_path"],
             "config_path": LIVOX["mid360_json_path"],
             "save_dir": LIVOX["save_dir"],
@@ -279,17 +283,21 @@ def get_devices_section_for_system_config() -> Dict[str, Any]:
             "timeout_sec": LIVOX["timeout_sec"],
             "host_ip": LIVOX["host_ip"],
         },
-        "gantry": deepcopy(GANTRY),
+        "gantry": gantry,
         "camera": deepcopy(CAMERA),
     }
 
 
 def get_external_devices_snapshot() -> Dict[str, Any]:
+    import config.feature_switches as fs
+
+    devices = get_devices_section_for_system_config()
     return {
-        "device_mode": DEVICE_MODE,
+        "device_mode": fs.DEVICE_MODE,
+        "run_profile": fs.RUN_PROFILE,
         "plc": deepcopy(PLC),
-        "gantry": deepcopy(GANTRY),
-        "livox": deepcopy(LIVOX),
+        "gantry": devices["gantry"],
+        "livox": devices["livox"],
         "camera": deepcopy(CAMERA),
         "layout": get_device_layout_config(),
     }

@@ -28,7 +28,7 @@ from services.vehicle_database_service import create_vehicle_database_service
 from utils.demo_assets import ensure_demo_pre_pick_image
 from config.system_config import get_system_config
 from config.external_devices_config import get_device_layout_config
-from config.feature_switches import USE_LAB_CAMERA_ALGO, USE_LAB_LIDAR_ALGO
+import config.feature_switches as feature_switches
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RESULT_FILE = PROJECT_ROOT / "workdir" / "overall_results.json"
@@ -485,7 +485,7 @@ class FlowController:
         example_only=bool(model_invoked and self.debug_inputs.get("point_cloud_example_only") and not self._use_live_radar())
         algo_note = (
             "实验室几何雷达算法"
-            if (model_invoked and USE_LAB_LIDAR_ALGO)
+            if (model_invoked and feature_switches.USE_LAB_LIDAR_ALGO)
             else (
                 "离线PCD已完成真实推理；因不属于当前场景标定，仅展示输入输出，不将其坐标发送给机械臂"
                 if example_only
@@ -503,7 +503,7 @@ class FlowController:
                 "example_only":example_only,
                 "live_radar":self._use_live_radar(),
                 "locate_source":locate.get("source"),
-                "use_lab_lidar_algo":bool(USE_LAB_LIDAR_ALGO),
+                "use_lab_lidar_algo":bool(feature_switches.USE_LAB_LIDAR_ALGO),
             },
             raw_result,
             started,
@@ -705,7 +705,7 @@ class FlowController:
     def _corner_recognition(self):
         ids=self.round_data["radar_result"]["corner_ids"]
         meta=self.round_data.get("corner_capture_meta") or {}
-        if USE_LAB_CAMERA_ALGO and not (
+        if feature_switches.USE_LAB_CAMERA_ALGO and not (
             self.allow_demo and ids and all((meta.get(pid) or {}).get("demo") for pid in ids)
         ):
             started=perf_counter()
@@ -759,7 +759,7 @@ class FlowController:
         meta=self.round_data["corner_capture_meta"]
         # 实验室相机开关：识别步骤已直接产出 WORLD，这里透传，避免二次变换
         lab_ready=self.round_data.get("lab_camera_world_corners")
-        if USE_LAB_CAMERA_ALGO and isinstance(lab_ready, Mapping) and lab_ready.get("success") and lab_ready.get("world_points"):
+        if feature_switches.USE_LAB_CAMERA_ALGO and isinstance(lab_ready, Mapping) and lab_ready.get("success") and lab_ready.get("world_points"):
             started=perf_counter()
             result={
                 "success":True,
@@ -1086,4 +1086,4 @@ class FlowController:
         RESULT_FILE.write_text(json.dumps({"results":self.results},ensure_ascii=False,indent=2,default=str),encoding="utf-8")
 
     def snapshot(self):
-        return {"running":self.running,"finished":self.finished,"round":self.round_index+1 if self.queue else 0,"total":len(self.queue),"completed":len(self.completed),"first_round":self.is_first_round,"step_code":self.current_step[0],"step_name":self.current_step[1],"current_cargo":deepcopy(self.current_cargo),"round_data":deepcopy(self.round_data),"twin":self.twin.snapshot(),"results":deepcopy(self.results),"calibration":self.calibration.diagnostic_summary(),"module_evidence":self.module_evidence.snapshot(),"device_mode":getattr(self,"device_mode","mock"),"allow_demo":bool(self.allow_demo),"database":{"backend":self.vehicle_db.backend,"location":self.vehicle_db.location,"path":self.vehicle_db.location,"session_id":self.loading_session_id}}
+        return {"running":self.running,"finished":self.finished,"round":self.round_index+1 if self.queue else 0,"total":len(self.queue),"completed":len(self.completed),"first_round":self.is_first_round,"step_code":self.current_step[0],"step_name":self.current_step[1],"current_cargo":deepcopy(self.current_cargo),"round_data":deepcopy(self.round_data),"twin":self.twin.snapshot(),"results":deepcopy(self.results),"calibration":self.calibration.diagnostic_summary(),"module_evidence":self.module_evidence.snapshot(),"device_mode":getattr(self,"device_mode","mock"),"run_profile":feature_switches.RUN_PROFILE,"allow_demo":bool(self.allow_demo),"database":{"backend":self.vehicle_db.backend,"location":self.vehicle_db.location,"path":self.vehicle_db.location,"session_id":self.loading_session_id}}

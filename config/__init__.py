@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """项目配置包。
 
-- 功能开关：config.feature_switches（Mock/真机/实验室算法等，优先改这里）
+- 功能开关 / 三模式：config.feature_switches（优先改这里或界面切换）
 - 外接设备：config.external_devices_config（IP、外参路径、限位等）
 - 系统/算法：config.system_config
 """
@@ -20,15 +20,20 @@ from config.feature_switches import (
     ALLOW_UNIMPLEMENTED_VISION_MEASUREMENT_ZERO,
     CORNER_REVIEW_AUTO_ACCEPT_DEMO,
     CORNER_REVIEW_ENABLED,
+    RUN_PROFILE,
     USE_LAB_CAMERA_ALGO,
     USE_LAB_LIDAR_ALGO,
     USE_LIVE_LIDAR_CAPTURE,
+    apply_run_profile,
+    get_run_profile,
+    list_run_profiles,
 )
 
 __all__ = [
     "SYSTEM_CONFIG",
     "get_system_config",
     "DEVICE_MODE",
+    "RUN_PROFILE",
     "ALLOW_DEMO_DEVICE_DATA",
     "ALLOW_UNIMPLEMENTED_VISION_MEASUREMENT_ZERO",
     "ALLOW_REAL_MOTION",
@@ -37,6 +42,9 @@ __all__ = [
     "CORNER_REVIEW_AUTO_ACCEPT_DEMO",
     "USE_LAB_LIDAR_ALGO",
     "USE_LAB_CAMERA_ALGO",
+    "apply_run_profile",
+    "get_run_profile",
+    "list_run_profiles",
     "get_device_layout_config",
     "get_external_devices_snapshot",
     "sync_livox_mid360_json",

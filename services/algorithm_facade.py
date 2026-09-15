@@ -2,7 +2,7 @@
 from __future__ import annotations
 from copy import deepcopy
 
-from config.feature_switches import USE_LAB_LIDAR_ALGO
+import config.feature_switches as feature_switches
 from services.pallet_hole_recognition_service import PalletHoleRecognitionService
 from services.pallet_cargo_offset_service import PalletCargoOffsetService
 from services.point_cloud_processing_service import PointCloudProcessingService
@@ -42,7 +42,7 @@ class AlgorithmFacade:
 
     def radar_process(self, locate_result: dict, cargo: dict):
         if locate_result.get("pcd_path"):
-            if USE_LAB_LIDAR_ALGO:
+            if feature_switches.USE_LAB_LIDAR_ALGO:
                 result = process_lab_lidar_pcd(
                     locate_result["pcd_path"],
                     result_tag=cargo.get("instance_id", "cargo"),

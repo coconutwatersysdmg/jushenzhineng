@@ -11,26 +11,23 @@ from copy import deepcopy
 from typing import Any, Dict
 
 from config.external_devices_config import (
-    DEVICE_MODE,
     PLC,
     get_devices_section_for_system_config,
     sync_livox_mid360_json,
     sync_plc_gantry_settings_json,
 )
-from config.feature_switches import (
-    ALLOW_DEMO_DEVICE_DATA,
-    ALLOW_UNIMPLEMENTED_VISION_MEASUREMENT_ZERO,
-    CORNER_REVIEW_AUTO_ACCEPT_DEMO,
-    CORNER_REVIEW_ENABLED,
-)
+import config.feature_switches as feature_switches
 
 
 SYSTEM_CONFIG: Dict[str, Any] = {
     "runtime": {
-        # 设备模式 / Mock 开关来自 config/feature_switches.py
-        "device_mode": DEVICE_MODE,
-        "allow_demo_device_data": bool(ALLOW_DEMO_DEVICE_DATA),
-        "allow_unimplemented_vision_measurement_zero": bool(ALLOW_UNIMPLEMENTED_VISION_MEASUREMENT_ZERO),
+        # 设备模式 / Mock 开关来自 config/feature_switches.py（含三模式）
+        "device_mode": feature_switches.DEVICE_MODE,
+        "allow_demo_device_data": bool(feature_switches.ALLOW_DEMO_DEVICE_DATA),
+        "allow_unimplemented_vision_measurement_zero": bool(
+            feature_switches.ALLOW_UNIMPLEMENTED_VISION_MEASUREMENT_ZERO
+        ),
+        "run_profile": feature_switches.RUN_PROFILE,
     },
     "devices": get_devices_section_for_system_config(),
     "database": {
@@ -57,8 +54,8 @@ SYSTEM_CONFIG: Dict[str, Any] = {
         "coarse_radar_warning_mm": 800.0,
     },
     "corner_review": {
-        "enabled": bool(CORNER_REVIEW_ENABLED),
-        "auto_accept_demo": bool(CORNER_REVIEW_AUTO_ACCEPT_DEMO),
+        "enabled": bool(feature_switches.CORNER_REVIEW_ENABLED),
+        "auto_accept_demo": bool(feature_switches.CORNER_REVIEW_AUTO_ACCEPT_DEMO),
     },
     "camera_board_geometry": {
         "row_length_mm": 1200.0,
@@ -81,14 +78,15 @@ def get_system_config() -> Dict[str, Any]:
     except Exception:
         pass
     cfg = deepcopy(SYSTEM_CONFIG)
-    cfg["runtime"]["device_mode"] = DEVICE_MODE
-    cfg["runtime"]["allow_demo_device_data"] = bool(ALLOW_DEMO_DEVICE_DATA)
+    cfg["runtime"]["device_mode"] = feature_switches.DEVICE_MODE
+    cfg["runtime"]["allow_demo_device_data"] = bool(feature_switches.ALLOW_DEMO_DEVICE_DATA)
     cfg["runtime"]["allow_unimplemented_vision_measurement_zero"] = bool(
-        ALLOW_UNIMPLEMENTED_VISION_MEASUREMENT_ZERO
+        feature_switches.ALLOW_UNIMPLEMENTED_VISION_MEASUREMENT_ZERO
     )
+    cfg["runtime"]["run_profile"] = feature_switches.RUN_PROFILE
     cfg["corner_review"] = {
-        "enabled": bool(CORNER_REVIEW_ENABLED),
-        "auto_accept_demo": bool(CORNER_REVIEW_AUTO_ACCEPT_DEMO),
+        "enabled": bool(feature_switches.CORNER_REVIEW_ENABLED),
+        "auto_accept_demo": bool(feature_switches.CORNER_REVIEW_AUTO_ACCEPT_DEMO),
     }
     cfg["devices"] = get_devices_section_for_system_config()
     cfg["plc"] = {"ack_timeout_ms": int(PLC.get("ack_timeout_ms", 5000))}
