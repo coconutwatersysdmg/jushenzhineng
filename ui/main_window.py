@@ -525,6 +525,76 @@ class MainWindow(QMainWindow):
         self._present_next_plc_command()
         self._refresh_flow_chain(self.controller.snapshot())
 
+    # 硬失败后若强制跳过：多数后续步会缺数据再失败；仅联调/演示有意义。
+    _CONTINUE_ADVICE = {
+        "PARALLEL_LOCATE": "插取或雷达失败后，后续角点/放置通常会继续失败；现场应停在本步重试，联调才可强行跳过。",
+        "PICK_ONLY": "插取失败则货物位姿不可靠，后续放置不安全；建议停止并重试插取。",
+        "RADAR_TO_CAMERA": "缺少粗角点则相机搜索目标无效，后续识别/放置大概率失败。",
+        "CAPTURE_CORNERS": "未拍到角点图则无法精定位，后续步骤不可靠。",
+        "CORNER_RECOGNITION": "角点识别失败则无精定位，放置目标不可信。",
+        "CAMERA_TO_WORLD": "无 WORLD 角点则空间规划/放置会缺输入。",
+        "INITIAL_SPACE_PLAN": "空间规划失败则没有放置目标，后续放置无法正常进行。",
+        "NEIGHBOR_POSE": "临近姿态缺失可能影响避障/微调，放置风险升高。",
+        "TARGET_CONFIRM": "目标未确认则放置点不可信，不建议继续到放置。",
+        "PRE_PLACE_MONITOR": "放置前监控失败，可继续但缺少异常预警。",
+        "PLACE": "放置失败则货未到位，后续偏差/反馈无意义；建议停止排查。",
+        "POST_PLACE_BOTTOM": "放置后监控失败，本轮可视为未完整闭环。",
+        "POST_REGION": "区域偏差失败，本轮反馈不完整。",
+        "POST_CARGO_OFFSET": "货偏失败，本轮反馈不完整。",
+        "FEEDBACK": "反馈失败不影响机械回程，但本轮数据不完整。",
+        "RETURN": "回程失败时龙门架可能不在安全位，下一轮很危险；建议停止。",
+    }
+
+    def _continue_advice_for(self, code: str) -> str:
+        return self._CONTINUE_ADVICE.get(
+            str(code or ""),
+            "跳过本步后后续结果可能不可靠；现场优先停止并重试本步。",
+        )
+
+    def _ask_continue_after_failure(self, exc: Exception) -> bool:
+        """阻塞性失败弹窗：继续=跳过本步前进；停止=停在本步可重试。"""
+        code = ""
+        name = ""
+        try:
+            code, name = self.controller.current_step
+        except Exception:
+            pass
+        advice = self._continue_advice_for(code)
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Critical)
+        box.setWindowTitle("步骤失败 — 是否继续？")
+        box.setText(f"步骤失败：{name or code or '未知步骤'}")
+        box.setInformativeText(
+            f"{exc}\n\n"
+            f"{advice}\n\n"
+            "「继续」= 跳过本步进入下一步（不重跑失败逻辑）。\n"
+            "「停止」= 停在本步，可稍后重试；自动运行会暂停。"
+        )
+        cont = box.addButton("继续", QMessageBox.ButtonRole.AcceptRole)
+        stop = box.addButton("停止", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(stop)
+        box.exec()
+        return box.clickedButton() is cont
+
+    def _handle_step_failure(self, exc: Exception, *, from_auto: bool = False) -> None:
+        self._refresh()
+        if self._ask_continue_after_failure(exc):
+            try:
+                self.controller.continue_after_step_failure(str(exc))
+            except Exception as cont_exc:
+                QMessageBox.critical(self, "无法继续", str(cont_exc))
+                if from_auto and self.timer.isActive():
+                    self.timer.stop()
+                    self.auto_btn.setText("自动运行")
+                    self._sync_auto_push_policy()
+            self._refresh()
+            return
+        if from_auto and self.timer.isActive():
+            self.timer.stop()
+            self.auto_btn.setText("自动运行")
+            self._sync_auto_push_policy()
+        self._refresh()
+
     def _next(self):
         if self._plc_blocks_flow():
             QMessageBox.information(self, "请先处理 PLC 坐标", "请先在 PLC 弹窗中确认下发，或跳过并关闭，再执行下一步。")
@@ -543,7 +613,8 @@ class MainWindow(QMainWindow):
             self._refresh()
             QApplication.processEvents()
             self.controller.execute_next(); self._refresh()
-        except Exception as e: QMessageBox.warning(self,"步骤未通过",str(e)); self._refresh()
+        except Exception as e:
+            self._handle_step_failure(e, from_auto=False)
         finally:
             self._end_step_run()
 
@@ -580,8 +651,7 @@ class MainWindow(QMainWindow):
             self.controller.execute_next(); self._refresh()
             if self.controller.finished: self.timer.stop(); self.auto_btn.setText("自动运行"); self._sync_auto_push_policy()
         except Exception as e:
-            self.timer.stop(); self.auto_btn.setText("自动运行"); self._sync_auto_push_policy()
-            QMessageBox.warning(self,"流程等待/失败",str(e)); self._refresh()
+            self._handle_step_failure(e, from_auto=True)
         finally:
             self._end_step_run()
 

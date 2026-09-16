@@ -1351,6 +1351,39 @@ class FlowController:
             self._record(code,name,"failed",str(exc),{"error":str(exc),"parallel":deepcopy(self.twin.snapshot().get("parallel"))}); self.twin.set_alarm(str(exc)); raise
         self._save(); return self.snapshot()
 
+    def continue_after_step_failure(self, reason: str = "") -> dict:
+        """用户确认在硬失败后仍前进：本步记 warning，step_index +1，不重跑失败逻辑。"""
+        if self.finished:
+            return self.snapshot()
+        code, name = self.current_step
+        detail = {
+            "forced_continue": True,
+            "reason": str(reason or "用户选择失败后继续"),
+        }
+        self._record(
+            code,
+            name,
+            "warning",
+            f"失败后继续：{detail['reason']}",
+            detail,
+        )
+        self.twin.set_alarm(None)
+        self.step_index += 1
+        if self.step_index >= len(self.steps):
+            # 理论上 RETURN 成功才会换轮；若 RETURN 失败后仍继续，当作本轮结束尝试进入下一货
+            self.step_index = len(self.steps) - 1
+            try:
+                advance = self._advance_round_after_return()
+                if advance.get("finished") and self.loading_session_id:
+                    self.vehicle_db.finish_session(self.loading_session_id, "COMPLETED")
+            except Exception:
+                self.finished = True
+                self.running = False
+        else:
+            self.twin.set_phase(self.current_step[1], self.round_index + 1)
+        self._save()
+        return self.snapshot()
+
     def _save(self):
         STATE_FILE.parent.mkdir(parents=True,exist_ok=True)
         STATE_FILE.write_text(json.dumps(self.twin.snapshot(),ensure_ascii=False,indent=2,default=str),encoding="utf-8")
