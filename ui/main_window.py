@@ -60,6 +60,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.controller=FlowController(); self.bridge=TwinBridge(); self.debug_inputs=self.controller.default_debug_inputs()
         self._step_busy=False
+        self._running_stage=0  # 正在执行的流程格编号；与 step_code（可能已前进到下一步）区分
         self._profile_changing=False
         self._latest_plc_cmd=None
         self._plc_cmd_queue=[]
@@ -486,6 +487,7 @@ class MainWindow(QMainWindow):
         if self.controller.current_step[0] != "DEVICE_CHECK":
             return
         self._step_busy=True
+        self._running_stage=int(self.STEP_STAGE.get("DEVICE_CHECK",1))
         self._update_step_controls()
         self._refresh()
         QApplication.processEvents()
@@ -493,8 +495,9 @@ class MainWindow(QMainWindow):
             self.controller.execute_next()
         finally:
             self._step_busy=False
+            self._running_stage=0
             self._present_next_plc_command()
-            self._update_step_controls()
+            self._refresh_flow_chain(self.controller.snapshot())
 
     def _start(self):
         # 内部入口：开会话并立刻跑 DEVICE_CHECK。界面上由「执行下一步 / 自动运行」触发。
@@ -508,19 +511,32 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._step_busy=False
             QMessageBox.critical(self,"启动失败",str(e)); self._refresh()
+    def _begin_step_run(self):
+        """锁定本次点击要跑的流程格；execute_next 前进 step_index 后仍用它画 RUN。"""
+        snap = self.controller.snapshot()
+        self._running_stage = int(self.STEP_STAGE.get(snap.get("step_code"), 0) or 0)
+        self._step_busy = True
+        self._update_step_controls()
+        self._refresh_flow_chain(snap)
+
+    def _end_step_run(self):
+        self._step_busy = False
+        self._running_stage = 0
+        self._present_next_plc_command()
+        self._refresh_flow_chain(self.controller.snapshot())
+
     def _next(self):
         if self._plc_blocks_flow():
             QMessageBox.information(self, "请先处理 PLC 坐标", "请先在 PLC 弹窗中确认下发，或跳过并关闭，再执行下一步。")
             self._show_plc_dialog()
             return
         if self._step_busy: return
-        self._step_busy=True
-        self._update_step_controls()
-        self._refresh_flow_chain(self.controller.snapshot())
+        self._begin_step_run()
         try:
             self.controller.set_debug_inputs(self.debug_inputs)
             if not self.controller.running:
                 self._step_busy=False
+                self._running_stage=0
                 self._update_step_controls()
                 self._start()
                 return
@@ -529,10 +545,7 @@ class MainWindow(QMainWindow):
             self.controller.execute_next(); self._refresh()
         except Exception as e: QMessageBox.warning(self,"步骤未通过",str(e)); self._refresh()
         finally:
-            self._step_busy=False
-            self._update_step_controls()
-            self._present_next_plc_command()
-            self._update_step_controls()
+            self._end_step_run()
 
     def _auto(self):
         if self.timer.isActive():
@@ -554,12 +567,11 @@ class MainWindow(QMainWindow):
             self._update_step_controls()
             return
         if self._step_busy: return
-        self._step_busy=True
-        self._update_step_controls()
-        self._refresh_flow_chain(self.controller.snapshot())
+        self._begin_step_run()
         try:
             if not self.controller.running:
                 self._step_busy=False
+                self._running_stage=0
                 self._update_step_controls()
                 self._start()
                 return
@@ -571,9 +583,7 @@ class MainWindow(QMainWindow):
             self.timer.stop(); self.auto_btn.setText("自动运行"); self._sync_auto_push_policy()
             QMessageBox.warning(self,"流程等待/失败",str(e)); self._refresh()
         finally:
-            self._step_busy=False
-            self._present_next_plc_command()
-            self._update_step_controls()
+            self._end_step_run()
 
     def _debug(self):
         d=DebugInputDialog(self.debug_inputs,self)
@@ -609,6 +619,8 @@ class MainWindow(QMainWindow):
         self.timer.stop()
         self.auto_btn.setText("自动运行")
         self.controller.reset(keep_plan=True)
+        self._step_busy=False
+        self._running_stage=0
         self._latest_plc_cmd=None
         self._plc_cmd_queue.clear()
         self._latest_plc_batch=[]
@@ -700,7 +712,8 @@ class MainWindow(QMainWindow):
             loop=QEventLoop(self); QTimer.singleShot(460,loop.quit); loop.exec()
 
     def _refresh_flow_chain(self,s):
-        # DONE=已跑完；RUN=正在执行；WAIT=等待用户点「执行下一步」或尚未轮到
+        # DONE=已跑完；RUN=本点击正在执行的那一格；WAIT=等待用户点「执行下一步」或尚未轮到
+        # 注意：execute_next 结束后 step_code 已指向「下一格」，不能用它+busy 画 RUN，否则会误亮下一格。
         if s.get("finished"):
             current_stage=13
         elif not s.get("running") and not s.get("results"):
@@ -708,15 +721,15 @@ class MainWindow(QMainWindow):
         else:
             current_stage=self.STEP_STAGE.get(s.get("step_code"),1)
         skipped={4,5,6,7} if not s.get("first_round") else set()
+        running=int(self._running_stage or 0) if self._step_busy else 0
         for (number,title_text),node in zip(self.FLOW_STAGES,self.flow_nodes):
             if number in skipped:
                 status="SKIP"; bg="#172535"; border="#344b5e"; color="#7990a1"
+            elif running and number == running:
+                status="RUN"; bg="#0b5794"; border="#61c7ff"; color="#ffffff"
             elif current_stage and number < current_stage:
                 status="DONE"; bg="#123e37"; border="#28a985"; color="#9df0d3"
-            elif number == current_stage and self._step_busy:
-                status="RUN"; bg="#0b5794"; border="#61c7ff"; color="#ffffff"
             else:
-                # 当前待执行格、以及更后面的格，统一 WAIT（不再使用 NEXT）
                 status="WAIT"; bg="#10243a"; border="#294d6d"; color="#8faabd"
             node.setText(f"{number}. {title_text}\n{status}")
             node.setStyleSheet(f"background:{bg};border:1px solid {border};border-radius:5px;color:{color};font-size:11px;font-weight:600;padding:3px")
