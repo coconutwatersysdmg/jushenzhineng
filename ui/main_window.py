@@ -63,6 +63,7 @@ class MainWindow(QMainWindow):
         self._profile_changing=False
         self._latest_plc_cmd=None
         self._plc_cmd_queue=[]
+        self._latest_plc_batch=[]
         self.plc_dialog=None
         self.motionSnapshot.connect(self._apply_motion_snapshot)
         self.plcCommandReady.connect(self._enqueue_plc_command, Qt.ConnectionType.QueuedConnection)
@@ -333,6 +334,7 @@ class MainWindow(QMainWindow):
         self.controller.set_corner_review_callback(self._review_corners)
         self._plc_cmd_queue.clear()
         self._latest_plc_cmd=None
+        self._latest_plc_batch=[]
         if self.plc_dialog is not None:
             self.plc_dialog.clear_command()
         self._sync_auto_push_policy()
@@ -597,6 +599,7 @@ class MainWindow(QMainWindow):
         self.controller.reset(keep_plan=True)
         self._latest_plc_cmd=None
         self._plc_cmd_queue.clear()
+        self._latest_plc_batch=[]
         if self.plc_dialog is not None:
             self.plc_dialog.clear_command()
         self._sync_auto_push_policy()
@@ -617,6 +620,7 @@ class MainWindow(QMainWindow):
         if skip_remaining:
             self._plc_cmd_queue.clear()
             self._latest_plc_cmd = None
+            self._latest_plc_batch = []
             return
         self._present_next_plc_command()
 
@@ -626,28 +630,45 @@ class MainWindow(QMainWindow):
             return
         if not self._plc_cmd_queue:
             return
-        cmd = self._plc_cmd_queue.pop(0)
-        self._latest_plc_cmd = cmd
-        self.controller.plc_publisher.last_command = cmd
+        step = self._plc_cmd_queue[0].get("step")
+        batch = []
+        while self._plc_cmd_queue and self._plc_cmd_queue[0].get("step") == step:
+            batch.append(self._plc_cmd_queue.pop(0))
+        self._latest_plc_batch = batch
+        self._latest_plc_cmd = batch[0]
         auto = bool(self.auto_push_cb.isChecked() and self.timer.isActive())
         push = None
         if auto:
-            push = self.controller.push_last_plc_command()
+            push = self._push_plc_batch(batch)
             status = "SUCCESS" if push.get("success") else "FAILED"
             self.controller.twin.add_message(
-                "PLC_PUSH", status, push.get("message", ""), {"cmd_id": cmd.get("cmd_id"), **(push or {})}
+                "PLC_PUSH", status, push.get("message", ""), {"count": len(batch), **(push or {})}
             )
             if not push.get("success") and self.timer.isActive():
                 self.timer.stop()
                 self.auto_btn.setText("自动运行")
                 self._sync_auto_push_policy()
-        dlg.apply_command(cmd, auto_pushed=auto, push_result=push)
+        dlg.apply_batch(batch, auto_pushed=auto, push_result=push)
+
+    def _push_plc_batch(self, batch: list) -> dict:
+        total = len(batch or [])
+        if total <= 0:
+            return {"success": False, "message": "没有可下发的运动坐标"}
+        for index, cmd in enumerate(batch, 1):
+            self.controller.plc_publisher.last_command = cmd
+            result = self.controller.push_last_plc_command()
+            if not result.get("success"):
+                return {
+                    "success": False,
+                    "message": f"第 {index}/{total} 段推送失败：{result.get('message') or '未知错误'}",
+                }
+        return {"success": True, "message": f"已按顺序推送 {total} 段"}
 
     def _confirm_push_plc(self):
-        if not self._latest_plc_cmd:
+        batch = self._latest_plc_batch or ([self._latest_plc_cmd] if self._latest_plc_cmd else [])
+        if not batch:
             return {"success": False, "message": "当前没有可下发的运动坐标"}
-        self.controller.plc_publisher.last_command = self._latest_plc_cmd
-        return self.controller.push_last_plc_command()
+        return self._push_plc_batch(batch)
 
     def _apply_motion_snapshot(self,snapshot,motion):
         # Parallel 3.1 runs in a worker thread.  Its queued motion signal can be

@@ -7,7 +7,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont
@@ -78,7 +78,24 @@ _PHASE_PURPOSE = (
 )
 
 
-def describe_motion(cmd: dict[str, Any]) -> tuple[str, str]:
+def format_waypoint_line(index: int, total: int, cmd: Mapping[str, Any]) -> str:
+    _, purpose = describe_motion(cmd)
+    xyzr = cmd.get("gantry_xyzr")
+    world = cmd.get("world_pose") or {}
+    if isinstance(xyzr, Mapping):
+        pose = (
+            f"XYZR=({float(xyzr.get('X' ,0)):.1f}, {float(xyzr.get('Y', 0)):.1f}, "
+            f"{float(xyzr.get('Z', 0)):.1f}, {float(xyzr.get('R', 0)):.1f})"
+        )
+    else:
+        pose = (
+            f"WORLD=({float(world.get('x_mm', 0)):.1f}, {float(world.get('y_mm', 0)):.1f}, "
+            f"{float(world.get('z_mm', 0)):.1f})"
+        )
+    return f"{index}/{total}  {purpose}\n    {pose}"
+
+
+def describe_motion(cmd: Mapping[str, Any]) -> tuple[str, str]:
     """返回 (步骤标题, 中文目的)。"""
     step = str(cmd.get("step") or "").strip()
     task = str(cmd.get("task") or "").strip()
@@ -194,6 +211,7 @@ class PlcMotionDialog(QDialog):
         self.setFont(font)
         self._on_confirm_push = on_confirm_push
         self._latest_cmd: dict[str, Any] | None = None
+        self._latest_cmds: list[dict[str, Any]] = []
         self._blocking = False
         self._closing = False
         self._build()
@@ -212,7 +230,7 @@ class PlcMotionDialog(QDialog):
         self.step_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         layout.addWidget(self.step_label)
 
-        self.purpose_label = QLabel("移动目的：—")
+        self.purpose_label = QLabel("本步移动段：—")
         self.purpose_label.setObjectName("purposeLabel")
         self.purpose_label.setWordWrap(True)
         self.purpose_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -252,36 +270,34 @@ class PlcMotionDialog(QDialog):
 
     def clear_command(self) -> None:
         self._latest_cmd = None
+        self._latest_cmds = []
         self.step_label.setText("流程步骤：—")
-        self.purpose_label.setText("移动目的：—")
+        self.purpose_label.setText("本步移动段：—")
         self.summary.setText("等待流程产生运动目标…")
         self.cmd_view.clear()
         self.push_status.setText("下发状态：未下发")
+        self.confirm_btn.setText("确认下发到 PLC")
         self.confirm_btn.setEnabled(False)
         self._end_blocking(emit_resolved=False, skip_remaining=False)
 
     def apply_command(self, cmd: dict, *, auto_pushed: bool = False, push_result: dict | None = None) -> None:
-        self._latest_cmd = dict(cmd or {})
-        step_title, purpose = describe_motion(self._latest_cmd)
-        world = self._latest_cmd.get("world_pose") or {}
-        xyzr = self._latest_cmd.get("gantry_xyzr")
+        self.apply_batch([cmd], auto_pushed=auto_pushed, push_result=push_result)
 
+    def apply_batch(self, cmds: list, *, auto_pushed: bool = False, push_result: dict | None = None) -> None:
+        batch = [dict(item or {}) for item in (cmds or []) if item]
+        if not batch:
+            return
+        self._latest_cmds = batch
+        self._latest_cmd = batch[0]
+        step_title, _ = describe_motion(batch[0])
+        total = len(batch)
+        lines = [format_waypoint_line(i, total, cmd) for i, cmd in enumerate(batch, 1)]
         self.step_label.setText(f"流程步骤：{step_title}")
-        self.purpose_label.setText(f"移动目的：{purpose}")
-        summary = (
-            f"WORLD  x={float(world.get('x_mm', 0)):.1f}  y={float(world.get('y_mm', 0)):.1f}  "
-            f"z={float(world.get('z_mm', 0)):.1f}  yaw={float(world.get('yaw_deg', 0)):.1f}"
-        )
-        if isinstance(xyzr, dict):
-            summary += (
-                f"\nXYZR   X={float(xyzr.get('X', 0)):.1f}  Y={float(xyzr.get('Y', 0)):.1f}  "
-                f"Z={float(xyzr.get('Z', 0)):.1f}  R={float(xyzr.get('R', 0)):.1f}"
-            )
-        else:
-            summary += "\nXYZR   未换算"
-        self.summary.setText(summary)
-        self.cmd_view.setPlainText(json.dumps(self._latest_cmd, ensure_ascii=False, indent=2))
+        self.purpose_label.setText(f"本步共 {total} 段，按顺序执行：")
+        self.summary.setText("\n\n".join(lines))
+        self.cmd_view.setPlainText(json.dumps(batch if total > 1 else batch[0], ensure_ascii=False, indent=2))
         self.confirm_btn.setEnabled(True)
+        self.confirm_btn.setText("确认下发到 PLC" if total == 1 else f"确认按顺序下发全部 {total} 段")
 
         if auto_pushed:
             push = dict(push_result or {})
@@ -291,7 +307,7 @@ class PlcMotionDialog(QDialog):
                 return
             self.push_status.setText(f"下发状态：自动推送失败 · {push.get('message', '')}")
         else:
-            self.push_status.setText("下发状态：待处理（请确认下发，或跳过并关闭）")
+            self.push_status.setText("下发状态：待处理（确认后按 1→N 顺序推送）")
 
         self._begin_blocking()
 

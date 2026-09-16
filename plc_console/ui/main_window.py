@@ -57,6 +57,7 @@ class PlcConsoleWindow(QMainWindow):
         self.bridge.commandReceived.connect(self._on_command)
         self.bridge.clientMessage.connect(lambda m: self._log(f"[bridge] {m}"))
         self._pending: dict | None = None
+        self._exec_queue: list[dict] = []
         self._worker: _MotionWorker | None = None
         self._build()
         started = self.bridge.start()
@@ -165,22 +166,35 @@ class PlcConsoleWindow(QMainWindow):
             QMessageBox.warning(self, "读取失败", str(exc))
 
     def _on_command(self, cmd: dict) -> None:
-        self._pending = dict(cmd)
+        data = dict(cmd)
+        self._show_cmd(data)
+        self._log(f"收到指令 {data.get('cmd_id')} task={data.get('task')}")
+        if self.auto_exec.isChecked():
+            self._enqueue_or_run(data)
+        else:
+            self._pending = data
+
+    def _show_cmd(self, cmd: dict) -> None:
         self.cmd_view.setPlainText(json.dumps(cmd, ensure_ascii=False, indent=2))
         xyzr = cmd.get("gantry_xyzr")
         if isinstance(xyzr, dict):
             for axis in ("X", "Y", "Z", "R"):
                 if axis in xyzr and axis in self.spin:
                     self.spin[axis].setValue(float(xyzr[axis]))
-        self._log(f"收到指令 {cmd.get('cmd_id')} task={cmd.get('task')}")
-        if self.auto_exec.isChecked():
-            self._execute_pending()
+
+    def _enqueue_or_run(self, cmd: dict) -> None:
+        if self._worker and self._worker.isRunning():
+            self._exec_queue.append(dict(cmd))
+            self._log(f"上一段尚未到位，已排队（队列 {len(self._exec_queue)}）")
+            return
+        self._pending = dict(cmd)
+        self._start_worker(self._pending)
 
     def _execute_pending(self) -> None:
         if not self._pending:
             QMessageBox.information(self, "提示", "当前没有待执行指令")
             return
-        self._start_worker(self._pending)
+        self._enqueue_or_run(self._pending)
 
     def _execute_manual(self) -> None:
         cmd = {
@@ -217,7 +231,8 @@ class PlcConsoleWindow(QMainWindow):
 
     def _start_worker(self, cmd: dict) -> None:
         if self._worker and self._worker.isRunning():
-            QMessageBox.warning(self, "忙", "上一条运动仍在执行")
+            self._exec_queue.append(dict(cmd))
+            self._log(f"运动中，新目标已排队（队列 {len(self._exec_queue)}）")
             return
         if not self.runner.connected:
             linked = self.runner.connect()
@@ -251,6 +266,12 @@ class PlcConsoleWindow(QMainWindow):
     def _on_worker_done(self) -> None:
         self.exec_btn.setEnabled(True)
         self.manual_btn.setEnabled(True)
+        if self._exec_queue:
+            nxt = self._exec_queue.pop(0)
+            self._pending = nxt
+            self._show_cmd(nxt)
+            self._log(f"执行队列下一段，剩余 {len(self._exec_queue)}")
+            self._start_worker(nxt)
 
     def closeEvent(self, event):
         self.bridge.stop()
