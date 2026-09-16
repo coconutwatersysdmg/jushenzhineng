@@ -486,6 +486,7 @@ class MainWindow(QMainWindow):
         if self.controller.current_step[0] != "DEVICE_CHECK":
             return
         self._step_busy=True
+        self._update_step_controls()
         self._refresh()
         QApplication.processEvents()
         try:
@@ -493,6 +494,7 @@ class MainWindow(QMainWindow):
         finally:
             self._step_busy=False
             self._present_next_plc_command()
+            self._update_step_controls()
 
     def _start(self):
         # 内部入口：开会话并立刻跑 DEVICE_CHECK。界面上由「执行下一步 / 自动运行」触发。
@@ -513,10 +515,13 @@ class MainWindow(QMainWindow):
             return
         if self._step_busy: return
         self._step_busy=True
+        self._update_step_controls()
+        self._refresh_flow_chain(self.controller.snapshot())
         try:
             self.controller.set_debug_inputs(self.debug_inputs)
             if not self.controller.running:
                 self._step_busy=False
+                self._update_step_controls()
                 self._start()
                 return
             self._refresh()
@@ -525,7 +530,9 @@ class MainWindow(QMainWindow):
         except Exception as e: QMessageBox.warning(self,"步骤未通过",str(e)); self._refresh()
         finally:
             self._step_busy=False
+            self._update_step_controls()
             self._present_next_plc_command()
+            self._update_step_controls()
 
     def _auto(self):
         if self.timer.isActive():
@@ -544,12 +551,16 @@ class MainWindow(QMainWindow):
 
     def _auto_tick(self):
         if self._plc_blocks_flow():
+            self._update_step_controls()
             return
         if self._step_busy: return
         self._step_busy=True
+        self._update_step_controls()
+        self._refresh_flow_chain(self.controller.snapshot())
         try:
             if not self.controller.running:
                 self._step_busy=False
+                self._update_step_controls()
                 self._start()
                 return
             self._refresh()
@@ -562,6 +573,7 @@ class MainWindow(QMainWindow):
         finally:
             self._step_busy=False
             self._present_next_plc_command()
+            self._update_step_controls()
 
     def _debug(self):
         d=DebugInputDialog(self.debug_inputs,self)
@@ -621,8 +633,10 @@ class MainWindow(QMainWindow):
             self._plc_cmd_queue.clear()
             self._latest_plc_cmd = None
             self._latest_plc_batch = []
+            self._update_step_controls()
             return
         self._present_next_plc_command()
+        self._update_step_controls()
 
     def _present_next_plc_command(self):
         dlg = self._ensure_plc_dialog()
@@ -649,6 +663,7 @@ class MainWindow(QMainWindow):
                 self.auto_btn.setText("自动运行")
                 self._sync_auto_push_policy()
         dlg.apply_batch(batch, auto_pushed=auto, push_result=push)
+        self._update_step_controls()
 
     def _push_plc_batch(self, batch: list) -> dict:
         total = len(batch or [])
@@ -685,7 +700,7 @@ class MainWindow(QMainWindow):
             loop=QEventLoop(self); QTimer.singleShot(460,loop.quit); loop.exec()
 
     def _refresh_flow_chain(self,s):
-        # DONE=已跑完；RUN=正在执行；NEXT=当前待执行；WAIT=未到
+        # DONE=已跑完；RUN=正在执行；WAIT=等待用户点「执行下一步」或尚未轮到
         if s.get("finished"):
             current_stage=13
         elif not s.get("running") and not s.get("results"):
@@ -698,15 +713,23 @@ class MainWindow(QMainWindow):
                 status="SKIP"; bg="#172535"; border="#344b5e"; color="#7990a1"
             elif current_stage and number < current_stage:
                 status="DONE"; bg="#123e37"; border="#28a985"; color="#9df0d3"
-            elif number == current_stage:
-                if self._step_busy:
-                    status="RUN"; bg="#0b5794"; border="#61c7ff"; color="#ffffff"
-                else:
-                    status="NEXT"; bg="#1a334d"; border="#3d7eab"; color="#9fdcff"
+            elif number == current_stage and self._step_busy:
+                status="RUN"; bg="#0b5794"; border="#61c7ff"; color="#ffffff"
             else:
+                # 当前待执行格、以及更后面的格，统一 WAIT（不再使用 NEXT）
                 status="WAIT"; bg="#10243a"; border="#294d6d"; color="#8faabd"
             node.setText(f"{number}. {title_text}\n{status}")
             node.setStyleSheet(f"background:{bg};border:1px solid {border};border-radius:5px;color:{color};font-size:11px;font-weight:600;padding:3px")
+        self._update_step_controls()
+
+    def _update_step_controls(self):
+        """步骤 RUN 或 PLC 弹窗待处理时，禁止点「执行下一步」。"""
+        busy = bool(self._step_busy or self._plc_blocks_flow() or self.controller.finished)
+        if hasattr(self, "next_btn"):
+            self.next_btn.setEnabled(not busy)
+        if hasattr(self, "auto_btn") and not self.timer.isActive():
+            # 自动运行进行中仍可点「暂停」；未在自动跑时若步骤忙则禁止启动自动
+            self.auto_btn.setEnabled(not self._step_busy and not self.controller.finished)
 
     def _refresh(self,s=None):
         s=s or self.controller.snapshot(); t=s["twin"]; self.bridge.update_state(t); self._refresh_flow_chain(s)

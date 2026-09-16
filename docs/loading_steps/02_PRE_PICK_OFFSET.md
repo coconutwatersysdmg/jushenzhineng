@@ -20,11 +20,11 @@
 1. 拍照拿 `image_path`
 2. 算法找蓝托盘 + 白货边界，算 `overhang_percent`
 3. 与门限比较 → `should_fork`（可否插取）
-4. 结果写入运行日志 + PLC `PALLET_OFFSET_PRE_PICK`
-5. **无论拍照/识别成功与否，都继续下一步**（总体结果标 `warning`）
+4. 结果写入运行日志 + PLC message `PALLET_OFFSET_PRE_PICK`
+5. **无论拍照/识别成功与否，都继续下一步**（总体结果可标 `warning`）
 
 ## 输出（看哪里）
 
-- **运行日志 / 报警**：`PRE_PICK_OFFSET` 的 INFO / FAILED（含照片路径、偏移%、原因）
-- **总体结果**：本步 `status=success|warning`，`data` 含完整字段
+- **运行日志 / 报警**：`PRE_PICK_OFFSET` 的 INFO / FAILED  
+- **总体结果**：本步 `status=success|warning`，`data` 含完整字段  
 - 关键字段：`capture_success`、`analysis_success`、`image_path`、`overhang_percent`、`should_fork`、`message`
