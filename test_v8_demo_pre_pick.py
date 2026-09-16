@@ -2,9 +2,12 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from config.feature_switches import apply_run_profile
 from controllers.flow_controller import FlowController
 from utils.demo_assets import ensure_demo_pre_pick_image
 
+# 本用例验证模拟路径；避免本机残留 field/lab 配置连真机。
+apply_run_profile("sim", persist=False)
 
 with TemporaryDirectory() as td:
     image_path = ensure_demo_pre_pick_image(Path(td) / "demo_pre_pick_offset.jpg")
@@ -17,6 +20,10 @@ controller.set_plan([{
     "pallet_reference_width_mm": 1200,
 }])
 controller.start()
+assert controller.current_step[0] == "DEVICE_CHECK", controller.current_step
+snapshot = controller.execute_next()
+assert snapshot["step_code"] == "PRE_PICK_OFFSET", snapshot
+assert controller.results[-1]["step_code"] == "DEVICE_CHECK", controller.results[-1]
 snapshot = controller.execute_next()
 result = controller.round_data["pre_pick_offset"]
 
@@ -53,18 +60,23 @@ else:
     raise AssertionError("production mode unexpectedly used a demo image")
 
 # A successful retry clears the previous alarm instead of leaving a stale red banner.
+# 真机缺图时步骤2改为软继续（warning），不再抛异常阻断流程。
 retry = FlowController()
 retry.camera.tagged_images.pop("pre_pick_offset", None)
 retry.set_plan([{"cargo_code":"RETRY","quantity":1,"pallet_reference_width_mm":1200}])
 retry.start(); retry.allow_demo=False; retry.camera.set_demo_enabled(False)
-try:
-    retry.execute_next()
-except RuntimeError:
-    pass
-else:
-    raise AssertionError("missing production image should fail before retry")
-assert retry.twin.snapshot()["alarm"]
-retry.allow_demo=True; retry.camera.set_demo_enabled(True); retry.execute_next()
+assert retry.execute_next()["step_code"] == "PRE_PICK_OFFSET"
+snap = retry.execute_next()
+assert snap["step_code"] == "PARALLEL_LOCATE", snap
+assert retry.results[-1]["status"] == "warning", retry.results[-1]
+assert retry.round_data["pre_pick_offset"].get("capture_success") is False
+assert retry.round_data["pre_pick_offset"].get("continue_anyway") is True
+msgs = " ".join(str(m.get("message") or "") for m in (retry.twin.snapshot().get("messages") or []))
+assert "拍照失败" in msgs or "未取得" in msgs, msgs
 assert retry.twin.snapshot()["alarm"] is None
+retry.allow_demo=True; retry.camera.set_demo_enabled(True)
+# 下一轮前重置到步骤2再试成功路径：直接再跑一次 capture 验证 demo 可恢复。
+captured_ok = retry._capture_rgb("CAM_PICK", "pre_pick_offset", required=True)
+assert captured_ok.get("success") and captured_ok.get("demo"), captured_ok
 
 print("DEMO_PRE_PICK_FALLBACK_OK", result["overhang_percent"], captured_fallback["image_path"])

@@ -123,6 +123,10 @@ class MockRadarAdapter(RadarAdapter):
 
     def set_point_cloud_path(self, path: str): self.pcd_path = str(path or "")
 
+    def probe(self) -> dict:
+        self.twin.update_device("RADAR", status="ONLINE", task="MOCK_READY")
+        return {"success": True, "device_id": "RADAR", "message": "Mock 雷达就绪"}
+
     def locate_truck(self, cargo: dict) -> dict:
         self.twin.update_device("RADAR", task="LOCATING")
         if not self.force_success:
@@ -168,6 +172,10 @@ class MockArmCameraAdapter(ArmCameraAdapter):
 
     def set_demo_enabled(self, enabled: bool):
         self.demo_enabled = bool(enabled)
+
+    def probe(self) -> dict:
+        self.twin.update_device("CAM_PICK", status="ONLINE", task="MOCK_READY")
+        return {"success": True, "device_id": "CAM_PICK", "message": "Mock 相机就绪"}
 
     def set_rgbd(self, rgb: str, depth: str):
         self.inputs["CAM_PICK"] = {"rgb": str(rgb or ""), "depth": str(depth or "")}

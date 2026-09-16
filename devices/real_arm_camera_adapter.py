@@ -69,12 +69,19 @@ class RealArmCameraAdapter(ArmCameraAdapter):
 
     def connect(self) -> dict:
         if self._pipeline is not None:
-            return {"success": True, "message": "D435i 已连接"}
+            self.twin.update_camera("CAM_PICK", status="ONLINE", task="D435I_CONNECTED")
+            return {"success": True, "device_id": "CAM_PICK", "message": "D435i 已连接"}
         try:
             import pyrealsense2 as rs
         except ImportError as exc:
             self._last_error = "缺少 pyrealsense2，请安装 Intel RealSense SDK / pip install pyrealsense2"
-            return {"success": False, "message": self._last_error, "error": str(exc)}
+            self.twin.update_camera("CAM_PICK", status="OFFLINE", task="NO_SDK")
+            return {
+                "success": False,
+                "device_id": "CAM_PICK",
+                "message": self._last_error,
+                "error": str(exc),
+            }
 
         self._rs = rs
         config = rs.config()
@@ -92,7 +99,8 @@ class RealArmCameraAdapter(ArmCameraAdapter):
         except Exception as exc:
             self._last_error = f"D435i 连接失败：{exc}"
             self._pipeline = self._profile = self._align = None
-            return {"success": False, "message": self._last_error}
+            self.twin.update_camera("CAM_PICK", status="OFFLINE", task="CONNECT_FAILED")
+            return {"success": False, "device_id": "CAM_PICK", "message": self._last_error}
 
         self._pipeline = pipeline
         self._align = rs.align(rs.stream.color)
@@ -102,9 +110,10 @@ class RealArmCameraAdapter(ArmCameraAdapter):
         except Exception:
             pass
         self._last_error = ""
-        self.twin.update_device("CAM_PICK", status="ONLINE", task="D435I_CONNECTED")
+        self.twin.update_camera("CAM_PICK", status="ONLINE", task="D435I_CONNECTED")
         return {
             "success": True,
+            "device_id": "CAM_PICK",
             "message": "D435i 已连接",
             "extrinsic_file": str(self.extrinsic_file),
             "depth_scale_mm": self._depth_scale_mm,

@@ -119,7 +119,7 @@ class DigitalTwinState:
     @staticmethod
     def _device(device_id, kind, pose: Pose6D, frame):
         return {
-            "device_id": device_id, "kind": kind, "status": "ONLINE", "task": "IDLE",
+            "device_id": device_id, "kind": kind, "status": "UNKNOWN", "task": "IDLE",
             "frame": frame, "pose": pose.to_dict(),
         }
 
@@ -128,7 +128,7 @@ class DigitalTwinState:
         return {
             "camera_id": camera_id,
             "parent_robot_id": parent_robot_id,
-            "status": "READY",
+            "status": "UNKNOWN",
             "task": "IDLE",
             "rgbd": bool(rgbd),
             "mount_pose": mount_pose.to_dict(),

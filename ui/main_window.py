@@ -9,7 +9,7 @@ from PySide6.QtCore import QEventLoop, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QPixmap
 from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QFrame, QLabel,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QFrame, QLabel,
     QPushButton, QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QMessageBox,
     QTabWidget, QToolButton, QSizePolicy, QComboBox,
 )
@@ -34,7 +34,7 @@ class MainWindow(QMainWindow):
     motionSnapshot = Signal(dict, dict)
 
     FLOW_STAGES = [
-        (1,"数据 / 设备 / 车辆"),
+        (1,"设备连接检查"),
         (2,"货物-托盘偏差"),
         (3,"3.1 插取 ∥ 3.2 雷达"),
         (4,"雷达点 → PLC → 相机"),
@@ -48,7 +48,7 @@ class MainWindow(QMainWindow):
         (12,"机械臂返回 / 下一轮"),
     ]
     STEP_STAGE = {
-        "PRE_PICK_OFFSET":2,"PARALLEL_LOCATE":3,"PICK_ONLY":3,"RADAR_TO_CAMERA":4,
+        "DEVICE_CHECK":1,"PRE_PICK_OFFSET":2,"PARALLEL_LOCATE":3,"PICK_ONLY":3,"RADAR_TO_CAMERA":4,
         "CAPTURE_CORNERS":5,"CORNER_RECOGNITION":6,"CAMERA_TO_WORLD":7,
         "INITIAL_SPACE_PLAN":8,"NEIGHBOR_POSE":8,"TARGET_CONFIRM":8,"PRE_PLACE_MONITOR":9,"PLACE":9,
         "POST_PLACE_BOTTOM":10,"POST_REGION":10,"POST_CARGO_OFFSET":10,"FEEDBACK":11,"RETURN":12,"DONE":12,
@@ -133,6 +133,21 @@ class MainWindow(QMainWindow):
         self.phase=QLabel("IDLE"); self.phase.setStyleSheet("font-size:15px;font-weight:700;color:#5ad0ff"); top.addWidget(self.phase)
         self.progress=QLabel("0/0"); self.progress.setStyleSheet("font-size:18px;font-weight:700"); top.addWidget(self.progress); lay.addLayout(top)
 
+        # 三件外设：紧凑状态条（绿点已连接 / 红点未连接），悬停看原因
+        device_strip=QHBoxLayout(); device_strip.setSpacing(14)
+        strip_title=QLabel("外接设备")
+        strip_title.setStyleSheet("color:#8eb6cc;font-weight:600;font-size:12px")
+        device_strip.addWidget(strip_title,0)
+        self.device_status_badges={}
+        for device_id,title in (("PLC","PLC"),("RADAR","雷达"),("CAM_PICK","相机")):
+            badge=QLabel(f"○ {title} 未检测")
+            badge.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            badge.setStyleSheet("color:#8faabd;font-size:12px;font-weight:600;padding:2px 0")
+            self.device_status_badges[device_id]=badge
+            device_strip.addWidget(badge,0)
+        device_strip.addStretch(1)
+        lay.addLayout(device_strip)
+
         f,l,self.flow_toggle=self._collapsible_card("流程链路",expanded=False)
         self.flow_nodes=[]
         for row_index,stage_row in enumerate((self.FLOW_STAGES[:6],self.FLOW_STAGES[6:])):
@@ -155,6 +170,15 @@ class MainWindow(QMainWindow):
 
         f,l,_=self._collapsible_card("货物 / 托盘实时数据",expanded=True)
         self.cargo_table=QTableWidget(0,2); self.cargo_table.setHorizontalHeaderLabels(["字段","值"]); self.cargo_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.cargo_table); ll.addWidget(f,1)
+
+        f,l,_=self._collapsible_card("外接设备连接状态",expanded=True)
+        self.ext_device_table=QTableWidget(0,3)
+        self.ext_device_table.setHorizontalHeaderLabels(["设备","状态","说明"])
+        self.ext_device_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.ResizeToContents)
+        self.ext_device_table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeMode.ResizeToContents)
+        self.ext_device_table.horizontalHeader().setSectionResizeMode(2,QHeaderView.ResizeMode.Stretch)
+        self.ext_device_table.setMinimumHeight(110)
+        l.addWidget(self.ext_device_table); ll.addWidget(f,0)
 
         f,l,_=self._collapsible_card("车辆 / 相机最终车板 WORLD 数据",expanded=True)
         self.truck_table=QTableWidget(0,2); self.truck_table.setHorizontalHeaderLabels(["字段","值"]); self.truck_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.truck_table)
@@ -231,8 +255,9 @@ class MainWindow(QMainWindow):
         self._module_rows=[]; self._selected_module_id=""; self._latest_module_id=""
 
         bottom=QSplitter(Qt.Orientation.Horizontal); bottom.setChildrenCollapsible(False); self.body_splitter.addWidget(bottom)
-        f,l,_=self._collapsible_card("总体结果（每一步自动保存）",expanded=True); self.results=QTextEdit(); self.results.setReadOnly(True); self.results.setMinimumHeight(110); l.addWidget(self.results); bottom.addWidget(f)
-        f,l,_=self._collapsible_card("运行日志 / 报警",expanded=True); self.logs=QTextEdit(); self.logs.setReadOnly(True); self.logs.setMinimumHeight(110); l.addWidget(self.logs); bottom.addWidget(f); bottom.setSizes([1000,900])
+        f,l,_=self._collapsible_card("运行日志 / 报警",expanded=True); self.logs=QTextEdit(); self.logs.setReadOnly(True); self.logs.setMinimumHeight(110); l.addWidget(self.logs); bottom.addWidget(f)
+        # 总体结果 JSON 过长暂不展示；数据仍写入 workdir 结果文件。
+        self.results=None
         self.body_splitter.setStretchFactor(0,5); self.body_splitter.setStretchFactor(1,1); self.body_splitter.setSizes([820,145])
 
     def _on_qml_status(self,status):
@@ -440,13 +465,44 @@ class MainWindow(QMainWindow):
     def _review_corners(self, image_points, corner_ids, result_tag="review"):
         return run_corner_review(image_points, corner_ids, parent=self, result_tag=result_tag)
 
+    def _run_device_check_on_start(self):
+        """开始时自动跑完第1步设备检查；跑完即 DONE，不等「执行下一步」。"""
+        if self.controller.finished:
+            return
+        if self.controller.current_step[0] != "DEVICE_CHECK":
+            return
+        self._step_busy=True
+        self._refresh()
+        QApplication.processEvents()
+        try:
+            self.controller.execute_next()
+        finally:
+            self._step_busy=False
+
     def _start(self):
-        try: self.controller.set_debug_inputs(self.debug_inputs); self.controller.start(); self._refresh()
-        except Exception as e: QMessageBox.critical(self,"启动失败",str(e))
+        # 开会话 / 装载计划，并立刻执行 DEVICE_CHECK（结束即 DONE）。
+        if self._step_busy: return
+        try:
+            self.controller.set_debug_inputs(self.debug_inputs)
+            self.controller.start()
+            self._refresh()
+            self._run_device_check_on_start()
+            self._refresh()
+        except Exception as e:
+            self._step_busy=False
+            QMessageBox.critical(self,"启动失败",str(e)); self._refresh()
     def _next(self):
         if self._step_busy: return
         self._step_busy=True
-        try: self.controller.set_debug_inputs(self.debug_inputs); self.controller.execute_next(); self._refresh()
+        try:
+            self.controller.set_debug_inputs(self.debug_inputs)
+            if not self.controller.running:
+                self._step_busy=False
+                self._start()
+                return
+            self._refresh()
+            QApplication.processEvents()
+            self.controller.execute_next(); self._refresh()
         except Exception as e: QMessageBox.warning(self,"步骤未通过",str(e)); self._refresh()
         finally: self._step_busy=False
     def _auto(self):
@@ -458,6 +514,12 @@ class MainWindow(QMainWindow):
         if self._step_busy: return
         self._step_busy=True
         try:
+            if not self.controller.running:
+                self._step_busy=False
+                self._start()
+                return
+            self._refresh()
+            QApplication.processEvents()
             self.controller.execute_next(); self._refresh()
             if self.controller.finished: self.timer.stop(); self.auto_btn.setText("自动运行")
         except Exception as e:
@@ -483,20 +545,24 @@ class MainWindow(QMainWindow):
             loop=QEventLoop(self); QTimer.singleShot(460,loop.quit); loop.exec()
 
     def _refresh_flow_chain(self,s):
+        # DONE=已跑完；RUN=正在执行；NEXT=当前待执行；WAIT=未到
         if s.get("finished"):
             current_stage=13
         elif not s.get("running") and not s.get("results"):
-            current_stage=1
+            current_stage=0
         else:
             current_stage=self.STEP_STAGE.get(s.get("step_code"),1)
         skipped={4,5,6,7} if not s.get("first_round") else set()
         for (number,title_text),node in zip(self.FLOW_STAGES,self.flow_nodes):
             if number in skipped:
                 status="SKIP"; bg="#172535"; border="#344b5e"; color="#7990a1"
-            elif number < current_stage:
+            elif current_stage and number < current_stage:
                 status="DONE"; bg="#123e37"; border="#28a985"; color="#9df0d3"
             elif number == current_stage:
-                status="RUN"; bg="#0b5794"; border="#61c7ff"; color="#ffffff"
+                if self._step_busy:
+                    status="RUN"; bg="#0b5794"; border="#61c7ff"; color="#ffffff"
+                else:
+                    status="NEXT"; bg="#1a334d"; border="#3d7eab"; color="#9fdcff"
             else:
                 status="WAIT"; bg="#10243a"; border="#294d6d"; color="#8faabd"
             node.setText(f"{number}. {title_text}\n{status}")
@@ -563,6 +629,54 @@ class MainWindow(QMainWindow):
         self.database_label.setText(f"车辆数据库：{db_name}｜装载会话：{db.get('session_id') or '未开始'}")
         self.database_label.setToolTip(db_location)
         self._refresh_modules(s.get("module_evidence") or [])
+        self._refresh_ext_devices(s)
         msgs=t.get("messages") or []; self.message.setPlainText("\n".join(f"[{m.get('time')}] {m.get('source')} {m.get('status')}  {m.get('message')}" for m in msgs[-30:]))
-        self.results.setPlainText("\n\n".join(f"==== 第{r.get('round')}轮｜{r.get('step_name')}｜{r.get('status')} ====\n{r.get('message')}\n{json.dumps(r.get('data'),ensure_ascii=False,indent=2,default=str)}" for r in s.get("results",[])))
         alarm=t.get("alarm"); self.logs.setPlainText(("ALARM: "+str(alarm)+"\n\n" if alarm else "")+"\n".join(f"[{m.get('time')}] {m.get('source')} {m.get('status')} {m.get('message')}" for m in msgs))
+
+    def _refresh_ext_devices(self,s):
+        """顶栏紧凑状态 + 左侧明细：以 DEVICE_CHECK 探测结果为准，不用默认 ONLINE 糊弄。"""
+        twin=(s or {}).get("twin") or {}
+        devices=twin.get("devices") or {}
+        cameras=twin.get("cameras") or {}
+        check=((s.get("round_data") or {}).get("device_check") or {}).get("devices") or {}
+        titles={"PLC":"PLC","RADAR":"雷达","CAM_PICK":"相机"}
+        rows=[
+            ("PLC","控制器",devices.get("PLC") or {}),
+            ("RADAR","雷达",devices.get("RADAR") or {}),
+            ("CAM_PICK","臂上相机",devices.get("CAM_PICK") or cameras.get("CAM_PICK") or {}),
+        ]
+        if hasattr(self,"ext_device_table"):
+            self.ext_device_table.setRowCount(0)
+        for device_id,kind,meta in rows:
+            detail=check.get(device_id) or {}
+            checked=bool(detail)
+            if checked:
+                ok=bool(detail.get("success"))
+                label="已连接" if ok else "未连接"
+                note=str(detail.get("message") or meta.get("task") or kind)
+            else:
+                raw=str(meta.get("status") or "UNKNOWN").upper()
+                if raw in {"ONLINE","CONNECTED","SUCCESS"}:
+                    ok=True; label="已连接"
+                elif raw in {"FAILED","OFFLINE","ERROR"}:
+                    ok=False; label="未连接"
+                else:
+                    ok=None; label="未检测"
+                note=str(meta.get("task") or kind)
+            if ok is True:
+                color="#3dcea0"; mark="●"
+            elif ok is False:
+                color="#ff7b7b"; mark="●"
+            else:
+                color="#8faabd"; mark="○"
+            badge=(getattr(self,"device_status_badges",{}) or {}).get(device_id)
+            if badge is not None:
+                badge.setText(f"{mark} {titles.get(device_id,device_id)} {label}")
+                badge.setToolTip(note)
+                badge.setStyleSheet(f"color:{color};font-size:12px;font-weight:600;padding:2px 0")
+            if hasattr(self,"ext_device_table"):
+                r=self.ext_device_table.rowCount(); self.ext_device_table.insertRow(r)
+                for c,val in enumerate([device_id,label,note]):
+                    item=QTableWidgetItem(str(val))
+                    if c==1: item.setForeground(QColor(color))
+                    self.ext_device_table.setItem(r,c,item)

@@ -53,11 +53,31 @@ class RealPlcAdapter(PLCAdapter):
             if not client.open():
                 self.twin.update_device("PLC", status="OFFLINE", task="CONNECT_FAILED")
                 return {"success": False, "message": f"PLC 连接失败：{self.ip}:{self.port}"}
-            snapshot = None
+            # TCP 通了还不够：必须读到寄存器，避免非实验室环境误报 ONLINE
             try:
                 snapshot = client.read_snapshot()
-            except Exception:
-                snapshot = None
+            except Exception as exc:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                self._client = None
+                self.twin.update_device("PLC", status="OFFLINE", task="READ_FAILED")
+                return {
+                    "success": False,
+                    "message": f"PLC {self.ip}:{self.port} TCP 可达但寄存器读取失败：{exc}",
+                }
+            if snapshot is None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                self._client = None
+                self.twin.update_device("PLC", status="OFFLINE", task="READ_EMPTY")
+                return {
+                    "success": False,
+                    "message": f"PLC {self.ip}:{self.port} 未读到有效快照，判定未连接",
+                }
             self._client = client
             self._motion = GantryModbusMotion(self.ip, self.port)
             if not self._motion.open():
@@ -75,11 +95,11 @@ class RealPlcAdapter(PLCAdapter):
                 "success": True,
                 "ip": self.ip,
                 "port": self.port,
-                "snapshot": None if snapshot is None else str(snapshot),
-                "message": f"已连接 PLC {self.ip}:{self.port}",
+                "snapshot": str(snapshot),
+                "message": f"已连接 PLC {self.ip}:{self.port}（寄存器可读）",
             }
         except Exception as exc:
-            self.twin.update_device("PLC", status="FAILED", task="CONNECT_ERROR")
+            self.twin.update_device("PLC", status="OFFLINE", task="CONNECT_ERROR")
             return {"success": False, "message": f"PLC 连接异常：{exc}"}
 
     def send_command(self, command: str, payload: dict) -> dict:

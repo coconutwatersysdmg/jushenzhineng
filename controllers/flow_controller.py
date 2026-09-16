@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from copy import deepcopy
 from datetime import datetime
 from math import ceil, sqrt
@@ -50,6 +50,7 @@ class FlowController:
     """
 
     FIRST_STEPS = [
+        ("DEVICE_CHECK", "1. 外接设备连接检查（PLC / 雷达 / 相机）"),
         ("PRE_PICK_OFFSET", "2. 货物-托盘偏差分析 / S-F message"),
         ("PARALLEL_LOCATE", "3. 并行：3.1插孔插取 + 3.2雷达找车"),
         ("RADAR_TO_CAMERA", "4. 雷达粗点 -> PLC -> 机械臂挂载相机"),
@@ -233,6 +234,7 @@ class FlowController:
     def set_debug_inputs(self, values: Dict[str, Any]):
         self.debug_inputs=deepcopy(values or {})
         self._apply_live_radar_policy()
+        self._apply_live_camera_policy()
         if hasattr(self.radar,"set_point_cloud_path"):
             self.radar.set_point_cloud_path(self.debug_inputs.get("point_cloud_path", ""))
         pallet_rgb=self.debug_inputs.get("pallet_rgb", ""); pallet_depth=self.debug_inputs.get("pallet_depth", "")
@@ -248,6 +250,8 @@ class FlowController:
             if hasattr(self.camera,"set_tagged_depth"): self.camera.set_tagged_depth(tag,path)
         for tag,path in (self.debug_inputs.get("depths") or {}).items():
             if hasattr(self.camera,"set_tagged_depth"): self.camera.set_tagged_depth(tag,path)
+        # 真机策略可能清空了部分 tag；再刷一遍，避免上面循环把空路径漏掉。
+        self._reapply_cleared_live_camera_tags()
 
     def _use_live_radar(self) -> bool:
         if str(getattr(self, "device_mode", "mock")).lower() != "real":
@@ -270,6 +274,37 @@ class FlowController:
             "已切换真雷达实采：忽略离线示例 PCD，将调用 Livox Mid360 采集",
             {"use_live_capture": True, "host_config": "config/external_devices_config.py → LIVOX.host_ip"},
         )
+
+    def _live_camera_force_tags(self) -> tuple[str, ...]:
+        # 实验室 / 真实：这些步骤必须实拍，不允许调试预填示例图短路。
+        return ("pre_pick_offset",)
+
+    def _apply_live_camera_policy(self):
+        """真机：第2步等偏移检测丢掉调试预填 JPG，强制走相机实拍。"""
+        if str(getattr(self, "device_mode", "mock")).lower() != "real":
+            return
+        images = self.debug_inputs.setdefault("images", {})
+        cleared = []
+        for tag in self._live_camera_force_tags():
+            path = str(images.get(tag) or "").strip()
+            if path:
+                images[tag] = ""
+                cleared.append(tag)
+        if cleared:
+            self.twin.add_message(
+                "CAMERA",
+                "INFO",
+                "真机模式：已忽略调试示例图，步骤将实拍：" + ", ".join(cleared),
+                {"cleared_tags": cleared, "capture_dir": "workdir/camera_captures"},
+            )
+
+    def _reapply_cleared_live_camera_tags(self):
+        if str(getattr(self, "device_mode", "mock")).lower() != "real":
+            return
+        images = self.debug_inputs.get("images") or {}
+        for tag in self._live_camera_force_tags():
+            if hasattr(self.camera, "set_tagged_image"):
+                self.camera.set_tagged_image(tag, str(images.get(tag) or ""))
 
     def default_debug_inputs(self):
         return self.module_evidence.example_debug_inputs()
@@ -362,20 +397,185 @@ class FlowController:
         if not cap.get("success"): raise RuntimeError(f"{camera_id} 未取得 {tag} 的 RGB + 对齐深度")
         return cap
 
+    def _probe_one_device(self, device_id: str, probe_fn, timeout_s: float = 8.0) -> dict:
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                raw = pool.submit(probe_fn).result(timeout=max(1.0, float(timeout_s)))
+            out = dict(raw or {})
+            out.setdefault("device_id", device_id)
+            out.setdefault("success", False)
+            out.setdefault("message", "无返回信息")
+            return out
+        except FuturesTimeoutError:
+            self.twin.update_device(device_id, status="OFFLINE", task="PROBE_TIMEOUT")
+            return {
+                "success": False,
+                "device_id": device_id,
+                "message": f"{device_id} 探测超时（>{timeout_s:.0f}s）",
+            }
+        except Exception as exc:
+            self.twin.update_device(device_id, status="FAILED", task="PROBE_ERROR")
+            return {"success": False, "device_id": device_id, "message": f"{device_id} 探测异常：{exc}"}
+
+    def _device_check(self):
+        """第1步：检查 PLC / 雷达 / 相机连接。失败只记日志，不阻断下一步。"""
+        checks = []
+
+        def _plc():
+            return self.plc.connect()
+
+        def _radar():
+            if hasattr(self.radar, "probe"):
+                return self.radar.probe()
+            self.twin.update_device("RADAR", status="ONLINE", task="NO_PROBE")
+            return {"success": True, "device_id": "RADAR", "message": "雷达适配器无 probe，已跳过硬件探测"}
+
+        def _camera():
+            if hasattr(self.camera, "connect"):
+                return self.camera.connect()
+            if hasattr(self.camera, "probe"):
+                return self.camera.probe()
+            self.twin.update_device("CAM_PICK", status="ONLINE", task="NO_PROBE")
+            return {"success": True, "device_id": "CAM_PICK", "message": "相机适配器无 connect/probe，已跳过硬件探测"}
+
+        for device_id, fn in (("PLC", _plc), ("RADAR", _radar), ("CAM_PICK", _camera)):
+            item = self._probe_one_device(device_id, fn)
+            item.setdefault("device_id", device_id)
+            checks.append(item)
+            ok_one = bool(item.get("success"))
+            status = "SUCCESS" if ok_one else "FAILED"
+            twin_status = "ONLINE" if ok_one else "OFFLINE"
+            if device_id == "CAM_PICK":
+                self.twin.update_camera(device_id, status=twin_status, task=status)
+            else:
+                self.twin.update_device(device_id, status=twin_status, task=status)
+            self.twin.add_message(
+                "DEVICE_CHECK",
+                status,
+                f"{device_id}：{item.get('message')}",
+                item,
+            )
+
+        ok = [c for c in checks if c.get("success")]
+        bad = [c for c in checks if not c.get("success")]
+        all_ok = len(bad) == 0
+        summary = (
+            "外接设备全部就绪：" + "、".join(c["device_id"] for c in ok)
+            if all_ok
+            else (
+                "外接设备检查未全部通过；失败："
+                + "、".join(f"{c['device_id']}({c.get('message')})" for c in bad)
+                + "（已记录，继续下一步）"
+            )
+        )
+        result = {
+            "success": all_ok,
+            "continue_anyway": True,
+            "all_online": all_ok,
+            "online_count": len(ok),
+            "failed_count": len(bad),
+            "devices": {c["device_id"]: c for c in checks},
+            "checks": checks,
+            "message": summary,
+            "device_mode": getattr(self, "device_mode", "mock"),
+        }
+        self.twin.add_message("DEVICE_CHECK", "SUCCESS" if all_ok else "FAILED", summary, result)
+        self.round_data["device_check"] = result
+        return result
+
     def _pre_pick_offset(self):
+        """插取前货-托偏移。真机强制实拍；拍照/识别失败只记日志，不阻断下一步。"""
         cam=self._camera_for_role("pre_pick_offset","CAM_PICK")
-        cap=self._capture_rgb(cam,"pre_pick_offset",required=True)
-        started=perf_counter(); result=self.algorithms.pre_pick_offset(cap["image_path"],self.current_cargo)
-        self._evidence("PALLET_OVERHANG_PRE",{"image_path":cap["image_path"],"cargo_id":self.current_cargo.get("instance_id")},result,started)
-        if cap.get("demo"):
-            result["demo_input"]=True
-            result["input_source"]=cap.get("source")
-            result["message"]="联调示例图（非相机实拍）："+str(result.get("message") or "偏移分析完成")
-        self.round_data["pre_pick_offset"]=result
+        live=str(getattr(self,"device_mode","mock")).lower()=="real"
+        if live and hasattr(self.camera,"set_tagged_image"):
+            # 再清一次，防止中途又被调试输入写回示例图。
+            self.camera.set_tagged_image("pre_pick_offset","")
+
+        result={
+            "success":False,
+            "should_fork":False,
+            "capture_success":False,
+            "analysis_success":False,
+            "continue_anyway":True,
+            "phase":"pre_pick",
+            "device_mode":getattr(self,"device_mode","mock"),
+            "camera_id":cam,
+            "message":"",
+        }
+
+        cap=self._capture_rgb(cam,"pre_pick_offset",required=False)
+        result["capture"]=deepcopy(cap) if isinstance(cap,Mapping) else {"raw":cap}
+        image_path=str((cap or {}).get("image_path") or (cap or {}).get("rgb_path") or "")
+        if not (cap or {}).get("success") or not image_path:
+            fail_msg=str((cap or {}).get("message") or f"{cam} 未取得 pre_pick_offset JPG")
+            result["message"]=f"拍照失败：{fail_msg}（已记录，继续下一步）"
+            self.twin.add_message("PRE_PICK_OFFSET","FAILED",result["message"],result)
+            # TODO: 与PLC交互 — 上报插取前货托偏移检测结果（可否插取）
+            self.plc.send_message("PALLET_OFFSET_PRE_PICK","FAILED",result["message"],result)
+            self.round_data["pre_pick_offset"]=result
+            return result
+
+        result["capture_success"]=True
+        result["image_path"]=image_path
+        result["capture_source"]=(cap or {}).get("source")
+        result["demo_input"]=bool((cap or {}).get("demo"))
+        self.twin.add_message(
+            "PRE_PICK_OFFSET",
+            "INFO",
+            f"已拍照：{image_path}" + ("（联调/示例）" if result["demo_input"] else "（实拍）"),
+            {"image_path":image_path,"source":result.get("capture_source"),"demo":result["demo_input"]},
+        )
+
+        started=perf_counter()
+        try:
+            analysis=self.algorithms.pre_pick_offset(image_path,self.current_cargo or {})
+            self._evidence(
+                "PALLET_OVERHANG_PRE",
+                {"image_path":image_path,"cargo_id":(self.current_cargo or {}).get("instance_id")},
+                analysis,started,
+            )
+            if isinstance(analysis,Mapping):
+                result.update(deepcopy(analysis))
+            result["capture_success"]=True
+            result["analysis_success"]=True
+            result["continue_anyway"]=True
+            if result.get("demo_input") or (cap or {}).get("demo"):
+                result["demo_input"]=True
+                result["input_source"]=(cap or {}).get("source")
+                result["message"]="联调示例图（非相机实拍）："+str(result.get("message") or "偏移分析完成")
+            if not result.get("should_fork"):
+                base=str(result.get("message") or "插取前偏移不合格")
+                result["message"]=f"{base}（已记录，继续下一步）"
+                result["success"]=False
+            else:
+                result["success"]=True
+                result["message"]=str(result.get("message") or "插取前偏移合格，允许插取")
+        except Exception as exc:
+            result["analysis_success"]=False
+            result["should_fork"]=False
+            result["success"]=False
+            result["message"]=f"偏移识别失败：{exc}（已记录，继续下一步）"
+            self._evidence(
+                "PALLET_OVERHANG_PRE",
+                {"image_path":image_path,"cargo_id":(self.current_cargo or {}).get("instance_id")},
+                {"success":False,"message":str(exc)},started,
+                status="FAILED",note="偏移算法异常，步骤软继续",
+            )
+
         status="SUCCESS" if result.get("should_fork") else "FAILED"
-        # TODO: 与PLC交互 — 上报插取前货托偏移检测结果（可否插取）
+        detail={
+            "image_path":result.get("image_path"),
+            "overhang_percent":result.get("overhang_percent"),
+            "threshold_percent":result.get("threshold_percent"),
+            "decision":result.get("decision"),
+            "should_fork":result.get("should_fork"),
+            "capture_success":result.get("capture_success"),
+            "analysis_success":result.get("analysis_success"),
+            "capture_source":result.get("capture_source"),
+        }
+        self.twin.add_message("PRE_PICK_OFFSET",status,result.get("message") or status,detail)
         self.plc.send_message("PALLET_OFFSET_PRE_PICK",status,result.get("message",status),result)
-        if not result.get("should_fork"): raise RuntimeError(result.get("message") or "插取前偏移不合格")
+        self.round_data["pre_pick_offset"]=result
         return result
 
     def _pick_task(self):
@@ -1042,7 +1242,8 @@ class FlowController:
         if not self.running: self.start()
         code,name=self.current_step; self.twin.set_phase(name,self.round_index+1)
         try:
-            if code=="PRE_PICK_OFFSET": data=self._pre_pick_offset()
+            if code=="DEVICE_CHECK": data=self._device_check()
+            elif code=="PRE_PICK_OFFSET": data=self._pre_pick_offset()
             elif code=="PARALLEL_LOCATE": data=self._parallel_locate()
             elif code=="PICK_ONLY":
                 data=self._pick_task()
@@ -1073,7 +1274,20 @@ class FlowController:
                 self._save()
                 return self.snapshot()
             else: raise RuntimeError(code)
-            self._record(code,name,"success",name,data); self.step_index+=1
+            rec_status="success"
+            rec_message=name
+            if code=="DEVICE_CHECK":
+                soft_ok=bool((data or {}).get("all_online"))
+                if not soft_ok:
+                    rec_status="warning"
+                    rec_message=str((data or {}).get("message") or name)
+            elif code=="PRE_PICK_OFFSET":
+                # 拍照/识别失败也继续；总体结果用 warning 标出来。
+                soft_ok=bool((data or {}).get("capture_success") and (data or {}).get("should_fork"))
+                if not soft_ok:
+                    rec_status="warning"
+                    rec_message=str((data or {}).get("message") or name)
+            self._record(code,name,rec_status,rec_message,data); self.step_index+=1
             self.twin.set_alarm(None)
             self.twin.set_phase(self.current_step[1],self.round_index+1)
         except Exception as exc:
