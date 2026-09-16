@@ -42,15 +42,15 @@ def create_device_adapters(
 
         # TODO: 与PLC交互 — 读 config/external_devices_config.py 的 PLC（现场 IP/端口）创建真机适配器
         plc = RealPlcAdapter(twin, device_cfg.get("plc") or {})
-        # TODO: 与PLC交互 — 读 GANTRY（world_to_gantry / allow_real_motion）后才向 PLC 发真运动
+        # 主流程只发布运动指令；真写轴在独立模块 plc_console
         robot = RealGantryRobotAdapter(twin, plc, device_cfg.get("gantry") or {})
         radar = RealLivoxRadarAdapter(twin, device_cfg.get("livox") or {})
         camera = RealArmCameraAdapter(twin, device_cfg.get("camera") or {})
         return mode, plc, robot, radar, camera
 
-    # TODO: 与PLC交互 — mock 模式：本地假 PLC；现场请在 external_devices_config.py 把 DEVICE_MODE 改为 real
+    # mock：孪生动画 + 同样发布 JSON 指令，便于联调 plc_console
     plc = MockPLCAdapter(twin)
-    robot = MockRobotAdapter(twin, plc)
+    robot = MockRobotAdapter(twin, plc, device_cfg.get("gantry") or {})
     radar = MockRadarAdapter(twin)
     camera = MockArmCameraAdapter(twin)
     return mode, plc, robot, radar, camera

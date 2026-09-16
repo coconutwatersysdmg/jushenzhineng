@@ -11,13 +11,14 @@ from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QFrame, QLabel,
     QPushButton, QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QMessageBox,
-    QTabWidget, QToolButton, QSizePolicy, QComboBox,
+    QTabWidget, QToolButton, QSizePolicy, QComboBox, QCheckBox,
 )
 
 from controllers.flow_controller import FlowController
 from ui.twin_bridge import TwinBridge
 from ui.debug_dialog import DebugInputDialog
 from ui.corner_review_dialog import run_corner_review
+from ui.plc_motion_dialog import PlcMotionDialog
 from config.feature_switches import (
     apply_run_profile,
     get_run_profile,
@@ -32,6 +33,7 @@ DEFAULT_PLAN=PROJECT_ROOT/"data"/"loading_plan.json"
 
 class MainWindow(QMainWindow):
     motionSnapshot = Signal(dict, dict)
+    plcCommandReady = Signal(dict)
 
     FLOW_STAGES = [
         (1,"设备连接检查"),
@@ -59,15 +61,19 @@ class MainWindow(QMainWindow):
         self.controller=FlowController(); self.bridge=TwinBridge(); self.debug_inputs=self.controller.default_debug_inputs()
         self._step_busy=False
         self._profile_changing=False
+        self._latest_plc_cmd=None
+        self.plc_dialog=None
         self.motionSnapshot.connect(self._apply_motion_snapshot)
+        self.plcCommandReady.connect(self._apply_plc_command)
         self.controller.set_state_listener(self.motionSnapshot.emit)
+        self.controller.set_plc_command_listener(self.plcCommandReady.emit)
         self.controller.set_corner_review_callback(self._review_corners)
         self.timer=QTimer(self); self.timer.setInterval(900); self.timer.timeout.connect(self._auto_tick)
         self.setWindowTitle("具身智能装载数字孪生 · 单机械臂携货 / 挂载相机角点识别")
         screen=self.screen().availableGeometry()
         self.resize(min(1920,max(1080,int(screen.width()*0.94))),min(1120,max(700,int(screen.height()*0.92))))
         self.setMinimumSize(1024,680)
-        self._build(); self._load_plan(); self._refresh()
+        self._build(); self._ensure_plc_dialog(); self._load_plan(); self._refresh(); self._sync_auto_push_policy()
 
     def _card(self,title):
         f=QFrame(); f.setObjectName("card"); l=QVBoxLayout(f); l.setContentsMargins(9,8,9,8)
@@ -171,15 +177,6 @@ class MainWindow(QMainWindow):
         f,l,_=self._collapsible_card("货物 / 托盘实时数据",expanded=True)
         self.cargo_table=QTableWidget(0,2); self.cargo_table.setHorizontalHeaderLabels(["字段","值"]); self.cargo_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.cargo_table); ll.addWidget(f,1)
 
-        f,l,_=self._collapsible_card("外接设备连接状态",expanded=True)
-        self.ext_device_table=QTableWidget(0,3)
-        self.ext_device_table.setHorizontalHeaderLabels(["设备","状态","说明"])
-        self.ext_device_table.horizontalHeader().setSectionResizeMode(0,QHeaderView.ResizeMode.ResizeToContents)
-        self.ext_device_table.horizontalHeader().setSectionResizeMode(1,QHeaderView.ResizeMode.ResizeToContents)
-        self.ext_device_table.horizontalHeader().setSectionResizeMode(2,QHeaderView.ResizeMode.Stretch)
-        self.ext_device_table.setMinimumHeight(110)
-        l.addWidget(self.ext_device_table); ll.addWidget(f,0)
-
         f,l,_=self._collapsible_card("车辆 / 相机最终车板 WORLD 数据",expanded=True)
         self.truck_table=QTableWidget(0,2); self.truck_table.setHorizontalHeaderLabels(["字段","值"]); self.truck_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.truck_table)
         self.corner_table=QTableWidget(0,4); self.corner_table.setHorizontalHeaderLabels(["角点","X","Y","Z"]); self.corner_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.corner_table); ll.addWidget(f,2)
@@ -187,10 +184,18 @@ class MainWindow(QMainWindow):
         f,l=self._card("数字孪生场景 · world / mm · X右 Y车辆前进 Z向上")
         self.quick=QQuickWidget(); self.quick.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView); self.quick.setClearColor(QColor("#07111f"))
         self.quick.rootContext().setContextProperty("twinBridge",self.bridge); self.quick.statusChanged.connect(self._on_qml_status); self.quick.setSource(QUrl.fromLocalFile(str(QML_FILE))); l.addWidget(self.quick,1); cl.addWidget(f,1)
-        controls=QHBoxLayout(); self.start_btn=QPushButton("开始"); self.start_btn.setObjectName("primary"); self.start_btn.clicked.connect(self._start)
-        self.next_btn=QPushButton("执行下一步"); self.next_btn.clicked.connect(self._next); self.auto_btn=QPushButton("自动运行"); self.auto_btn.clicked.connect(self._auto)
+        controls=QHBoxLayout()
+        self.next_btn=QPushButton("执行下一步"); self.next_btn.setObjectName("primary"); self.next_btn.clicked.connect(self._next)
+        self.auto_btn=QPushButton("自动运行"); self.auto_btn.clicked.connect(self._auto)
         dbg=QPushButton("调试输入"); dbg.clicked.connect(self._debug); reset=QPushButton("重置"); reset.clicked.connect(self._reset)
-        for b in (self.start_btn,self.next_btn,self.auto_btn,dbg,reset): controls.addWidget(b)
+        self.plc_panel_btn=QPushButton("PLC 运动…")
+        self.plc_panel_btn.setToolTip("打开弹出窗口：查看输出坐标、确认下发、启动 PLC 控制台")
+        self.plc_panel_btn.clicked.connect(self._show_plc_dialog)
+        self.auto_push_cb=QCheckBox("自动运行时自动下发到 PLC 控制台")
+        self.auto_push_cb.setToolTip("勾选且处于自动运行时，算出坐标后实时推送。逐步执行请在「PLC 运动…」里确认下发。")
+        self.auto_push_cb.toggled.connect(lambda _=False: self._sync_auto_push_policy())
+        for b in (self.next_btn,self.auto_btn,dbg,reset,self.plc_panel_btn): controls.addWidget(b)
+        controls.addWidget(self.auto_push_cb)
         controls.addStretch(1); cl.addLayout(controls)
 
         self.right_tabs=QTabWidget(); rl.addWidget(self.right_tabs,1)
@@ -205,7 +210,7 @@ class MainWindow(QMainWindow):
         self.space_table=QTableWidget(0,7); self.space_table.setHorizontalHeaderLabels(["盲码","板段","列","中心XYZ","支撑块","状态","货物"]); self.space_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.space_table)
         self.comp=QLabel("补偿：-"); self.comp.setWordWrap(True); l.addWidget(self.comp); space_layout.addWidget(f,1)
 
-        f,l,_=self._collapsible_card("并行状态 / PLC Message / 标定状态",expanded=True)
+        f,l,_=self._collapsible_card("并行状态 / 运行消息 / 标定状态",expanded=True)
         self.parallel_label=QLabel("-"); self.parallel_label.setWordWrap(True); l.addWidget(self.parallel_label)
         self.cal_label=QLabel("-"); self.cal_label.setMaximumHeight(38); self.cal_label.setStyleSheet("color:#9ec8dc"); l.addWidget(self.cal_label)
         self.database_label=QLabel("车辆数据库：等待装载会话")
@@ -323,7 +328,9 @@ class MainWindow(QMainWindow):
         applied=apply_run_profile(profile_id, persist=True)
         self.controller=FlowController()
         self.controller.set_state_listener(self.motionSnapshot.emit)
+        self.controller.set_plc_command_listener(self.plcCommandReady.emit)
         self.controller.set_corner_review_callback(self._review_corners)
+        self._sync_auto_push_policy()
         if old_plan:
             self.controller.set_plan(old_plan)
         else:
@@ -480,7 +487,7 @@ class MainWindow(QMainWindow):
             self._step_busy=False
 
     def _start(self):
-        # 开会话 / 装载计划，并立刻执行 DEVICE_CHECK（结束即 DONE）。
+        # 内部入口：开会话并立刻跑 DEVICE_CHECK。界面上由「执行下一步 / 自动运行」触发。
         if self._step_busy: return
         try:
             self.controller.set_debug_inputs(self.debug_inputs)
@@ -506,10 +513,16 @@ class MainWindow(QMainWindow):
         except Exception as e: QMessageBox.warning(self,"步骤未通过",str(e)); self._refresh()
         finally: self._step_busy=False
     def _auto(self):
-        if self.timer.isActive(): self.timer.stop(); self.auto_btn.setText("自动运行")
+        if self.timer.isActive():
+            self.timer.stop()
+            self.auto_btn.setText("自动运行")
         else:
-            if not self.controller.running: self._start()
-            self.timer.start(); self.auto_btn.setText("暂停")
+            if not self.controller.running:
+                self._start()
+            self.timer.start()
+            self.auto_btn.setText("暂停")
+        self._sync_auto_push_policy()
+
     def _auto_tick(self):
         if self._step_busy: return
         self._step_busy=True
@@ -521,14 +534,57 @@ class MainWindow(QMainWindow):
             self._refresh()
             QApplication.processEvents()
             self.controller.execute_next(); self._refresh()
-            if self.controller.finished: self.timer.stop(); self.auto_btn.setText("自动运行")
+            if self.controller.finished: self.timer.stop(); self.auto_btn.setText("自动运行"); self._sync_auto_push_policy()
         except Exception as e:
-            self.timer.stop(); self.auto_btn.setText("自动运行"); QMessageBox.warning(self,"流程等待/失败",str(e)); self._refresh()
+            self.timer.stop(); self.auto_btn.setText("自动运行"); self._sync_auto_push_policy()
+            QMessageBox.warning(self,"流程等待/失败",str(e)); self._refresh()
         finally: self._step_busy=False
+
     def _debug(self):
         d=DebugInputDialog(self.debug_inputs,self)
         if d.exec(): self.debug_inputs=d.values(); self.controller.set_debug_inputs(self.debug_inputs)
-    def _reset(self): self.timer.stop(); self.controller.reset(keep_plan=True); self._refresh()
+
+    def _ensure_plc_dialog(self):
+        if self.plc_dialog is not None:
+            return self.plc_dialog
+        self.plc_dialog = PlcMotionDialog(
+            self,
+            on_confirm_push=self._confirm_push_plc,
+        )
+        return self.plc_dialog
+
+    def _show_plc_dialog(self):
+        dlg = self._ensure_plc_dialog()
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _reset(self):
+        self.timer.stop()
+        self.auto_btn.setText("自动运行")
+        self.controller.reset(keep_plan=True)
+        self._latest_plc_cmd=None
+        if self.plc_dialog is not None:
+            self.plc_dialog.clear_command()
+        self._sync_auto_push_policy()
+        self._refresh()
+
+    def _sync_auto_push_policy(self):
+        # 连续自动运行 + 主界面勾选 → 自动推送；逐步模式永不自动推
+        enabled = bool(self.auto_push_cb.isChecked() and self.timer.isActive())
+        self.controller.set_auto_push_plc(enabled)
+
+    def _apply_plc_command(self, cmd: dict):
+        self._latest_plc_cmd = dict(cmd or {})
+        dlg = self._ensure_plc_dialog()
+        auto = bool(self.controller.auto_push_plc_commands)
+        push = self.controller.plc_publisher.last_push if auto else None
+        dlg.apply_command(self._latest_plc_cmd, auto_pushed=auto, push_result=push)
+
+    def _confirm_push_plc(self):
+        if not self._latest_plc_cmd:
+            return {"success": False, "message": "当前没有可下发的运动坐标"}
+        return self.controller.push_last_plc_command()
 
     def _apply_motion_snapshot(self,snapshot,motion):
         # Parallel 3.1 runs in a worker thread.  Its queued motion signal can be
@@ -634,7 +690,7 @@ class MainWindow(QMainWindow):
         alarm=t.get("alarm"); self.logs.setPlainText(("ALARM: "+str(alarm)+"\n\n" if alarm else "")+"\n".join(f"[{m.get('time')}] {m.get('source')} {m.get('status')} {m.get('message')}" for m in msgs))
 
     def _refresh_ext_devices(self,s):
-        """顶栏紧凑状态 + 左侧明细：以 DEVICE_CHECK 探测结果为准，不用默认 ONLINE 糊弄。"""
+        """顶栏紧凑状态：以 DEVICE_CHECK 探测结果为准。"""
         twin=(s or {}).get("twin") or {}
         devices=twin.get("devices") or {}
         cameras=twin.get("cameras") or {}
@@ -645,8 +701,6 @@ class MainWindow(QMainWindow):
             ("RADAR","雷达",devices.get("RADAR") or {}),
             ("CAM_PICK","臂上相机",devices.get("CAM_PICK") or cameras.get("CAM_PICK") or {}),
         ]
-        if hasattr(self,"ext_device_table"):
-            self.ext_device_table.setRowCount(0)
         for device_id,kind,meta in rows:
             detail=check.get(device_id) or {}
             checked=bool(detail)
@@ -674,9 +728,3 @@ class MainWindow(QMainWindow):
                 badge.setText(f"{mark} {titles.get(device_id,device_id)} {label}")
                 badge.setToolTip(note)
                 badge.setStyleSheet(f"color:{color};font-size:12px;font-weight:600;padding:2px 0")
-            if hasattr(self,"ext_device_table"):
-                r=self.ext_device_table.rowCount(); self.ext_device_table.insertRow(r)
-                for c,val in enumerate([device_id,label,note]):
-                    item=QTableWidgetItem(str(val))
-                    if c==1: item.setForeground(QColor(color))
-                    self.ext_device_table.setItem(r,c,item)

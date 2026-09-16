@@ -25,6 +25,7 @@ from services.two_face_observation_service import TwoFaceObservationService
 from services.dynamic_monitoring_service import DynamicMonitoringService
 from services.module_evidence_service import ModuleEvidenceService
 from services.vehicle_database_service import create_vehicle_database_service
+from services.plc_motion_publisher import PlcMotionPublisher
 from utils.demo_assets import ensure_demo_pre_pick_image
 from config.system_config import get_system_config
 from config.external_devices_config import get_device_layout_config
@@ -152,19 +153,66 @@ class FlowController:
         self.plc.connect()
         if hasattr(self.robot, "motion_callback"):
             self.robot.motion_callback = self._notify_motion
+        if hasattr(self.robot, "command_emitter"):
+            self.robot.command_emitter = self._on_robot_motion_command
+        self.plc_publisher = PlcMotionPublisher()
+        self.plc_command_listener = None
+        self.auto_push_plc_commands = False
         self.twin.add_message("CALIBRATION", "INFO", "已加载用户标定配置；运动相机使用机械臂实时位姿×安装外参", self.calibration.diagnostic_summary())
         self.set_debug_inputs(self.module_evidence.example_debug_inputs())
         self.twin.add_message("MODULE_INPUTS", "INFO", "联调输入源已就绪；模型输入/输出只在流程到达并完成调用后显示", {"module_count":len(self.module_evidence.snapshot())})
+        self.twin.add_message(
+            "PLC_CONSOLE",
+            "INFO",
+            "主流程运动指令改为发布 JSON；真机写入请启动独立模块 plc_console（可勾选自动下发）",
+            {"server": "jushenzhineng-plc-console"},
+        )
 
     def set_state_listener(self, listener):
         """Receive intermediate motion snapshots so the UI can animate real step actions."""
         self.state_listener = listener if callable(listener) else None
 
+    def set_plc_command_listener(self, listener):
+        self.plc_command_listener = listener if callable(listener) else None
+        self.plc_publisher.set_listener(self.plc_command_listener)
+
+    def set_auto_push_plc(self, enabled: bool) -> None:
+        self.auto_push_plc_commands = bool(enabled)
+
+    def push_last_plc_command(self) -> dict:
+        """手动确认下发：推送最近一条运动指令到 plc_console。"""
+        return self.plc_publisher.push()
+
+    def _on_robot_motion_command(self, payload: dict):
+        """机器人适配器终点回调：落盘 + 通知 UI；按开关决定是否实时推送。"""
+        pose = dict(payload.get("world_pose") or {})
+        cmd = self.plc_publisher.build(
+            robot_id=str(payload.get("robot_id") or "PICK_ARM"),
+            world_pose=pose,
+            task=str(payload.get("task") or ""),
+            step=str(self.current_step[0] if self.running else ""),
+            round_index=int(self.round_index),
+            gantry_xyzr=payload.get("gantry_xyzr"),
+            speed=float(payload.get("speed") or 30.0),
+            extra={
+                k: v
+                for k, v in dict(payload).items()
+                if k not in {"robot_id", "world_pose", "task", "gantry_xyzr", "speed"}
+            }
+            or None,
+        )
+        result = self.plc_publisher.publish_and_maybe_push(cmd, auto_push=self.auto_push_plc_commands)
+        if result.get("pushed"):
+            push = result.get("push_result") or {}
+            status = "SUCCESS" if push.get("success") else "FAILED"
+            self.twin.add_message("PLC_PUSH", status, push.get("message", ""), {"cmd_id": cmd.get("cmd_id"), **push})
+        return result
+
     def _notify_motion(self, robot_id: str, pose: Dict[str, Any], task: str):
         if self.loading_session_id:
-            self.vehicle_db.record_motion(self.loading_session_id,robot_id,pose,task)
+            self.vehicle_db.record_motion(self.loading_session_id, robot_id, pose, task)
         if self.state_listener:
-            self.state_listener(self.snapshot(), {"robot_id":robot_id,"pose":deepcopy(pose),"task":str(task)})
+            self.state_listener(self.snapshot(), {"robot_id": robot_id, "pose": deepcopy(pose), "task": str(task)})
 
     def _move_attached_cargo_world(self, target_pose: Dict[str, Any], task: str) -> Dict[str, Any]:
         """Animate telescopic load motion while the arm base remains on the exterior rail."""
@@ -181,6 +229,15 @@ class FlowController:
             self.twin.set_attached_cargo_world_pose("PICK_ARM",pose)
             robot_pose=((self.twin.snapshot().get("devices") or {}).get("PICK_ARM") or {}).get("pose") or {}
             self._notify_motion("PICK_ARM",robot_pose,task)
+        # 伸缩放货也发布终点指令（WORLD=货物目标；臂在外侧轨）
+        self._on_robot_motion_command({
+            "robot_id": "PICK_ARM",
+            "world_pose": robot_pose,
+            "task": task,
+            "gantry_xyzr": None,
+            "speed": 30.0,
+            "cargo_world_pose": target.to_dict(),
+        })
         return {"success":True,"task":task,"trajectory_segments":segments,"cargo_pose":target.to_dict()}
 
     @staticmethod

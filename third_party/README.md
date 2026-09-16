@@ -19,3 +19,8 @@
 # Standalone PLC console (axis jog / absolute move debugging):
 #   cd third_party/plc_finished_app
 #   python plc_finished_console.py
+#
+# Product PLC module (receives JSON motion cmds from the main app):
+#   python -m plc_console
+#   Protocol: contracts/plc_motion_cmd_v1.schema.json
+#   Main app never writes axes directly; it publishes commands and optional IPC push.

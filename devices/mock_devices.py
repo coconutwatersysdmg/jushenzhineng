@@ -44,15 +44,34 @@ class MockPLCAdapter(PLCAdapter):
 
 
 class MockRobotAdapter(RobotAdapter):
-    def __init__(self, twin: DigitalTwinState, plc: PLCAdapter):
+    def __init__(self, twin: DigitalTwinState, plc: PLCAdapter, config: dict | None = None):
         self.twin = twin
         self.plc = plc
+        self.config = dict(config or {})
         self.motion_callback = None
+        self.command_emitter = None
+        self.world_to_gantry = dict(self.config.get("world_to_gantry") or {})
+        self.default_speed = float(self.config.get("default_speed", 30.0))
+
+    def _gantry_xyzr(self, pose: dict):
+        mapping = self.world_to_gantry
+        if not mapping:
+            try:
+                from config.external_devices_config import GANTRY
+                mapping = dict((GANTRY or {}).get("world_to_gantry") or {})
+            except Exception:
+                mapping = {}
+        if not mapping:
+            return None
+        try:
+            from devices.world_to_gantry import transform_world_to_gantry
+            return transform_world_to_gantry(pose, mapping)
+        except Exception:
+            return None
 
     def move_tool_world(self, robot_id: str, pose: dict, task: str = "") -> dict:
-        # TODO: 与PLC交互 — 请求机械臂按 WORLD 位姿运动（拍照位/运货位等都走这里）
+        # 孪生轨迹仍本地播放；真机写轴改由 plc_console 接收发布指令后执行
         cmd = self.plc.send_command("MOVE_TOOL_WORLD", {"robot_id": robot_id, "pose": pose, "task": task})
-        # TODO: 与PLC交互 — 等 PLC 确认运动指令（mock 立刻 ACK，再播数字孪生轨迹）
         ack = self.plc.wait_ack(cmd["command_id"])
         if not ack.get("success"):
             return ack
@@ -82,10 +101,21 @@ class MockRobotAdapter(RobotAdapter):
             self.twin.update_robot_pose(robot_id, Pose6D.from_any(sample), task=task or "MOVING")
             if callable(self.motion_callback):
                 self.motion_callback(robot_id, deepcopy(sample), task or "MOVING")
+        gantry_xyzr = self._gantry_xyzr(target.to_dict())
+        if callable(self.command_emitter):
+            self.command_emitter({
+                "robot_id": robot_id,
+                "world_pose": target.to_dict(),
+                "task": task or "MOVE_TOOL_WORLD",
+                "gantry_xyzr": gantry_xyzr,
+                "speed": self.default_speed,
+            })
         return {
             "success": True, "robot_id": robot_id, "pose": target.to_dict(),
             "trajectory_segments": segment_count,
-            "message": f"{robot_id} 已连续运动到目标位",
+            "gantry_xyzr": gantry_xyzr,
+            "export_only": True,
+            "message": f"{robot_id} 已连续运动到目标位（指令已发布）",
         }
 
     def retract(self, robot_id: str) -> dict:

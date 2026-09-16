@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "plc_motion_cmd_v1",
+  "title": "PLC motion command",
+  "type": "object",
+  "required": ["schema", "type", "cmd_id"],
+  "properties": {
+    "schema": { "const": "plc_motion_cmd_v1" },
+    "type": { "enum": ["MOTION_CMD", "MOTION_ACK", "PING", "PONG"] },
+    "cmd_id": { "type": "string" },
+    "ts": { "type": "string" },
+    "round": { "type": "integer" },
+    "step": { "type": "string" },
+    "task": { "type": "string" },
+    "robot_id": { "type": "string" },
+    "world_pose": {
+      "type": "object",
+      "properties": {
+        "x_mm": { "type": "number" },
+        "y_mm": { "type": "number" },
+        "z_mm": { "type": "number" },
+        "roll_deg": { "type": "number" },
+        "pitch_deg": { "type": "number" },
+        "yaw_deg": { "type": "number" }
+      }
+    },
+    "gantry_xyzr": {
+      "type": ["object", "null"],
+      "properties": {
+        "X": { "type": "number" },
+        "Y": { "type": "number" },
+        "Z": { "type": "number" },
+        "R": { "type": "number" }
+      }
+    },
+    "speed": { "type": "number" },
+    "require_ack": { "type": "boolean" },
+    "source": { "type": "string" }
+  }
+}

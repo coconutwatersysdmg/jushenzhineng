@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Gantry / forklift-arm robot adapter for the PLC finished app.
+"""Gantry / forklift-arm robot adapter.
 
-WORLD 位姿经 world_to_gantry 换成 XYZR 后，调用 RealPlcAdapter.move_absolute_xyzr
-（与 plc_finished_console 写寄存器时序一致）。
+主系统只负责 WORLD→XYZR 换算、孪生更新与运动指令发布；
+真机写寄存器由独立模块 ``plc_console`` 执行。
 """
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from core.digital_twin_state import DigitalTwinState
 from core.geometry import Pose6D
@@ -26,62 +26,34 @@ class RealGantryRobotAdapter(RobotAdapter):
         self.plc = plc
         self.config = dict(config or {})
         self.motion_callback = None
-        # Explicit opt-in once calibration mapping is ready.
+        self.command_emitter: Callable[[dict], None] | None = None
+        # 历史开关：现表示“允许换算并对外发布 XYZR”，主流程不再直写 PLC。
         self.allow_real_motion = bool(self.config.get("allow_real_motion", False))
         self.world_to_gantry = dict(self.config.get("world_to_gantry") or {})
         self.default_speed = float(self.config.get("default_speed", 30.0))
         self.move_timeout_s = float(self.config.get("move_timeout_s", 60.0))
         self.soft_limits = dict(self.config.get("soft_limits") or {})
 
-    def _require_mapping(self, task: str) -> dict | None:
-        if not self.allow_real_motion:
-            return {
-                "success": False,
-                "task": task,
-                "message": (
-                "真机运动未启用：请在 config/external_devices_config.py 将 "
-                "GANTRY.allow_real_motion=True（标定确认后再开）。"
-                ),
-            }
+    def _resolve_gantry(self, pose: Mapping[str, Any]) -> tuple[dict[str, float] | None, str | None]:
         if not self.world_to_gantry:
-            return {
-                "success": False,
-                "task": task,
-                "message": (
-                    "缺少 world_to_gantry。请在 config/external_devices_config.py 填写 "
-                    "GANTRY.world_to_gantry 后再发运动。"
-                ),
-            }
-        if bool(self.world_to_gantry.get("placeholder", False)):
-            return {
-                "success": False,
-                "task": task,
-                "message": (
-                    "world_to_gantry 仍是占位假数据（placeholder=True）。"
-                    "现场标定后改 False 并填真实数，再开 allow_real_motion。"
-                ),
-            }
-        return None
+            return None, "缺少 world_to_gantry 映射"
+        try:
+            return transform_world_to_gantry(pose, self.world_to_gantry), None
+        except WorldToGantryError as exc:
+            return None, str(exc)
+
+    def _emit_command(self, payload: dict) -> None:
+        if callable(self.command_emitter):
+            self.command_emitter(payload)
 
     def move_tool_world(self, robot_id: str, pose: dict, task: str = "") -> dict:
-        blocked = self._require_mapping(task or "MOVE_TOOL_WORLD")
-        if blocked is not None:
-            self.twin.update_device(robot_id, status="HOLD", task="MAP_REQUIRED")
-            if hasattr(self.plc, "send_message"):
-                # TODO: 与PLC交互 — 未配映射/未开真机时告知：运动被拦截
-                self.plc.send_message("ROBOT", "BLOCKED", blocked["message"], {"robot_id": robot_id, "pose": pose})
-            return blocked
+        gantry_xyzr, transform_error = self._resolve_gantry(pose)
+        target = Pose6D.from_any(pose)
+        self.twin.update_robot_pose(robot_id, target, task=task or "MOVED")
+        if callable(self.motion_callback):
+            self.motion_callback(robot_id, target.to_dict(), task or "MOVED")
 
-        try:
-            gantry_xyzr = transform_world_to_gantry(pose, self.world_to_gantry)
-        except WorldToGantryError as exc:
-            msg = str(exc)
-            self.twin.update_device(robot_id, status="HOLD", task="TRANSFORM_FAILED")
-            if hasattr(self.plc, "send_message"):
-                self.plc.send_message("ROBOT", "BLOCKED", msg, {"robot_id": robot_id, "pose": pose})
-            return {"success": False, "task": task, "message": msg}
-
-        # TODO: 与PLC交互 — 记账 + 真写 XYZR（finished_app 绝对定位时序）
+        # 编排层记账（不写轴）；真机由 plc_console 执行
         cmd = self.plc.send_command(
             "MOVE_TOOL_WORLD",
             {
@@ -89,44 +61,38 @@ class RealGantryRobotAdapter(RobotAdapter):
                 "pose": pose,
                 "task": task,
                 "gantry_xyzr": gantry_xyzr,
+                "export_only": True,
             },
         )
-        if not cmd.get("success"):
-            return cmd
+        ack = self.plc.wait_ack(cmd["command_id"]) if cmd.get("success") else cmd
 
-        if not hasattr(self.plc, "move_absolute_xyzr"):
-            return {
-                "success": False,
-                "message": "当前 PLC 适配器不支持 move_absolute_xyzr 真写入",
-                "gantry_xyzr": gantry_xyzr,
-            }
+        emit_payload = {
+            "robot_id": robot_id,
+            "world_pose": target.to_dict(),
+            "task": task or "MOVE_TOOL_WORLD",
+            "gantry_xyzr": gantry_xyzr,
+            "speed": self.default_speed,
+            "transform_error": transform_error,
+            "plc_command_id": cmd.get("command_id"),
+        }
+        self._emit_command(emit_payload)
 
-        moved = self.plc.move_absolute_xyzr(
-            gantry_xyzr,
-            speed=self.default_speed,
-            timeout_s=self.move_timeout_s,
-            soft_limits=self.soft_limits or None,
-        )
-        if not moved.get("success"):
-            return moved
+        message = f"{robot_id} 目标已发布到运动指令通道"
+        if transform_error:
+            message += f"（XYZR 未换算：{transform_error}）"
+        elif not self.allow_real_motion:
+            message += "（allow_real_motion=False，仍可手动在控制台执行）"
 
-        # TODO: 与PLC交互 — 编排层 ACK（到位已在 move_absolute_xyzr 完成）
-        ack = self.plc.wait_ack(cmd["command_id"])
-        if not ack.get("success"):
-            return ack
-
-        target = Pose6D.from_any(pose)
-        self.twin.update_robot_pose(robot_id, target, task=task or "MOVED")
-        if callable(self.motion_callback):
-            self.motion_callback(robot_id, target.to_dict(), task or "MOVED")
         return {
             "success": True,
             "robot_id": robot_id,
             "pose": target.to_dict(),
             "task": task,
             "gantry_xyzr": gantry_xyzr,
-            "plc_move": moved,
-            "message": f"{robot_id} 已按 XYZR 绝对定位完成",
+            "transform_error": transform_error,
+            "export_only": True,
+            "plc_ack": ack,
+            "message": message,
         }
 
     def retract(self, robot_id: str) -> dict:
@@ -137,17 +103,31 @@ class RealGantryRobotAdapter(RobotAdapter):
         )
 
     def fork_pallet(self, pallet_result: dict) -> dict:
-        blocked = self._require_mapping("FORK_PALLET")
-        if blocked is not None:
-            return blocked
-        # TODO: 与PLC交互 — 插取动作寄存器协议待与机械确认；当前仅下发编排命令
         cmd = self.plc.send_command("FORK_PALLET", deepcopy(pallet_result or {}))
-        return self.plc.wait_ack(cmd["command_id"]) if cmd.get("success") else cmd
+        result = self.plc.wait_ack(cmd["command_id"]) if cmd.get("success") else cmd
+        self._emit_command(
+            {
+                "robot_id": "PICK_ARM",
+                "world_pose": ((self.twin.snapshot().get("devices") or {}).get("PICK_ARM") or {}).get("pose") or {},
+                "task": "FORK_PALLET",
+                "gantry_xyzr": None,
+                "extra": {"fork": deepcopy(pallet_result or {})},
+            }
+        )
+        return result
 
     def place(self, cargo: dict, target: dict) -> dict:
-        blocked = self._require_mapping("PLACE")
-        if blocked is not None:
-            return blocked
-        # TODO: 与PLC交互 — 放货 IO/动作协议待与机械确认；当前仅下发编排命令
         cmd = self.plc.send_command("PLACE", {"cargo": cargo, "target": target})
-        return self.plc.wait_ack(cmd["command_id"]) if cmd.get("success") else cmd
+        result = self.plc.wait_ack(cmd["command_id"]) if cmd.get("success") else cmd
+        pose = (target or {}).get("final_world_pose") or {}
+        gantry_xyzr, _ = self._resolve_gantry(pose) if pose else (None, None)
+        self._emit_command(
+            {
+                "robot_id": "PICK_ARM",
+                "world_pose": pose,
+                "task": "PLACE",
+                "gantry_xyzr": gantry_xyzr,
+                "extra": {"target": deepcopy(target or {})},
+            }
+        )
+        return result
