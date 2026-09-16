@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QDialog,
@@ -45,45 +45,54 @@ STEP_TITLES = {
     "RETURN": "12. 机械臂返回 / 下一轮",
 }
 
-# 运动 task → 简短目的（前缀匹配，长的在前）
+# 运动 task → 中文目的（前缀匹配，长的在前）
 _TASK_PURPOSE = (
     ("MOVE_TO_TAIL_STAGED_CARGO", "移到车尾待装货物上方，准备找插孔"),
     ("FIND_PALLET_HOLE", "到插孔识别位，便于相机定位插孔"),
     ("LIFT_STAGED_CARGO", "插取完成后抬升带货，离开货位"),
-    ("CAPTURE_TAIL", "到车尾左侧外侧，拍摄车尾角点 RGB-D"),
-    ("CAPTURE_HEAD", "到车头左侧外侧，拍摄车头角点 RGB-D"),
-    ("NEIGHBOR_PALLET_POSE", "到目标侧附近，拍摄临近已放托盘姿态"),
-    ("PRE_PLACE_DYNAMIC_MONITOR", "到放置侧观测位，做放货前动态监测"),
+    ("CAPTURE_TAIL", "到车尾左侧外侧，拍摄车尾角点"),
+    ("CAPTURE_HEAD", "到车头左侧外侧，拍摄车头角点"),
+    ("EXTEND_CARGO_FROM_OUTSIDE_TO_TARGET", "从车外侧伸出，把货物送到目标上方"),
+    ("LOWER_CARGO_TO_TARGET", "下降到最终放置高度，准备放货"),
+    ("EXTEND_INWARD_OBSERVE_FACE_B", "向车板内侧伸入，拍摄第二个相邻面"),
     ("POST_PLACE_BOTTOM_PALLET_DETECT", "到放置侧观测位，检测底层托盘"),
+    ("PRE_PLACE_DYNAMIC_MONITOR", "到放置侧观测位，做放货前动态监测"),
     ("PALLET_BOARD_REGION_DEVIATION", "到放置侧，测托盘相对车板区域偏差"),
     ("PALLET_CARGO_POST_PLACE_OFFSET", "到放置侧，测放货后货托偏差"),
     ("CARRY_TO_PLACEMENT_SIDE", "携货换到目标作业侧（安全高度）"),
-    ("EXTEND_CARGO_FROM_OUTSIDE_TO_TARGET", "从车外侧伸出，把货物送到目标上方"),
-    ("LOWER_CARGO_TO_TARGET", "下降到最终放置高度，准备放货"),
-    ("OBSERVE_FACE_A", "到货物外侧，拍摄第一个相邻面"),
-    ("EXTEND_INWARD_OBSERVE_FACE_B", "向车板内侧伸入，拍摄第二个相邻面"),
+    ("NEIGHBOR_PALLET_POSE", "到目标侧附近，拍摄临近已放托盘姿态"),
     ("RETURN_TO_LEFT_TAIL", "返回车尾左侧初始位，准备下一轮"),
-    ("RETRACT", "缩回/回初始姿态"),
+    ("OBSERVE_FACE_A", "到货物外侧，拍摄第一个相邻面"),
     ("FORK_PALLET", "执行托盘插取动作"),
+    ("RETRACT", "缩回，回到初始姿态"),
     ("PLACE", "执行放货动作"),
+)
+
+_PHASE_PURPOSE = (
     ("LIFT_CLEARANCE", "先升到安全高度，避免撞货"),
-    ("LONGITUDINAL", "沿轨道纵向移动到目标 Y"),
-    ("CROSSBEAM_TO_", "横梁换侧到目标作业侧"),
-    ("LOWER_", "在目标侧下降到作业高度"),
+    ("LONGITUDINAL", "沿轨道纵向移动到目标位置"),
+    ("CROSSBEAM_TO_RIGHT", "横梁换到右侧作业"),
+    ("CROSSBEAM_TO_LEFT", "横梁换到左侧作业"),
+    ("LOWER_RIGHT", "在右侧下降到作业高度"),
+    ("LOWER_LEFT", "在左侧下降到作业高度"),
 )
 
 
-def describe_motion(cmd: dict[str, Any]) -> tuple[str, str, str]:
-    """返回 (步骤标题, 动作名, 目的说明)。"""
+def describe_motion(cmd: dict[str, Any]) -> tuple[str, str]:
+    """返回 (步骤标题, 中文目的)。"""
     step = str(cmd.get("step") or "").strip()
-    task = str(cmd.get("task") or "").strip() or "-"
+    task = str(cmd.get("task") or "").strip()
     step_title = STEP_TITLES.get(step, step or "（未知步骤）")
     purpose = "移动机械臂到目标位姿"
+    for key, text in _PHASE_PURPOSE:
+        if task.endswith(key) or key in task:
+            purpose = text
+            return step_title, purpose
     for key, text in _TASK_PURPOSE:
         if task == key or task.startswith(key):
             purpose = text
             break
-    return step_title, task, purpose
+    return step_title, purpose
 
 
 _DIALOG_QSS = """
@@ -95,10 +104,6 @@ QLabel {
     background: transparent;
     color: #f2f2f2;
     font-size: 14px;
-}
-QLabel#tipLabel {
-    color: #c8c8c8;
-    font-size: 13px;
 }
 QLabel#stepLabel {
     color: #ffffff;
@@ -170,7 +175,7 @@ QPushButton#primaryBtn:disabled {
 class PlcMotionDialog(QDialog):
     """待处理指令时阻塞主界面下一步；确认下发成功或关闭后才可继续。"""
 
-    resolved = Signal()
+    resolved = Signal(bool)  # skip_remaining：关闭/跳过则丢掉本步剩余坐标，不再立刻再弹
 
     def __init__(
         self,
@@ -181,6 +186,8 @@ class PlcMotionDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("PLC 运动坐标 / 下发")
         self.setWindowFlag(Qt.WindowType.Window, True)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self.setWindowModality(Qt.WindowModality.NonModal)
         self.resize(620, 560)
         self.setStyleSheet(_DIALOG_QSS)
         font = QFont("Microsoft YaHei UI", 11)
@@ -188,6 +195,7 @@ class PlcMotionDialog(QDialog):
         self._on_confirm_push = on_confirm_push
         self._latest_cmd: dict[str, Any] | None = None
         self._blocking = False
+        self._closing = False
         self._build()
 
     def is_blocking(self) -> bool:
@@ -197,14 +205,6 @@ class PlcMotionDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
-
-        tip = QLabel(
-            "主系统只发布坐标；真机由独立「PLC 控制台」执行。\n"
-            "弹窗打开期间请先「确认下发」或「跳过并关闭」，才能继续执行下一步。"
-        )
-        tip.setObjectName("tipLabel")
-        tip.setWordWrap(True)
-        layout.addWidget(tip)
 
         self.step_label = QLabel("流程步骤：—")
         self.step_label.setObjectName("stepLabel")
@@ -258,16 +258,16 @@ class PlcMotionDialog(QDialog):
         self.cmd_view.clear()
         self.push_status.setText("下发状态：未下发")
         self.confirm_btn.setEnabled(False)
-        self._end_blocking(emit_resolved=False)
+        self._end_blocking(emit_resolved=False, skip_remaining=False)
 
     def apply_command(self, cmd: dict, *, auto_pushed: bool = False, push_result: dict | None = None) -> None:
         self._latest_cmd = dict(cmd or {})
-        step_title, task, purpose = describe_motion(self._latest_cmd)
+        step_title, purpose = describe_motion(self._latest_cmd)
         world = self._latest_cmd.get("world_pose") or {}
         xyzr = self._latest_cmd.get("gantry_xyzr")
 
         self.step_label.setText(f"流程步骤：{step_title}")
-        self.purpose_label.setText(f"移动动作：{task}\n移动目的：{purpose}")
+        self.purpose_label.setText(f"移动目的：{purpose}")
         summary = (
             f"WORLD  x={float(world.get('x_mm', 0)):.1f}  y={float(world.get('y_mm', 0)):.1f}  "
             f"z={float(world.get('z_mm', 0)):.1f}  yaw={float(world.get('yaw_deg', 0)):.1f}"
@@ -287,7 +287,7 @@ class PlcMotionDialog(QDialog):
             push = dict(push_result or {})
             if push.get("success"):
                 self.push_status.setText(f"下发状态：已自动推送 · {push.get('message', 'OK')}")
-                self._end_blocking(emit_resolved=True)
+                self._end_blocking(emit_resolved=True, skip_remaining=False)
                 return
             self.push_status.setText(f"下发状态：自动推送失败 · {push.get('message', '')}")
         else:
@@ -297,24 +297,36 @@ class PlcMotionDialog(QDialog):
 
     def _begin_blocking(self) -> None:
         self._blocking = True
-        self.setWindowModality(Qt.WindowModality.ApplicationModal)
+        self._closing = False
         if not self.isVisible():
             self.show()
         self.raise_()
         self.activateWindow()
 
-    def _end_blocking(self, *, emit_resolved: bool) -> None:
+    def _end_blocking(self, *, emit_resolved: bool, skip_remaining: bool = False) -> None:
+        if self._closing:
+            return
         was = self._blocking
         self._blocking = False
-        self.setWindowModality(Qt.WindowModality.NonModal)
-        self.hide()
+        self._closing = True
+        try:
+            if self.isVisible():
+                self.hide()
+        finally:
+            # 保持 _closing 直到本轮事件结束，避免 hide 触发的 closeEvent 再走一遍
+            QTimer.singleShot(0, self._clear_closing)
         if emit_resolved and was:
-            self.resolved.emit()
+            QTimer.singleShot(0, lambda: self.resolved.emit(bool(skip_remaining)))
+
+    def _clear_closing(self) -> None:
+        self._closing = False
 
     def dismiss(self) -> None:
-        """跳过下发并关闭，允许主流程继续。"""
+        """跳过本条及本步剩余坐标并关闭。"""
+        if self._closing:
+            return
         self.push_status.setText("下发状态：已跳过")
-        self._end_blocking(emit_resolved=True)
+        self._end_blocking(emit_resolved=True, skip_remaining=True)
 
     def set_push_status(self, text: str) -> None:
         self.push_status.setText(text)
@@ -328,7 +340,7 @@ class PlcMotionDialog(QDialog):
         result = self._on_confirm_push() or {}
         if result.get("success"):
             self.push_status.setText(f"下发状态：已确认推送 · {result.get('message', 'OK')}")
-            self._end_blocking(emit_resolved=True)
+            self._end_blocking(emit_resolved=True, skip_remaining=False)
         else:
             self.push_status.setText(f"下发状态：推送失败 · {result.get('message', '')}")
             QMessageBox.warning(self, "推送失败", result.get("message") or "PLC 控制台未连接")
@@ -347,5 +359,15 @@ class PlcMotionDialog(QDialog):
             QMessageBox.warning(self, "启动失败", str(exc))
 
     def closeEvent(self, event):
-        event.ignore()
-        self.dismiss()
+        # 必须 accept，否则第一次关会被 Qt 留住，要点第二次才消失
+        event.accept()
+        if self._closing:
+            return
+        if self._blocking:
+            self.push_status.setText("下发状态：已跳过")
+            was = self._blocking
+            self._blocking = False
+            self._closing = True
+            QTimer.singleShot(0, self._clear_closing)
+            if was:
+                QTimer.singleShot(0, lambda: self.resolved.emit(True))

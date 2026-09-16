@@ -155,7 +155,7 @@ class MainWindow(QMainWindow):
         device_strip.addStretch(1)
         lay.addLayout(device_strip)
 
-        f,l,self.flow_toggle=self._collapsible_card("流程链路",expanded=False)
+        f,l,self.flow_toggle=self._collapsible_card("流程链路",expanded=True)
         self.flow_nodes=[]
         for row_index,stage_row in enumerate((self.FLOW_STAGES[:6],self.FLOW_STAGES[6:])):
             row=QHBoxLayout(); row.setSpacing(5)
@@ -490,6 +490,7 @@ class MainWindow(QMainWindow):
             self.controller.execute_next()
         finally:
             self._step_busy=False
+            self._present_next_plc_command()
 
     def _start(self):
         # 内部入口：开会话并立刻跑 DEVICE_CHECK。界面上由「执行下一步 / 自动运行」触发。
@@ -520,7 +521,9 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
             self.controller.execute_next(); self._refresh()
         except Exception as e: QMessageBox.warning(self,"步骤未通过",str(e)); self._refresh()
-        finally: self._step_busy=False
+        finally:
+            self._step_busy=False
+            self._present_next_plc_command()
 
     def _auto(self):
         if self.timer.isActive():
@@ -554,7 +557,9 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.timer.stop(); self.auto_btn.setText("自动运行"); self._sync_auto_push_policy()
             QMessageBox.warning(self,"流程等待/失败",str(e)); self._refresh()
-        finally: self._step_busy=False
+        finally:
+            self._step_busy=False
+            self._present_next_plc_command()
 
     def _debug(self):
         d=DebugInputDialog(self.debug_inputs,self)
@@ -604,9 +609,15 @@ class MainWindow(QMainWindow):
 
     def _enqueue_plc_command(self, cmd: dict):
         self._plc_cmd_queue.append(dict(cmd or {}))
-        self._present_next_plc_command()
+        # 步骤执行中会套动画 event loop；此时弹窗容易嵌进死循环。等本步结束后再弹出。
+        if not self._step_busy:
+            self._present_next_plc_command()
 
-    def _on_plc_dialog_resolved(self):
+    def _on_plc_dialog_resolved(self, skip_remaining: bool = False):
+        if skip_remaining:
+            self._plc_cmd_queue.clear()
+            self._latest_plc_cmd = None
+            return
         self._present_next_plc_command()
 
     def _present_next_plc_command(self):
