@@ -62,9 +62,10 @@ class MainWindow(QMainWindow):
         self._step_busy=False
         self._profile_changing=False
         self._latest_plc_cmd=None
+        self._plc_cmd_queue=[]
         self.plc_dialog=None
         self.motionSnapshot.connect(self._apply_motion_snapshot)
-        self.plcCommandReady.connect(self._apply_plc_command)
+        self.plcCommandReady.connect(self._enqueue_plc_command, Qt.ConnectionType.QueuedConnection)
         self.controller.set_state_listener(self.motionSnapshot.emit)
         self.controller.set_plc_command_listener(self.plcCommandReady.emit)
         self.controller.set_corner_review_callback(self._review_corners)
@@ -330,6 +331,10 @@ class MainWindow(QMainWindow):
         self.controller.set_state_listener(self.motionSnapshot.emit)
         self.controller.set_plc_command_listener(self.plcCommandReady.emit)
         self.controller.set_corner_review_callback(self._review_corners)
+        self._plc_cmd_queue.clear()
+        self._latest_plc_cmd=None
+        if self.plc_dialog is not None:
+            self.plc_dialog.clear_command()
         self._sync_auto_push_policy()
         if old_plan:
             self.controller.set_plan(old_plan)
@@ -499,6 +504,10 @@ class MainWindow(QMainWindow):
             self._step_busy=False
             QMessageBox.critical(self,"启动失败",str(e)); self._refresh()
     def _next(self):
+        if self._plc_blocks_flow():
+            QMessageBox.information(self, "请先处理 PLC 坐标", "请先在 PLC 弹窗中确认下发，或跳过并关闭，再执行下一步。")
+            self._show_plc_dialog()
+            return
         if self._step_busy: return
         self._step_busy=True
         try:
@@ -512,11 +521,16 @@ class MainWindow(QMainWindow):
             self.controller.execute_next(); self._refresh()
         except Exception as e: QMessageBox.warning(self,"步骤未通过",str(e)); self._refresh()
         finally: self._step_busy=False
+
     def _auto(self):
         if self.timer.isActive():
             self.timer.stop()
             self.auto_btn.setText("自动运行")
         else:
+            if self._plc_blocks_flow():
+                QMessageBox.information(self, "请先处理 PLC 坐标", "请先在 PLC 弹窗中确认下发或关闭，再自动运行。")
+                self._show_plc_dialog()
+                return
             if not self.controller.running:
                 self._start()
             self.timer.start()
@@ -524,6 +538,8 @@ class MainWindow(QMainWindow):
         self._sync_auto_push_policy()
 
     def _auto_tick(self):
+        if self._plc_blocks_flow():
+            return
         if self._step_busy: return
         self._step_busy=True
         try:
@@ -551,19 +567,31 @@ class MainWindow(QMainWindow):
             self,
             on_confirm_push=self._confirm_push_plc,
         )
+        self.plc_dialog.resolved.connect(self._on_plc_dialog_resolved)
         return self.plc_dialog
 
     def _show_plc_dialog(self):
         dlg = self._ensure_plc_dialog()
+        if dlg.is_blocking() or self._latest_plc_cmd:
+            dlg.raise_()
+            dlg.activateWindow()
+            if not dlg.isVisible():
+                dlg.show()
+            return
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
+
+    def _plc_blocks_flow(self) -> bool:
+        dlg = self.plc_dialog
+        return bool(dlg is not None and dlg.is_blocking())
 
     def _reset(self):
         self.timer.stop()
         self.auto_btn.setText("自动运行")
         self.controller.reset(keep_plan=True)
         self._latest_plc_cmd=None
+        self._plc_cmd_queue.clear()
         if self.plc_dialog is not None:
             self.plc_dialog.clear_command()
         self._sync_auto_push_policy()
@@ -574,16 +602,40 @@ class MainWindow(QMainWindow):
         enabled = bool(self.auto_push_cb.isChecked() and self.timer.isActive())
         self.controller.set_auto_push_plc(enabled)
 
-    def _apply_plc_command(self, cmd: dict):
-        self._latest_plc_cmd = dict(cmd or {})
+    def _enqueue_plc_command(self, cmd: dict):
+        self._plc_cmd_queue.append(dict(cmd or {}))
+        self._present_next_plc_command()
+
+    def _on_plc_dialog_resolved(self):
+        self._present_next_plc_command()
+
+    def _present_next_plc_command(self):
         dlg = self._ensure_plc_dialog()
-        auto = bool(self.controller.auto_push_plc_commands)
-        push = self.controller.plc_publisher.last_push if auto else None
-        dlg.apply_command(self._latest_plc_cmd, auto_pushed=auto, push_result=push)
+        if dlg.is_blocking():
+            return
+        if not self._plc_cmd_queue:
+            return
+        cmd = self._plc_cmd_queue.pop(0)
+        self._latest_plc_cmd = cmd
+        self.controller.plc_publisher.last_command = cmd
+        auto = bool(self.auto_push_cb.isChecked() and self.timer.isActive())
+        push = None
+        if auto:
+            push = self.controller.push_last_plc_command()
+            status = "SUCCESS" if push.get("success") else "FAILED"
+            self.controller.twin.add_message(
+                "PLC_PUSH", status, push.get("message", ""), {"cmd_id": cmd.get("cmd_id"), **(push or {})}
+            )
+            if not push.get("success") and self.timer.isActive():
+                self.timer.stop()
+                self.auto_btn.setText("自动运行")
+                self._sync_auto_push_policy()
+        dlg.apply_command(cmd, auto_pushed=auto, push_result=push)
 
     def _confirm_push_plc(self):
         if not self._latest_plc_cmd:
             return {"success": False, "message": "当前没有可下发的运动坐标"}
+        self.controller.plc_publisher.last_command = self._latest_plc_cmd
         return self.controller.push_last_plc_command()
 
     def _apply_motion_snapshot(self,snapshot,motion):

@@ -201,12 +201,12 @@ class FlowController:
             }
             or None,
         )
-        result = self.plc_publisher.publish_and_maybe_push(cmd, auto_push=self.auto_push_plc_commands)
-        if result.get("pushed"):
-            push = result.get("push_result") or {}
-            status = "SUCCESS" if push.get("success") else "FAILED"
-            self.twin.add_message("PLC_PUSH", status, push.get("message", ""), {"cmd_id": cmd.get("cmd_id"), **push})
-        return result
+        result = self.plc_publisher.publish_local(cmd)
+        # 是否实时推送由主界面决定（弹窗确认 / 自动运行勾选），此处只落盘并通知 UI
+        if self.auto_push_plc_commands:
+            # 标记给 UI：本条在展示时可自动推送
+            result = {**result, "_ui_auto_push": True}
+        return {"command": result, "pushed": False, "push_result": None}
 
     def _notify_motion(self, robot_id: str, pose: Dict[str, Any], task: str):
         if self.loading_session_id:
