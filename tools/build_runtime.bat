@@ -28,6 +28,8 @@ set "INSTALLER_NAME=python-%PYTHON_VERSION%-amd64.exe"
 set "CACHE_DIR=%CD%\tools\_cache"
 set "INSTALLER=%CACHE_DIR%\%INSTALLER_NAME%"
 set "PYTHON_URL=https://www.python.org/ftp/python/%PYTHON_VERSION%/%INSTALLER_NAME%"
+REM Official python-3.12.10-amd64.exe is ~25MB; reject tiny/corrupt downloads.
+set "MIN_INSTALLER_BYTES=20000000"
 
 if exist "%RUNTIME_DIR%\python.exe" (
   echo [INFO] Found: %RUNTIME_DIR%\python.exe
@@ -69,20 +71,60 @@ if not exist "%INSTALLER%" (
   echo [INFO] Using cached installer: %INSTALLER%
 )
 
+for %%A in ("%INSTALLER%") do set "INSTALLER_SIZE=%%~zA"
+if not defined INSTALLER_SIZE set "INSTALLER_SIZE=0"
+if !INSTALLER_SIZE! LSS %MIN_INSTALLER_BYTES% (
+  echo [ERROR] Installer looks corrupt/incomplete: !INSTALLER_SIZE! bytes
+  echo         Expected at least %MIN_INSTALLER_BYTES% bytes.
+  echo         Delete it and re-run, or download manually:
+  echo           %PYTHON_URL%
+  echo           -^> %INSTALLER%
+  if "%NO_PAUSE%"=="0" pause
+  exit /b 1
+)
+echo [INFO] Installer size: !INSTALLER_SIZE! bytes
+
+if not exist "%RUNTIME_DIR%" mkdir "%RUNTIME_DIR%"
+
 echo [INFO] Silent-installing Python into runtime\ ...
-"%INSTALLER%" /quiet InstallAllUsers=0 PrependPath=0 Include_launcher=0 Include_test=0 Shortcuts=0 AssociateFiles=0 InstallLauncherAllUsers=0 TargetDir="%RUNTIME_DIR%"
-if errorlevel 1 (
-  echo [ERROR] Python install failed.
-  if "%NO_PAUSE%"=="0" pause
-  exit /b 1
+echo        (must wait for child setup to finish; do not close this window)
+REM start /wait is required: the outer .exe often exits before files appear.
+start "" /wait "%INSTALLER%" /quiet InstallAllUsers=0 PrependPath=0 Include_launcher=0 Include_test=0 Shortcuts=0 AssociateFiles=0 InstallLauncherAllUsers=0 TargetDir="%RUNTIME_DIR%"
+set "INSTALL_RC=!ERRORLEVEL!"
+if not "!INSTALL_RC!"=="0" (
+  echo [WARN] Installer exit code=!INSTALL_RC! ; checking TargetDir anyway ...
 )
 
-if not exist "%RUNTIME_DIR%\python.exe" (
-  echo [ERROR] python.exe not found after install.
-  if "%NO_PAUSE%"=="0" pause
-  exit /b 1
-)
+if exist "%RUNTIME_DIR%\python.exe" goto :INSTALL_OK
 
+echo [ERROR] python.exe not found after install: %RUNTIME_DIR%\python.exe
+echo.
+echo [DIAG] Contents of runtime\ (if any):
+dir /b "%RUNTIME_DIR%" 2>nul
+echo.
+echo Common causes:
+echo   1) Same Python %PYTHON_VERSION% already installed on this PC.
+echo      Official installer then IGNORES TargetDir and updates the old install.
+echo      Fix: Settings -^> Apps -^> uninstall "Python %PYTHON_VERSION%", then re-run:
+echo        tools\build_runtime.bat /rebuild
+echo   2) Cached installer corrupt — delete and re-download:
+echo        del "%INSTALLER%"
+echo   3) Antivirus blocked write into runtime\
+echo.
+set "DEFAULT_PY=%LocalAppData%\Programs\Python\Python312\python.exe"
+if exist "%DEFAULT_PY%" (
+  echo [DIAG] Found default user install instead:
+  echo        %DEFAULT_PY%
+  echo        That usually means TargetDir was ignored because 3.12 already exists.
+)
+echo.
+echo To see the installer UI next time, run manually:
+echo   "%INSTALLER%" InstallAllUsers=0 PrependPath=0 Include_launcher=0 TargetDir="%RUNTIME_DIR%"
+echo.
+if "%NO_PAUSE%"=="0" pause
+exit /b 1
+
+:INSTALL_OK
 echo [OK] Python installed: %RUNTIME_DIR%\python.exe
 "%RUNTIME_DIR%\python.exe" -c "import sys; print(sys.version)"
 
