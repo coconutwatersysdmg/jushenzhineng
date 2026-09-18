@@ -177,8 +177,9 @@ Python runtime 解决不了硬件驱动：
 
   1. 双击或命令行运行：
        tools\build_runtime.bat
-  2. 脚本会下载官方 Python 3.12 并安装到 runtime\
-  3. 再按 requirements.txt 安装依赖
+  2. 脚本下载官方 Python 3.12 embed zip，解压到 runtime\
+     （不走本机安装器，避免已装同版本时 TargetDir 被忽略）
+  3. 用 get-pip 装 pip，再按 requirements.txt 装依赖
   4. 自动调用 tools\check_runtime.py 自检
 
 构建完成后，把整个 jushenzhineng_v3 拷到现场即可。
