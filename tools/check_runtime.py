@@ -43,6 +43,16 @@ def check_python() -> bool:
         if "runtime" not in str(exe).replace("/", "\\").lower():
             ok = False
             _missing("当前解释器不是项目便携 runtime，启动脚本可能未使用 runtime\\python.exe")
+
+    # 本项目依赖按 3.12 验证；系统 3.13 不能替代 runtime
+    if sys.version_info[:2] == (3, 12):
+        _ok("Python 主版本为 3.12（与 requirements / build_runtime 一致）")
+    else:
+        ok = False
+        _missing(
+            f"需要 Python 3.12.x，当前为 {sys.version_info.major}.{sys.version_info.minor}。"
+            "请运行 tools\\build_runtime.bat（不要用系统 3.13 pip 装依赖）"
+        )
     return ok
 
 

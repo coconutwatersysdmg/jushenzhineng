@@ -1,6 +1,9 @@
 # 巨神智能 jushenzhineng_v3 — 便携 runtime 依赖（Windows / Python 3.12）
 # 版本来自本项目已验证的 venv 冻结结果；不要随意升级核心包。
 #
+# 部署：在目标机运行 tools\build_runtime.bat（会自带 Python 3.12.10 embed）。
+# 即使系统是 Python 3.13.x，也不要用系统 python -m pip；依赖必须装进 runtime\。
+#
 # 说明：
 # - 当前验证环境中的 torch 为 CPU wheel（torch==2.13.0）。
 # - 若现场需要 CUDA GPU 推理，请在开发机用匹配驱动的 CUDA 版 PyTorch wheel
