@@ -41,7 +41,7 @@ RUN_PROFILES: Dict[str, Dict[str, Any]] = {
     "lab": {
         "id": "lab",
         "title": "实验室",
-        "subtitle": "实验室前两步：设备检查 + 相机插孔∥雷达四角；真机+实验室算法",
+        "subtitle": "实验室四步：设备检查→插孔∥雷达→精定位空壳→俯拍校验；真机+实验室算法",
         "switches": {
             "DEVICE_MODE": "real",
             "ALLOW_DEMO_DEVICE_DATA": False,

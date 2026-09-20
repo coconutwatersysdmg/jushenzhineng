@@ -52,9 +52,12 @@ class MainWindow(QMainWindow):
     LAB_FLOW_STAGES = [
         (1, "设备连接检查"),
         (2, "相机插孔识别 ∥ 雷达四角粗定位"),
+        (3, "精定位/轮廓确认（空壳）"),
+        (4, "手动放货后俯拍校验"),
     ]
     STEP_STAGE = {
-        "DEVICE_CHECK":1,"LAB_SENSE":2,"PRE_PICK_OFFSET":2,"PARALLEL_LOCATE":3,"PICK_ONLY":3,"RADAR_TO_CAMERA":4,
+        "DEVICE_CHECK":1,"LAB_SENSE":2,"LAB_CORNER_SHELL":3,"LAB_PLACE_VERIFY":4,
+        "PRE_PICK_OFFSET":2,"PARALLEL_LOCATE":3,"PICK_ONLY":3,"RADAR_TO_CAMERA":4,
         "CAPTURE_CORNERS":5,"CORNER_RECOGNITION":6,"CAMERA_TO_WORLD":7,
         "INITIAL_SPACE_PLAN":8,"NEIGHBOR_POSE":8,"TARGET_CONFIRM":8,"PRE_PLACE_MONITOR":9,"PLACE":9,
         "POST_PLACE_BOTTOM":10,"POST_REGION":10,"POST_CARGO_OFFSET":10,"FEEDBACK":11,"RETURN":12,"DONE":12,
@@ -422,7 +425,7 @@ class MainWindow(QMainWindow):
             self.lab_right_panel.setVisible(lab)
         if hasattr(self, "debug_btn"):
             self.debug_btn.setVisible(not lab)
-        title = "实验室装载测试 · 设备检查 / 插孔+雷达粗定位" if lab else "具身智能装载数字孪生 · 单机械臂携货 / 挂载相机角点识别"
+        title = "实验室装载测试 · 四步流程（插孔/雷达/空壳精定位/俯拍校验）" if lab else "具身智能装载数字孪生 · 单机械臂携货 / 挂载相机角点识别"
         self.setWindowTitle(title)
         if lab and hasattr(self, "main_splitter"):
             self.main_splitter.setSizes([280, 780, 420])
@@ -874,14 +877,16 @@ class MainWindow(QMainWindow):
         stages = self.LAB_FLOW_STAGES if lab else self.FLOW_STAGES
         nodes = self.lab_flow_nodes if lab else self.flow_nodes
         if s.get("finished"):
-            current_stage = 3 if lab else 13
+            current_stage = 5 if lab else 13
         elif not s.get("running") and not s.get("results"):
             current_stage=0
         else:
             current_stage=self.STEP_STAGE.get(s.get("step_code"),1)
             if lab and s.get("step_code") == "DONE":
-                current_stage = 3
+                current_stage = 5
         skipped=set() if lab else ({4,5,6,7} if not s.get("first_round") else set())
+        if lab and not s.get("first_round"):
+            skipped = {1}  # 后续轮跳过设备检查
         running=int(self._running_stage or 0) if self._step_busy else 0
         for (number,title_text),node in zip(stages, nodes):
             if number in skipped:
@@ -921,6 +926,8 @@ class MainWindow(QMainWindow):
                 ("当前 WORLD XYZ",f"{p.get('x_mm','-')}, {p.get('y_mm','-')}, {p.get('z_mm','-')}"),
                 ("插孔识别", (rd.get("pick_result") or {}).get("message","等待第2步")),
                 ("雷达粗定位", (rd.get("radar_result") or {}).get("message","等待第2步")),
+                ("精定位空壳", (rd.get("lab_corner_shell") or {}).get("message","等待第3步")),
+                ("俯拍校验", (rd.get("lab_place_verify") or {}).get("message","等待第4步（请先手动搬托盘到车板）")),
             ])
             self._refresh_lab_sense_panels(rd, hole, truck)
         else:
@@ -988,12 +995,19 @@ class MainWindow(QMainWindow):
         alarm=t.get("alarm"); self.logs.setPlainText(("ALARM: "+str(alarm)+"\n\n" if alarm else "")+"\n".join(f"[{m.get('time')}] {m.get('source')} {m.get('status')} {m.get('message')}" for m in msgs))
 
     def _refresh_lab_sense_panels(self, rd: dict, hole: dict, truck: dict) -> None:
-        """实验室右侧：相机图、两插孔 WORLD、雷达四角。"""
-        image = ""
+        """实验室右侧：相机图（插孔或俯拍）、两插孔 WORLD、雷达四角。"""
+        place = rd.get("lab_place_verify") or {}
         pick = rd.get("pick_result") or {}
-        image = str(pick.get("image_path") or "")
-        if not image:
-            image = self._first_image(hole) or self._first_image(pick.get("capture"))
+        image = str(place.get("image_path") or "")
+        caption_default = "执行后显示相机照片（第2步插孔图 / 第4步俯拍校验图）"
+        if image:
+            caption_default = "第4步：手动放货后俯拍"
+        else:
+            image = str(pick.get("image_path") or "")
+            if image:
+                caption_default = "第2步：托盘插孔识别图"
+            else:
+                image = self._first_image(hole) or self._first_image(pick.get("capture")) or ""
         if image and Path(image).is_file():
             pix = QPixmap(image)
             if not pix.isNull():
@@ -1004,12 +1018,12 @@ class MainWindow(QMainWindow):
                     Qt.TransformationMode.SmoothTransformation,
                 )
                 self.lab_camera_preview.setPixmap(scaled)
-                self.lab_camera_preview.setToolTip(image)
+                self.lab_camera_preview.setToolTip(f"{caption_default}\n{image}")
             else:
                 self.lab_camera_preview.setText(f"无法加载图片：\n{image}")
         else:
             self.lab_camera_preview.setPixmap(QPixmap())
-            self.lab_camera_preview.setText("第 2 步执行后显示托盘/插孔识别图")
+            self.lab_camera_preview.setText(caption_default)
 
         self.lab_hole_table.setRowCount(0)
         for side, label in (("left", "左插孔"), ("right", "右插孔")):

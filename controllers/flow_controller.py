@@ -82,10 +82,17 @@ class FlowController:
         ("FEEDBACK", "11. 偏差回PLC / 修正下一托盘 / 更新空间"),
         ("RETURN", "12. 机械臂返回 / 下一轮"),
     ]
-    # 实验室模式：仅前两步（设备检查 + 相机插孔∥雷达四角），后续步骤以后再扩。
-    LAB_STEPS = [
+    # 实验室模式：设备检查 → 插孔∥雷达 → 精定位空壳 → 手动放货后俯拍校验（可多轮）
+    LAB_FIRST_STEPS = [
         ("DEVICE_CHECK", "1. 外接设备连接检查（PLC / 雷达 / 相机）"),
         ("LAB_SENSE", "2. 相机插孔识别 ∥ 雷达底板四角粗定位"),
+        ("LAB_CORNER_SHELL", "3. 相机精定位与轮廓确认（实验室空壳）"),
+        ("LAB_PLACE_VERIFY", "4. 手动放货后俯拍位置校验"),
+    ]
+    LAB_REPEAT_STEPS = [
+        ("LAB_SENSE", "2. 相机插孔识别（复用首轮雷达车板）"),
+        ("LAB_CORNER_SHELL", "3. 相机精定位与轮廓确认（实验室空壳）"),
+        ("LAB_PLACE_VERIFY", "4. 手动放货后俯拍位置校验"),
     ]
 
     @staticmethod
@@ -360,14 +367,15 @@ class FlowController:
     @property
     def steps(self):
         if self.is_lab_profile():
-            return self.LAB_STEPS
+            return self.LAB_FIRST_STEPS if self.is_first_round else self.LAB_REPEAT_STEPS
         return self.FIRST_STEPS if self.is_first_round else self.REPEAT_STEPS
     @property
     def current_step(self):
+        done_msg = "实验室本轮/全部完成" if self.is_lab_profile() else "全部货物装载完成"
         if self.finished:
-            return ("DONE", "实验室前两步完成" if self.is_lab_profile() else "全部货物装载完成")
+            return ("DONE", done_msg)
         if self.step_index >= len(self.steps):
-            return ("DONE", "实验室前两步完成" if self.is_lab_profile() else "全部货物装载完成")
+            return ("DONE", done_msg)
         return self.steps[self.step_index]
     @property
     def current_cargo(self): return self.queue[self.round_index] if 0 <= self.round_index < len(self.queue) else None
@@ -445,7 +453,7 @@ class FlowController:
 
     def _live_camera_force_tags(self) -> tuple[str, ...]:
         # 实验室 / 真实：这些步骤必须实拍，不允许调试预填示例图短路。
-        return ("pre_pick_offset",)
+        return ("pre_pick_offset", "lab_place_verify")
 
     def _apply_live_camera_policy(self):
         """真机：第2步等偏移检测丢掉调试预填 JPG，强制走相机实拍。"""
@@ -1028,15 +1036,19 @@ class FlowController:
         return result
 
     def _lab_sense(self):
-        """实验室第2步：相机插孔识别 ∥ 雷达底板四角；软失败，结果都展示。"""
+        """实验室第2步：相机插孔识别 ∥ 雷达底板四角；软失败，结果都展示。
+
+        后续轮次：只重跑插孔识别，复用首轮雷达车板（round_data 里预置的 radar_result / twin.corners）。
+        """
         need_pick = not self.round_data.get("pick_result", {}).get("success")
-        need_radar = not self.round_data.get("radar_result", {}).get("success")
+        # 首轮才采雷达；后续轮若已有成功雷达结果则跳过
+        need_radar = self.is_first_round and (not self.round_data.get("radar_result", {}).get("success"))
         with ThreadPoolExecutor(max_workers=1) as pool:
             fr = pool.submit(self._radar_task) if need_radar else None
             pick = self._lab_pick_recognize() if need_pick else self.round_data["pick_result"]
-            radar = fr.result() if fr else self.round_data["radar_result"]
+            radar = fr.result() if fr else (self.round_data.get("radar_result") or {"success": True, "message": "复用首轮雷达车板", "skipped": True})
 
-        if radar.get("success"):
+        if radar.get("success") and radar.get("world_points"):
             corners = {
                 pid: {"x": float(p["x"]), "y": float(p["y"]), "z": float(p["z"])}
                 for pid, p in (radar.get("world_points") or {}).items()
@@ -1050,6 +1062,7 @@ class FlowController:
                         "corner_ids": list(radar.get("corner_ids") or corners.keys()),
                     },
                 )
+                self.truck_initialized = True
 
         pick_ok = bool(pick.get("success"))
         radar_ok = bool(radar.get("success"))
@@ -1059,22 +1072,150 @@ class FlowController:
             "lab_mode": True,
             "pick": "SUCCESS" if pick_ok else "FAILED",
             "radar": "SUCCESS" if radar_ok else "FAILED",
+            "radar_skipped": bool(radar.get("skipped")) or (not need_radar),
             "pick_result": pick,
             "radar_result": radar,
             "message": (
                 "实验室感知完成：插孔与雷达四角均就绪"
-                if pick_ok and radar_ok
-                else f"实验室感知部分完成：插孔={('OK' if pick_ok else '失败')}，雷达={('OK' if radar_ok else '失败')}"
+                if pick_ok and radar_ok and need_radar
+                else (
+                    "实验室感知完成：插孔已识别（雷达复用首轮）"
+                    if pick_ok and not need_radar
+                    else f"实验室感知部分完成：插孔={('OK' if pick_ok else '失败')}，雷达={('OK' if radar_ok else '失败')}"
+                )
             ),
         }
         self.round_data["lab_sense"] = summary
+        if pick:
+            self.round_data["pick_result"] = pick
+        if radar and not radar.get("skipped"):
+            self.round_data["radar_result"] = radar
         self.twin.add_message(
             "LAB_SENSE",
             "SUCCESS" if summary["success"] else "WARNING",
             summary["message"],
-            {"pick": summary["pick"], "radar": summary["radar"]},
+            {"pick": summary["pick"], "radar": summary["radar"], "radar_skipped": summary["radar_skipped"]},
         )
         return summary
+
+    def _lab_corner_shell(self):
+        """实验室第3步：精定位/轮廓确认空壳（机械臂无法插取，仅占位）。"""
+        result = {
+            "success": True,
+            "lab_mode": True,
+            "shell_only": True,
+            "message": (
+                "实验室空壳：跳过相机精定位与轮廓确认。"
+                "请手动将托盘搬到车板目标位后，再执行第4步俯拍校验。"
+            ),
+        }
+        self.round_data["lab_corner_shell"] = result
+        self.twin.add_message("LAB_CORNER_SHELL", "SUCCESS", result["message"], result)
+        self.twin.set_phase(result["message"], self.round_index + 1)
+        return result
+
+    def _lab_overhead_pose(self) -> dict:
+        """估一个车板/货物上方的俯拍位姿（仅更新孪生，默认不写 PLC）。"""
+        truck = self.twin.snapshot().get("truck") or {}
+        corners = truck.get("corners") or {}
+        if len(corners) >= 2:
+            xs = [float(p.get("x", 0)) for p in corners.values()]
+            ys = [float(p.get("y", 0)) for p in corners.values()]
+            zs = [float(p.get("z", 0)) for p in corners.values()]
+            return {
+                "x_mm": sum(xs) / len(xs),
+                "y_mm": sum(ys) / len(ys),
+                "z_mm": max(zs) + 1800.0,
+                "roll_deg": 0.0,
+                "pitch_deg": 0.0,
+                "yaw_deg": -90.0,
+            }
+        cargo = (self.twin.snapshot().get("cargo") or {}).get("pose") or {}
+        return {
+            "x_mm": float(cargo.get("x_mm", 0) or 0),
+            "y_mm": float(cargo.get("y_mm", 0) or 0),
+            "z_mm": float(cargo.get("z_mm", 0) or 0) + 1800.0,
+            "roll_deg": 0.0,
+            "pitch_deg": 0.0,
+            "yaw_deg": float(cargo.get("yaw_deg", -90) or -90),
+        }
+
+    def _lab_place_verify(self):
+        """实验室第4步：人工搬货到车板后，臂上相机俯拍确认位置（算法暂留空）。"""
+        overhead = self._lab_overhead_pose()
+        emitter = getattr(self.robot, "command_emitter", None)
+        try:
+            if hasattr(self.robot, "command_emitter"):
+                self.robot.command_emitter = None
+            self.robot.move_tool_world("PICK_ARM", overhead, "LAB_PLACE_OVERHEAD")
+        finally:
+            if hasattr(self.robot, "command_emitter"):
+                self.robot.command_emitter = emitter
+
+        cam = self._camera_for_role("observe", "CAM_PICK")
+        if not cam:
+            cam = self._camera_for_role("pallet_hole", "CAM_PICK")
+        cap = self._capture_rgb(cam, "lab_place_verify", required=False)
+        image_path = str((cap or {}).get("image_path") or (cap or {}).get("rgb_path") or "")
+
+        # 算法未就绪：只落盘拍照结果，占位字段留给后续接入「托盘相对车板」检测。
+        algo = {
+            "success": False,
+            "pending_algorithm": True,
+            "message": "俯拍位置校验算法尚未接入（仓内无「托盘相对车板俯拍确认」专用模块），仅保留照片",
+        }
+        result = {
+            "success": bool((cap or {}).get("success") and image_path),
+            "continue_anyway": True,
+            "lab_mode": True,
+            "manual_place": True,
+            "capture": deepcopy(cap) if isinstance(cap, Mapping) else cap,
+            "image_path": image_path,
+            "overhead_pose": overhead,
+            "algorithm": algo,
+            "message": (
+                f"已俯拍：{image_path}（算法待接入，请人工确认托盘落点）"
+                if image_path
+                else f"俯拍失败：{(cap or {}).get('message') or '无图像'}（已记录，可继续下一托）"
+            ),
+        }
+        if result["success"]:
+            # 实验室：标记本托已“放置”（人工搬上），便于下一轮切换货物
+            cargo = deepcopy(self.twin.snapshot().get("cargo") or {})
+            if cargo:
+                cargo["status"] = "PLACED_MANUAL_LAB"
+                cargo["attached_to"] = None
+                self.twin.set_cargo(cargo)
+        self.round_data["lab_place_verify"] = result
+        status = "SUCCESS" if result.get("success") else "WARNING"
+        self.twin.add_message("LAB_PLACE_VERIFY", status, result["message"], result)
+        self.plc.send_message("LAB_PLACE_VERIFY", status, result["message"], result)
+        return result
+
+    def _advance_lab_round(self):
+        """实验室一轮结束：进入下一托；雷达车板结果带到下一轮 round_data。"""
+        self.completed.append(deepcopy(self.round_data))
+        preserved_radar = None
+        for item in reversed(self.completed):
+            radar = item.get("radar_result")
+            if isinstance(radar, Mapping) and radar.get("success") and radar.get("world_points"):
+                preserved_radar = deepcopy(radar)
+                break
+        self.round_index += 1
+        self.step_index = 0
+        self.round_data = {}
+        if preserved_radar:
+            self.round_data["radar_result"] = preserved_radar
+        if self.round_index >= len(self.queue):
+            self.finished = True
+            self.running = False
+            self.twin.set_phase("实验室全部托盘流程完成", self.round_index)
+            if self.loading_session_id:
+                self.vehicle_db.finish_session(self.loading_session_id, "COMPLETED")
+            return {"finished": True}
+        self._load_cargo_to_twin()
+        self.twin.set_phase(self.current_step[1], self.round_index + 1)
+        return {"finished": False, "next_round": self.round_index + 1}
 
     def _parallel_locate(self):
         need_pick=not self.round_data.get("pick_result",{}).get("success")
@@ -1584,6 +1725,22 @@ class FlowController:
         try:
             if code=="DEVICE_CHECK": data=self._device_check()
             elif code=="LAB_SENSE": data=self._lab_sense()
+            elif code=="LAB_CORNER_SHELL": data=self._lab_corner_shell()
+            elif code=="LAB_PLACE_VERIFY":
+                data=self._lab_place_verify()
+                soft_ok=bool((data or {}).get("success"))
+                self._record(
+                    code,
+                    name,
+                    "success" if soft_ok else "warning",
+                    str((data or {}).get("message") or name),
+                    data,
+                )
+                advance=self._advance_lab_round()
+                self._persist_database_snapshot()
+                self.twin.set_alarm(None)
+                self._save()
+                return self.snapshot()
             elif code=="PRE_PICK_OFFSET": data=self._pre_pick_offset()
             elif code=="PARALLEL_LOCATE": data=self._parallel_locate()
             elif code=="PICK_ONLY":
@@ -1627,6 +1784,8 @@ class FlowController:
                 if not soft_ok:
                     rec_status="warning"
                     rec_message=str((data or {}).get("message") or name)
+            elif code=="LAB_CORNER_SHELL":
+                pass
             elif code=="PRE_PICK_OFFSET":
                 # 拍照/识别失败也继续；总体结果用 warning 标出来。
                 soft_ok=bool((data or {}).get("capture_success") and (data or {}).get("should_fork"))
@@ -1635,12 +1794,7 @@ class FlowController:
                     rec_message=str((data or {}).get("message") or name)
             self._record(code,name,rec_status,rec_message,data); self.step_index+=1
             self.twin.set_alarm(None)
-            if self.is_lab_profile() and self.step_index >= len(self.steps):
-                self.finished = True
-                self.running = False
-                self.twin.set_phase("实验室前两步完成", self.round_index + 1)
-            else:
-                self.twin.set_phase(self.current_step[1],self.round_index+1)
+            self.twin.set_phase(self.current_step[1],self.round_index+1)
         except Exception as exc:
             self._record(code,name,"failed",str(exc),{"error":str(exc),"parallel":deepcopy(self.twin.snapshot().get("parallel"))}); self.twin.set_alarm(str(exc)); raise
         self._save(); return self.snapshot()
