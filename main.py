@@ -12,6 +12,11 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+# Embeddable runtime uses pythonXY._pth (isolated): "." is runtime\, not cwd.
+# Ensure project packages (ui/, controllers/, ...) are always importable.
+_project_root = str(PROJECT_ROOT)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 RUNTIME_PYTHON = PROJECT_ROOT / "runtime" / "python.exe"
 STARTUP_LOG = PROJECT_ROOT / "logs" / "startup.log"
 FAULT_LOG = PROJECT_ROOT / "logs" / "startup_fault.log"

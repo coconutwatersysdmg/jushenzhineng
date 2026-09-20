@@ -162,9 +162,9 @@ class FlowController:
         self.set_debug_inputs(self.module_evidence.example_debug_inputs())
         self.twin.add_message("MODULE_INPUTS", "INFO", "联调输入源已就绪；模型输入/输出只在流程到达并完成调用后显示", {"module_count":len(self.module_evidence.snapshot())})
         self.twin.add_message(
-            "PLC_CONSOLE",
+            "PLC_MOTION",
             "INFO",
-            "主流程运动指令改为发布 JSON；真机写入请启动独立模块 plc_console（可勾选自动下发）",
+            "运动坐标确认后优先经主系统已连接的 PLC 直接写轴；独立 plc_console 仅作备用通道",
             {"server": "jushenzhineng-plc-console"},
         )
 
@@ -179,9 +179,105 @@ class FlowController:
     def set_auto_push_plc(self, enabled: bool) -> None:
         self.auto_push_plc_commands = bool(enabled)
 
+    def _resolve_motion_xyzr(self, cmd: Mapping[str, Any]) -> dict[str, float]:
+        raw = cmd.get("gantry_xyzr")
+        if isinstance(raw, Mapping) and all(k in raw for k in ("X", "Y", "Z", "R")):
+            return {k: float(raw[k]) for k in ("X", "Y", "Z", "R")}
+        from devices.world_to_gantry import WorldToGantryError, transform_world_to_gantry
+
+        mapping = dict(getattr(self.robot, "world_to_gantry", None) or {})
+        if not mapping:
+            from config.external_devices_config import GANTRY
+
+            mapping = dict((GANTRY or {}).get("world_to_gantry") or {})
+        try:
+            return transform_world_to_gantry(cmd.get("world_pose") or {}, mapping)
+        except WorldToGantryError as exc:
+            raise RuntimeError(f"无法换算 XYZR：{exc}") from exc
+
+    def _execute_motion_on_local_plc(self, cmd: Mapping[str, Any]) -> dict[str, Any] | None:
+        """主系统 PLC 已连接时直接写轴；无法本地执行时返回 None（交由控制台备用通道）。"""
+        plc = self.plc
+        if not getattr(plc, "connected", False):
+            return None
+
+        try:
+            targets = self._resolve_motion_xyzr(cmd)
+        except Exception as exc:
+            return {
+                "success": False,
+                "message": str(exc),
+                "cmd_id": cmd.get("cmd_id"),
+                "channel": "local_plc",
+            }
+
+        try:
+            from config.external_devices_config import GANTRY
+        except Exception:
+            GANTRY = {}
+        speed = float(cmd.get("speed") or (GANTRY or {}).get("default_speed") or 30.0)
+        timeout_s = float((GANTRY or {}).get("move_timeout_s") or 60.0)
+        soft_limits = dict((GANTRY or {}).get("soft_limits") or {})
+
+        if hasattr(plc, "move_absolute_xyzr"):
+            result = plc.move_absolute_xyzr(
+                targets,
+                speed=speed,
+                timeout_s=timeout_s,
+                soft_limits=soft_limits or None,
+            )
+            return {
+                "success": bool(result.get("success")),
+                "accepted": bool(result.get("success")),
+                "message": str(
+                    result.get("message")
+                    or ("本地 PLC 绝对定位完成" if result.get("success") else "本地 PLC 写轴失败")
+                ),
+                "cmd_id": cmd.get("cmd_id"),
+                "channel": "local_plc",
+                "targets": targets,
+                "result": result,
+            }
+
+        # mock / 仅状态通道：记账成功，不强制依赖独立控制台
+        if hasattr(plc, "send_command"):
+            plc.send_command(
+                "MOVE_ABSOLUTE_XYZR",
+                {"targets": targets, "speed": speed, "cmd_id": cmd.get("cmd_id")},
+            )
+        return {
+            "success": True,
+            "accepted": True,
+            "message": f"已记账下发（当前 PLC 适配器无真机写轴）：{targets}",
+            "cmd_id": cmd.get("cmd_id"),
+            "channel": "local_plc_bookkeeping",
+            "targets": targets,
+        }
+
     def push_last_plc_command(self) -> dict:
-        """手动确认下发：推送最近一条运动指令到 plc_console。"""
-        return self.plc_publisher.push()
+        """确认下发：优先经主系统已连接 PLC 直接写轴；否则再尝试独立 plc_console。"""
+        cmd = self.plc_publisher.last_command
+        if not cmd:
+            return {"success": False, "message": "没有可下发的运动指令"}
+
+        local = self._execute_motion_on_local_plc(cmd)
+        if local is not None:
+            return local
+
+        remote = self.plc_publisher.push(cmd)
+        if remote.get("success"):
+            return {**remote, "channel": "plc_console"}
+        return {
+            "success": False,
+            "message": (
+                "主系统 PLC 未连接，且独立控制台不可用："
+                f"{remote.get('message') or '未知错误'}。"
+                "请先完成设备检查中的 PLC 连接，或启动 plc_console 作为备用。"
+            ),
+            "cmd_id": cmd.get("cmd_id"),
+            "channel": "none",
+            "console": remote,
+        }
 
     def _on_robot_motion_command(self, payload: dict):
         """机器人适配器终点回调：落盘 + 通知 UI；按开关决定是否实时推送。"""

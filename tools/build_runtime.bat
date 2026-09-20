@@ -106,12 +106,13 @@ if not exist "%RUNTIME_DIR%\python.exe" (
   exit /b 1
 )
 
-REM Embed disables site-packages by default; enable pip installs.
+REM Embed ._pth is isolated: "." = runtime\, ".." = project root (for ui/ etc).
 set "PTH_FILE=%RUNTIME_DIR%\python%PY_MAJOR_MINOR%._pth"
-echo [INFO] Enabling site-packages in %PTH_FILE%
+echo [INFO] Enabling site-packages + project root in %PTH_FILE%
 > "%PTH_FILE%" (
   echo python%PY_MAJOR_MINOR%.zip
   echo .
+  echo ..
   echo Lib\site-packages
   echo import site
 )

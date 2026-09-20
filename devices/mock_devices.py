@@ -42,6 +42,18 @@ class MockPLCAdapter(PLCAdapter):
         self.twin.add_message(module, status, message, data)
         return {"success": True, "module": module, "status": status, "message": message, "data": data}
 
+    def move_absolute_xyzr(
+        self,
+        targets,
+        speed: float = 30.0,
+        timeout_s: float = 60.0,
+        soft_limits=None,
+    ) -> dict:
+        payload = {"targets": dict(targets or {}), "speed": float(speed), "timeout_s": float(timeout_s)}
+        self.twin.update_device("PLC", task="ABS_MOVE_MOCK")
+        self.twin.add_message("PLC", "SUCCESS", f"模拟绝对定位 {payload['targets']}", payload)
+        return {"success": True, "message": f"模拟绝对定位完成：{payload['targets']}", **payload}
+
 
 class MockRobotAdapter(RobotAdapter):
     def __init__(self, twin: DigitalTwinState, plc: PLCAdapter, config: dict | None = None):

@@ -194,8 +194,8 @@ class MainWindow(QMainWindow):
         self.plc_panel_btn=QPushButton("PLC 运动…")
         self.plc_panel_btn.setToolTip("打开弹出窗口：查看输出坐标、确认下发、启动 PLC 控制台")
         self.plc_panel_btn.clicked.connect(self._show_plc_dialog)
-        self.auto_push_cb=QCheckBox("自动运行时自动下发到 PLC 控制台")
-        self.auto_push_cb.setToolTip("勾选且处于自动运行时，算出坐标后实时推送。逐步执行请在「PLC 运动…」里确认下发。")
+        self.auto_push_cb=QCheckBox("自动运行时自动下发到 PLC")
+        self.auto_push_cb.setToolTip("勾选且处于自动运行时，算出坐标后经已连接的 PLC 直接写轴。逐步执行请在弹窗里确认下发。")
         self.auto_push_cb.toggled.connect(lambda _=False: self._sync_auto_push_policy())
         for b in (self.next_btn,self.auto_btn,dbg,reset,self.plc_panel_btn): controls.addWidget(b)
         controls.addWidget(self.auto_push_cb)
@@ -751,15 +751,23 @@ class MainWindow(QMainWindow):
         total = len(batch or [])
         if total <= 0:
             return {"success": False, "message": "没有可下发的运动坐标"}
-        for index, cmd in enumerate(batch, 1):
-            self.controller.plc_publisher.last_command = cmd
-            result = self.controller.push_last_plc_command()
-            if not result.get("success"):
-                return {
-                    "success": False,
-                    "message": f"第 {index}/{total} 段推送失败：{result.get('message') or '未知错误'}",
-                }
-        return {"success": True, "message": f"已按顺序推送 {total} 段"}
+        from PySide6.QtGui import QGuiApplication, QCursor
+        from PySide6.QtCore import Qt as _Qt
+
+        QGuiApplication.setOverrideCursor(QCursor(_Qt.CursorShape.WaitCursor))
+        try:
+            for index, cmd in enumerate(batch, 1):
+                self.controller.plc_publisher.last_command = cmd
+                result = self.controller.push_last_plc_command()
+                if not result.get("success"):
+                    return {
+                        "success": False,
+                        "message": f"第 {index}/{total} 段下发失败：{result.get('message') or '未知错误'}",
+                    }
+            channel = (result or {}).get("channel") or "local_plc"
+            return {"success": True, "message": f"已按顺序下发 {total} 段（{channel}）", "channel": channel}
+        finally:
+            QGuiApplication.restoreOverrideCursor()
 
     def _confirm_push_plc(self):
         batch = self._latest_plc_batch or ([self._latest_plc_cmd] if self._latest_plc_cmd else [])

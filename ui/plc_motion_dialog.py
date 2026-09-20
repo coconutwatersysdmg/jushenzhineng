@@ -258,7 +258,8 @@ class PlcMotionDialog(QDialog):
         self.confirm_btn.setObjectName("primaryBtn")
         self.confirm_btn.setEnabled(False)
         self.confirm_btn.clicked.connect(self._confirm)
-        self.open_console_btn = QPushButton("打开 PLC 控制台")
+        self.open_console_btn = QPushButton("备用：打开控制台")
+        self.open_console_btn.setToolTip("主系统 PLC 已连接时可直接下发，无需打开。仅在本地通道不可用时作备用。")
         self.open_console_btn.clicked.connect(self._open_console)
         self.close_btn = QPushButton("跳过下发并关闭")
         self.close_btn.clicked.connect(self.dismiss)
@@ -358,8 +359,8 @@ class PlcMotionDialog(QDialog):
             self.push_status.setText(f"下发状态：已确认推送 · {result.get('message', 'OK')}")
             self._end_blocking(emit_resolved=True, skip_remaining=False)
         else:
-            self.push_status.setText(f"下发状态：推送失败 · {result.get('message', '')}")
-            QMessageBox.warning(self, "推送失败", result.get("message") or "PLC 控制台未连接")
+            self.push_status.setText(f"下发状态：下发失败 · {result.get('message', '')}")
+            QMessageBox.warning(self, "下发失败", result.get("message") or "PLC 未连接或写轴失败")
 
     def _open_console(self) -> None:
         python = PROJECT_ROOT / "runtime" / "python.exe"
@@ -370,7 +371,7 @@ class PlcMotionDialog(QDialog):
                 cwd=str(PROJECT_ROOT),
                 env={**os.environ, "PYTHONUTF8": "1"},
             )
-            self.push_status.setText("下发状态：已尝试启动 plc_console（请在本窗确认或跳过）")
+            self.push_status.setText("下发状态：已尝试启动备用控制台（主系统 PLC 已连时可直接点确认下发）")
         except Exception as exc:
             QMessageBox.warning(self, "启动失败", str(exc))
 
