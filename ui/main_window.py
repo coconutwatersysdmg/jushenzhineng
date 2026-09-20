@@ -49,8 +49,12 @@ class MainWindow(QMainWindow):
         (11,"反馈 PLC / 空间管理"),
         (12,"机械臂返回 / 下一轮"),
     ]
+    LAB_FLOW_STAGES = [
+        (1, "设备连接检查"),
+        (2, "相机插孔识别 ∥ 雷达四角粗定位"),
+    ]
     STEP_STAGE = {
-        "DEVICE_CHECK":1,"PRE_PICK_OFFSET":2,"PARALLEL_LOCATE":3,"PICK_ONLY":3,"RADAR_TO_CAMERA":4,
+        "DEVICE_CHECK":1,"LAB_SENSE":2,"PRE_PICK_OFFSET":2,"PARALLEL_LOCATE":3,"PICK_ONLY":3,"RADAR_TO_CAMERA":4,
         "CAPTURE_CORNERS":5,"CORNER_RECOGNITION":6,"CAMERA_TO_WORLD":7,
         "INITIAL_SPACE_PLAN":8,"NEIGHBOR_POSE":8,"TARGET_CONFIRM":8,"PRE_PLACE_MONITOR":9,"PLACE":9,
         "POST_PLACE_BOTTOM":10,"POST_REGION":10,"POST_CARGO_OFFSET":10,"FEEDBACK":11,"RETURN":12,"DONE":12,
@@ -76,7 +80,7 @@ class MainWindow(QMainWindow):
         screen=self.screen().availableGeometry()
         self.resize(min(1920,max(1080,int(screen.width()*0.94))),min(1120,max(700,int(screen.height()*0.92))))
         self.setMinimumSize(1024,680)
-        self._build(); self._ensure_plc_dialog(); self._load_plan(); self._refresh(); self._sync_auto_push_policy()
+        self._build(); self._ensure_plc_dialog(); self._load_plan(); self._apply_ui_mode(); self._refresh(); self._sync_auto_push_policy()
 
     def _card(self,title):
         f=QFrame(); f.setObjectName("card"); l=QVBoxLayout(f); l.setContentsMargins(9,8,9,8)
@@ -158,6 +162,7 @@ class MainWindow(QMainWindow):
         lay.addLayout(device_strip)
 
         f,l,self.flow_toggle=self._collapsible_card("流程链路",expanded=True)
+        self.field_flow_card=f
         self.flow_nodes=[]
         for row_index,stage_row in enumerate((self.FLOW_STAGES[:6],self.FLOW_STAGES[6:])):
             row=QHBoxLayout(); row.setSpacing(5)
@@ -169,6 +174,20 @@ class MainWindow(QMainWindow):
             l.addLayout(row)
         lay.addWidget(f,0)
 
+        lab_flow,lab_flow_l,self.lab_flow_toggle=self._collapsible_card("实验室流程（前两步）",expanded=True)
+        self.lab_flow_card=lab_flow
+        self.lab_flow_nodes=[]
+        lab_row=QHBoxLayout(); lab_row.setSpacing(5)
+        for index,(number,title_text) in enumerate(self.LAB_FLOW_STAGES):
+            node=QLabel(f"{number}. {title_text}"); node.setAlignment(Qt.AlignmentFlag.AlignCenter); node.setWordWrap(True)
+            node.setMinimumHeight(42); node.setToolTip(f"实验室步骤 {number}：{title_text}")
+            lab_row.addWidget(node,1); self.lab_flow_nodes.append(node)
+            if index < len(self.LAB_FLOW_STAGES)-1:
+                arrow=QLabel("→"); arrow.setAlignment(Qt.AlignmentFlag.AlignCenter); arrow.setStyleSheet("color:#527a96;font-size:16px"); lab_row.addWidget(arrow,0)
+        lab_flow_l.addLayout(lab_row)
+        lab_flow.setVisible(False)
+        lay.addWidget(lab_flow,0)
+
         self.body_splitter=QSplitter(Qt.Orientation.Vertical); self.body_splitter.setChildrenCollapsible(False); lay.addWidget(self.body_splitter,1)
         main=QSplitter(Qt.Orientation.Horizontal); main.setChildrenCollapsible(False); self.body_splitter.addWidget(main); self.main_splitter=main
         left=QWidget(); ll=QVBoxLayout(left); ll.setContentsMargins(0,0,0,0); ll.setSpacing(8); main.addWidget(left)
@@ -178,9 +197,11 @@ class MainWindow(QMainWindow):
         main.setSizes([320,820,480])
 
         f,l,_=self._collapsible_card("货物 / 托盘实时数据",expanded=True)
+        self.cargo_card=f
         self.cargo_table=QTableWidget(0,2); self.cargo_table.setHorizontalHeaderLabels(["字段","值"]); self.cargo_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.cargo_table); ll.addWidget(f,1)
 
         f,l,_=self._collapsible_card("车辆 / 相机最终车板 WORLD 数据",expanded=True)
+        self.truck_card=f
         self.truck_table=QTableWidget(0,2); self.truck_table.setHorizontalHeaderLabels(["字段","值"]); self.truck_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.truck_table)
         self.corner_table=QTableWidget(0,4); self.corner_table.setHorizontalHeaderLabels(["角点","X","Y","Z"]); self.corner_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.corner_table); ll.addWidget(f,2)
 
@@ -190,18 +211,19 @@ class MainWindow(QMainWindow):
         controls=QHBoxLayout()
         self.next_btn=QPushButton("执行下一步"); self.next_btn.setObjectName("primary"); self.next_btn.clicked.connect(self._next)
         self.auto_btn=QPushButton("自动运行"); self.auto_btn.clicked.connect(self._auto)
-        dbg=QPushButton("调试输入"); dbg.clicked.connect(self._debug); reset=QPushButton("重置"); reset.clicked.connect(self._reset)
+        self.debug_btn=QPushButton("调试输入"); self.debug_btn.clicked.connect(self._debug); reset=QPushButton("重置"); reset.clicked.connect(self._reset)
         self.plc_panel_btn=QPushButton("PLC 运动…")
         self.plc_panel_btn.setToolTip("打开弹出窗口：查看输出坐标、确认下发、启动 PLC 控制台")
         self.plc_panel_btn.clicked.connect(self._show_plc_dialog)
         self.auto_push_cb=QCheckBox("自动运行时自动下发到 PLC")
         self.auto_push_cb.setToolTip("勾选且处于自动运行时，算出坐标后经已连接的 PLC 直接写轴。逐步执行请在弹窗里确认下发。")
         self.auto_push_cb.toggled.connect(lambda _=False: self._sync_auto_push_policy())
-        for b in (self.next_btn,self.auto_btn,dbg,reset,self.plc_panel_btn): controls.addWidget(b)
+        for b in (self.next_btn,self.auto_btn,self.debug_btn,reset,self.plc_panel_btn): controls.addWidget(b)
         controls.addWidget(self.auto_push_cb)
         controls.addStretch(1); cl.addLayout(controls)
 
         self.right_tabs=QTabWidget(); rl.addWidget(self.right_tabs,1)
+        self.field_right_panel=self.right_tabs
         device_page=QWidget(); device_layout=QVBoxLayout(device_page); device_layout.setContentsMargins(5,5,5,5); device_layout.setSpacing(7)
         space_page=QWidget(); space_layout=QVBoxLayout(space_page); space_layout.setContentsMargins(5,5,5,5)
 
@@ -261,6 +283,31 @@ class MainWindow(QMainWindow):
         io_splitter.setSizes([500,500]); module_layout.addWidget(io_splitter,5)
         self.right_tabs.addTab(module_page,"模型输入/输出")
         self._module_rows=[]; self._selected_module_id=""; self._latest_module_id=""
+
+        # 实验室右侧：相机照片 + 插孔坐标 + 雷达四角
+        self.lab_right_panel=QWidget()
+        lab_rl=QVBoxLayout(self.lab_right_panel); lab_rl.setContentsMargins(0,0,0,0); lab_rl.setSpacing(8)
+        cam_card,cam_l,_=self._collapsible_card("相机照片 / 插孔坐标",expanded=True)
+        self.lab_camera_preview=QLabel("第 2 步执行后显示托盘/插孔识别图")
+        self.lab_camera_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lab_camera_preview.setMinimumHeight(220)
+        self.lab_camera_preview.setStyleSheet("background:#06101d;border:1px solid #244b72;color:#6f8ca5")
+        cam_l.addWidget(self.lab_camera_preview,3)
+        self.lab_hole_table=QTableWidget(0,4)
+        self.lab_hole_table.setHorizontalHeaderLabels(["插孔","X(mm)","Y(mm)","Z(mm)"])
+        self.lab_hole_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.lab_hole_table.setMaximumHeight(120)
+        cam_l.addWidget(self.lab_hole_table,1)
+        lab_rl.addWidget(cam_card,3)
+
+        radar_card,radar_l,_=self._collapsible_card("雷达底板四角点（WORLD / mm）",expanded=True)
+        self.lab_radar_table=QTableWidget(0,4)
+        self.lab_radar_table.setHorizontalHeaderLabels(["角点","X","Y","Z"])
+        self.lab_radar_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        radar_l.addWidget(self.lab_radar_table,1)
+        lab_rl.addWidget(radar_card,2)
+        self.lab_right_panel.setVisible(False)
+        rl.addWidget(self.lab_right_panel,1)
 
         bottom=QSplitter(Qt.Orientation.Horizontal); bottom.setChildrenCollapsible(False); self.body_splitter.addWidget(bottom)
         f,l,_=self._collapsible_card("运行日志 / 报警",expanded=True); self.logs=QTextEdit(); self.logs.setReadOnly(True); self.logs.setMinimumHeight(110); l.addWidget(self.logs); bottom.addWidget(f)
@@ -355,7 +402,32 @@ class MainWindow(QMainWindow):
             f"已切换运行模式：{applied.get('title')}（{applied.get('id')}）",
             applied.get("switches") or {},
         )
+        self._apply_ui_mode()
         self._refresh()
+
+    def _is_lab_ui(self) -> bool:
+        return str(feature_switches.RUN_PROFILE or "").strip().lower() == "lab"
+
+    def _apply_ui_mode(self) -> None:
+        lab = self._is_lab_ui()
+        if hasattr(self, "field_flow_card"):
+            self.field_flow_card.setVisible(not lab)
+        if hasattr(self, "lab_flow_card"):
+            self.lab_flow_card.setVisible(lab)
+        if hasattr(self, "truck_card"):
+            self.truck_card.setVisible(not lab)
+        if hasattr(self, "field_right_panel"):
+            self.field_right_panel.setVisible(not lab)
+        if hasattr(self, "lab_right_panel"):
+            self.lab_right_panel.setVisible(lab)
+        if hasattr(self, "debug_btn"):
+            self.debug_btn.setVisible(not lab)
+        title = "实验室装载测试 · 设备检查 / 插孔+雷达粗定位" if lab else "具身智能装载数字孪生 · 单机械臂携货 / 挂载相机角点识别"
+        self.setWindowTitle(title)
+        if lab and hasattr(self, "main_splitter"):
+            self.main_splitter.setSizes([280, 780, 420])
+        elif hasattr(self, "main_splitter"):
+            self.main_splitter.setSizes([320, 820, 480])
 
     @staticmethod
     def _first_image(value):
@@ -770,6 +842,12 @@ class MainWindow(QMainWindow):
             QGuiApplication.restoreOverrideCursor()
 
     def _confirm_push_plc(self):
+        if self.plc_dialog is not None and getattr(self.plc_dialog, "_latest_cmds", None):
+            batch = [dict(item) for item in self.plc_dialog._latest_cmds if item]
+            if batch:
+                self._latest_plc_batch = batch
+                self._latest_plc_cmd = batch[0]
+                return self._push_plc_batch(batch)
         batch = self._latest_plc_batch or ([self._latest_plc_cmd] if self._latest_plc_cmd else [])
         if not batch:
             return {"success": False, "message": "当前没有可下发的运动坐标"}
@@ -792,15 +870,20 @@ class MainWindow(QMainWindow):
     def _refresh_flow_chain(self,s):
         # DONE=已跑完；RUN=本点击正在执行的那一格；WAIT=等待用户点「执行下一步」或尚未轮到
         # 注意：execute_next 结束后 step_code 已指向「下一格」，不能用它+busy 画 RUN，否则会误亮下一格。
+        lab = self._is_lab_ui()
+        stages = self.LAB_FLOW_STAGES if lab else self.FLOW_STAGES
+        nodes = self.lab_flow_nodes if lab else self.flow_nodes
         if s.get("finished"):
-            current_stage=13
+            current_stage = 3 if lab else 13
         elif not s.get("running") and not s.get("results"):
             current_stage=0
         else:
             current_stage=self.STEP_STAGE.get(s.get("step_code"),1)
-        skipped={4,5,6,7} if not s.get("first_round") else set()
+            if lab and s.get("step_code") == "DONE":
+                current_stage = 3
+        skipped=set() if lab else ({4,5,6,7} if not s.get("first_round") else set())
         running=int(self._running_stage or 0) if self._step_busy else 0
-        for (number,title_text),node in zip(self.FLOW_STAGES,self.flow_nodes):
+        for (number,title_text),node in zip(stages, nodes):
             if number in skipped:
                 status="SKIP"; bg="#172535"; border="#344b5e"; color="#7990a1"
             elif running and number == running:
@@ -824,68 +907,136 @@ class MainWindow(QMainWindow):
 
     def _refresh(self,s=None):
         s=s or self.controller.snapshot(); t=s["twin"]; self.bridge.update_state(t); self._refresh_flow_chain(s)
-        self.phase.setText(f"第 {s['round']} 轮 · {'首轮建图' if s['first_round'] else '循环装载（跳过雷达/角点）'} · {s['step_name']}"); self.progress.setText(f"{s['completed']} / {s['total']}")
+        lab = self._is_lab_ui()
+        mode_text = "实验室前两步" if lab else ("首轮建图" if s["first_round"] else "循环装载（跳过雷达/角点）")
+        self.phase.setText(f"第 {s['round']} 轮 · {mode_text} · {s['step_name']}"); self.progress.setText(f"{s['completed']} / {s['total']}")
         rd=s.get("round_data") or {}; cargo=t.get("cargo") or {}; p=cargo.get("pose") or {}; truck=t.get("truck") or {}; target=truck.get("current_target") or {}; tp=target.get("final_world_pose") or {}; fb=t.get("feedback_compensation_mm") or {}
-        self._fill_kv(self.cargo_table,[
-            ("货物编号",cargo.get("instance_id") or cargo.get("cargo_code","-")),("名称",cargo.get("cargo_name","-")),("状态",cargo.get("status","-")),
-            ("随动绑定",cargo.get("attached_to") or "已释放 / 未插取"),
-            ("尺寸 mm",f"{cargo.get('length_mm','-')} × {cargo.get('width_mm','-')} × {cargo.get('height_mm','-')}"),("当前 WORLD XYZ",f"{p.get('x_mm','-')}, {p.get('y_mm','-')}, {p.get('z_mm','-')}"),
-            ("目标盲码",target.get("blind_code","-")),("目标 WORLD XYZ",f"{tp.get('x_mm','-')}, {tp.get('y_mm','-')}, {tp.get('z_mm','-')}"),
-            ("步骤2 偏移%",(rd.get("pre_pick_offset") or {}).get("overhang_percent","-")),
-            ("放置前动态监测",json.dumps({k:(rd.get("pre_place_monitor") or {}).get(k) for k in ("corner_xyz_m","offset_deg")},ensure_ascii=False)),
-            ("放置后底层托盘",json.dumps({k:(rd.get("post_place_bottom_pallet") or {}).get(k) for k in ("corner_xyz_m","offset_deg")},ensure_ascii=False)),
-            ("10.1 区域偏差",json.dumps(((rd.get("post_region") or {}).get("region_deviation") or {}).get("next_pallet_compensation_world_mm",{}),ensure_ascii=False)),
-            ("10.2 货物/托盘偏移mm",(rd.get("post_cargo_offset") or {}).get("offset_distance_mm","-")),
-            ("下一托盘 WORLD 反馈",json.dumps(fb,ensure_ascii=False)),
-        ])
-        trp=truck.get("pose") or {}; geom=truck.get("camera_board_geometry") or {}
-        self._fill_kv(self.truck_table,[
-            ("车辆编号",truck.get("truck_id")),("坐标系","world / mm；X右 Y车辆前进 Z向上"),("车辆 XYZ",f"{trp.get('x_mm')}, {trp.get('y_mm')}, {trp.get('z_mm')}"),
-            ("车辆 RPY",f"{trp.get('roll_deg')}, {trp.get('pitch_deg')}, {trp.get('yaw_deg')}"),("车板类型",truck.get("board_mode")),
-            ("板型判断来源",geom.get("decision_source","-")),("相机最终角点数",len(truck.get("corners") or {})),("高低差 mm",geom.get("height_difference_mm","-")),
-            ("可用区域",len(truck.get("available") or [])),("已占用区域",len(truck.get("occupied") or [])),("借位规划",json.dumps(geom.get("borrow_plan"),ensure_ascii=False)),
-        ])
-        corners=truck.get("corners") or {}; self.corner_table.setRowCount(0)
-        for pid in sorted(corners,key=lambda x:int(x[1:]) if x[1:].isdigit() else 999):
-            q=corners[pid]; r=self.corner_table.rowCount(); self.corner_table.insertRow(r)
-            for c,val in enumerate([pid,q.get("x"),q.get("y"),q.get("z")]): self.corner_table.setItem(r,c,QTableWidgetItem(str(val)))
+        hole=((rd.get("pick_result") or {}).get("hole_result") or {})
+        if lab:
+            self._fill_kv(self.cargo_table,[
+                ("货物编号",cargo.get("instance_id") or cargo.get("cargo_code","-")),
+                ("名称",cargo.get("cargo_name","-")),
+                ("状态",cargo.get("status","-")),
+                ("尺寸 mm",f"{cargo.get('length_mm','-')} × {cargo.get('width_mm','-')} × {cargo.get('height_mm','-')}"),
+                ("当前 WORLD XYZ",f"{p.get('x_mm','-')}, {p.get('y_mm','-')}, {p.get('z_mm','-')}"),
+                ("插孔识别", (rd.get("pick_result") or {}).get("message","等待第2步")),
+                ("雷达粗定位", (rd.get("radar_result") or {}).get("message","等待第2步")),
+            ])
+            self._refresh_lab_sense_panels(rd, hole, truck)
+        else:
+            self._fill_kv(self.cargo_table,[
+                ("货物编号",cargo.get("instance_id") or cargo.get("cargo_code","-")),("名称",cargo.get("cargo_name","-")),("状态",cargo.get("status","-")),
+                ("随动绑定",cargo.get("attached_to") or "已释放 / 未插取"),
+                ("尺寸 mm",f"{cargo.get('length_mm','-')} × {cargo.get('width_mm','-')} × {cargo.get('height_mm','-')}"),("当前 WORLD XYZ",f"{p.get('x_mm','-')}, {p.get('y_mm','-')}, {p.get('z_mm','-')}"),
+                ("目标盲码",target.get("blind_code","-")),("目标 WORLD XYZ",f"{tp.get('x_mm','-')}, {tp.get('y_mm','-')}, {tp.get('z_mm','-')}"),
+                ("步骤2 偏移%",(rd.get("pre_pick_offset") or {}).get("overhang_percent","-")),
+                ("放置前动态监测",json.dumps({k:(rd.get("pre_place_monitor") or {}).get(k) for k in ("corner_xyz_m","offset_deg")},ensure_ascii=False)),
+                ("放置后底层托盘",json.dumps({k:(rd.get("post_place_bottom_pallet") or {}).get(k) for k in ("corner_xyz_m","offset_deg")},ensure_ascii=False)),
+                ("10.1 区域偏差",json.dumps(((rd.get("post_region") or {}).get("region_deviation") or {}).get("next_pallet_compensation_world_mm",{}),ensure_ascii=False)),
+                ("10.2 货物/托盘偏移mm",(rd.get("post_cargo_offset") or {}).get("offset_distance_mm","-")),
+                ("下一托盘 WORLD 反馈",json.dumps(fb,ensure_ascii=False)),
+            ])
+            trp=truck.get("pose") or {}; geom=truck.get("camera_board_geometry") or {}
+            self._fill_kv(self.truck_table,[
+                ("车辆编号",truck.get("truck_id")),("坐标系","world / mm；X右 Y车辆前进 Z向上"),("车辆 XYZ",f"{trp.get('x_mm')}, {trp.get('y_mm')}, {trp.get('z_mm')}"),
+                ("车辆 RPY",f"{trp.get('roll_deg')}, {trp.get('pitch_deg')}, {trp.get('yaw_deg')}"),("车板类型",truck.get("board_mode")),
+                ("板型判断来源",geom.get("decision_source","-")),("相机最终角点数",len(truck.get("corners") or {})),("高低差 mm",geom.get("height_difference_mm","-")),
+                ("可用区域",len(truck.get("available") or [])),("已占用区域",len(truck.get("occupied") or [])),("借位规划",json.dumps(geom.get("borrow_plan"),ensure_ascii=False)),
+            ])
+            corners=truck.get("corners") or {}; self.corner_table.setRowCount(0)
+            for pid in sorted(corners,key=lambda x:int(x[1:]) if x[1:].isdigit() else 999):
+                q=corners[pid]; r=self.corner_table.rowCount(); self.corner_table.insertRow(r)
+                for c,val in enumerate([pid,q.get("x"),q.get("y"),q.get("z")]): self.corner_table.setItem(r,c,QTableWidgetItem(str(val)))
 
-        self.device_table.setRowCount(0); rows=[]
-        compact=self.width()<1500
-        for column in (1,2,5): self.device_table.setColumnHidden(column,compact)
-        for did,d in (t.get("devices") or {}).items(): rows.append((did,d.get("kind"),"-",d.get("status"),d.get("pose") or {},d.get("task","-")))
-        for cid,c in (t.get("cameras") or {}).items(): rows.append((cid,"arm_camera",c.get("parent_robot_id"),c.get("status"),c.get("world_pose") or {},c.get("task","-")))
-        for did,kind,parent,status,pp,task in rows:
-            r=self.device_table.rowCount(); self.device_table.insertRow(r); vals=[did,kind,parent,status,f"{pp.get('x_mm','-'):.0f}, {pp.get('y_mm','-'):.0f}, {pp.get('z_mm','-'):.0f}" if pp else "-",f"{pp.get('roll_deg','-')}, {pp.get('pitch_deg','-')}, {pp.get('yaw_deg','-')}",task]
-            for c,val in enumerate(vals): self.device_table.setItem(r,c,QTableWidgetItem(str(val)))
+            self.device_table.setRowCount(0); rows=[]
+            compact=self.width()<1500
+            for column in (1,2,5): self.device_table.setColumnHidden(column,compact)
+            for did,d in (t.get("devices") or {}).items(): rows.append((did,d.get("kind"),"-",d.get("status"),d.get("pose") or {},d.get("task","-")))
+            for cid,c in (t.get("cameras") or {}).items(): rows.append((cid,"arm_camera",c.get("parent_robot_id"),c.get("status"),c.get("world_pose") or {},c.get("task","-")))
+            for did,kind,parent,status,pp,task in rows:
+                r=self.device_table.rowCount(); self.device_table.insertRow(r); vals=[did,kind,parent,status,f"{pp.get('x_mm','-'):.0f}, {pp.get('y_mm','-'):.0f}, {pp.get('z_mm','-'):.0f}" if pp else "-",f"{pp.get('roll_deg','-')}, {pp.get('pitch_deg','-')}, {pp.get('yaw_deg','-')}",task]
+                for c,val in enumerate(vals): self.device_table.setItem(r,c,QTableWidgetItem(str(val)))
 
-        self.space_table.setRowCount(0)
-        for reg in truck.get("regions") or []:
-            center=reg.get("center_world_xyz_mm") or [0,0,0]; support=f"{reg.get('support_height_compensation_mm',0):.1f}mm" if reg.get("requires_support_block") else "-"
-            vals=[reg.get("blind_code") or reg.get("region_id"),reg.get("section"),reg.get("column"),f"{center[0]:.0f},{center[1]:.0f},{center[2]:.0f}",support,reg.get("status"),reg.get("cargo_id") or "-"]
-            r=self.space_table.rowCount(); self.space_table.insertRow(r)
-            for c,val in enumerate(vals): self.space_table.setItem(r,c,QTableWidgetItem(str(val)))
-        self.comp.setText("8.2当前补偿："+json.dumps((rd.get("neighbor_pose") or {}).get("compensation_world_mm",{}),ensure_ascii=False)+"\n历史反馈："+json.dumps(fb,ensure_ascii=False)+"\n剩余空间："+json.dumps(truck.get("remaining_space") or {},ensure_ascii=False))
+            self.space_table.setRowCount(0)
+            for reg in truck.get("regions") or []:
+                center=reg.get("center_world_xyz_mm") or [0,0,0]; support=f"{reg.get('support_height_compensation_mm',0):.1f}mm" if reg.get("requires_support_block") else "-"
+                vals=[reg.get("blind_code") or reg.get("region_id"),reg.get("section"),reg.get("column"),f"{center[0]:.0f},{center[1]:.0f},{center[2]:.0f}",support,reg.get("status"),reg.get("cargo_id") or "-"]
+                r=self.space_table.rowCount(); self.space_table.insertRow(r)
+                for c,val in enumerate(vals): self.space_table.setItem(r,c,QTableWidgetItem(str(val)))
+            self.comp.setText("8.2当前补偿："+json.dumps((rd.get("neighbor_pose") or {}).get("compensation_world_mm",{}),ensure_ascii=False)+"\n历史反馈："+json.dumps(fb,ensure_ascii=False)+"\n剩余空间："+json.dumps(truck.get("remaining_space") or {},ensure_ascii=False))
 
-        par=t.get("parallel") or {}; self.parallel_label.setText(f"3.1插取：{par.get('pick',{}).get('status')} ｜ 3.2雷达：{par.get('radar',{}).get('status')}")
-        cal=s.get("calibration") or {}
-        intr="参考/占位" if "PLACEHOLDER" in str(cal.get("intrinsic_parameter_status","")).upper() else str(cal.get("intrinsic_parameter_status","-"))
-        extr="占位" if "PLACEHOLDER" in str(cal.get("coordinate_parameter_status","")).upper() else str(cal.get("coordinate_parameter_status","-"))
-        profile=get_run_profile()
-        self.cal_label.setText(
-            f"运行模式：{profile.get('title')}（{profile.get('id')}）｜"
-            f"设备：{str(s.get('device_mode') or 'mock').upper()}｜"
-            f"标定：内参={intr}｜外参={extr}｜运动相机=实时位姿×安装外参"
-        )
-        self.cal_label.setToolTip(json.dumps(cal,ensure_ascii=False,indent=2))
-        db=s.get("database") or {}; db_location=str(db.get("location") or db.get("path") or "-")
-        db_name=("MySQL" if str(db.get("backend")).lower()=="mysql" else "SQLite")
-        self.database_label.setText(f"车辆数据库：{db_name}｜装载会话：{db.get('session_id') or '未开始'}")
-        self.database_label.setToolTip(db_location)
-        self._refresh_modules(s.get("module_evidence") or [])
+            par=t.get("parallel") or {}; self.parallel_label.setText(f"3.1插取：{par.get('pick',{}).get('status')} ｜ 3.2雷达：{par.get('radar',{}).get('status')}")
+            cal=s.get("calibration") or {}
+            intr="参考/占位" if "PLACEHOLDER" in str(cal.get("intrinsic_parameter_status","")).upper() else str(cal.get("intrinsic_parameter_status","-"))
+            extr="占位" if "PLACEHOLDER" in str(cal.get("coordinate_parameter_status","")).upper() else str(cal.get("coordinate_parameter_status","-"))
+            profile=get_run_profile()
+            self.cal_label.setText(
+                f"运行模式：{profile.get('title')}（{profile.get('id')}）｜"
+                f"设备：{str(s.get('device_mode') or 'mock').upper()}｜"
+                f"标定：内参={intr}｜外参={extr}｜运动相机=实时位姿×安装外参"
+            )
+            self.cal_label.setToolTip(json.dumps(cal,ensure_ascii=False,indent=2))
+            db=s.get("database") or {}; db_location=str(db.get("location") or db.get("path") or "-")
+            db_name=("MySQL" if str(db.get("backend")).lower()=="mysql" else "SQLite")
+            self.database_label.setText(f"车辆数据库：{db_name}｜装载会话：{db.get('session_id') or '未开始'}")
+            self.database_label.setToolTip(db_location)
+            self._refresh_modules(s.get("module_evidence") or [])
+            msgs=t.get("messages") or []; self.message.setPlainText("\n".join(f"[{m.get('time')}] {m.get('source')} {m.get('status')}  {m.get('message')}" for m in msgs[-30:]))
+
         self._refresh_ext_devices(s)
-        msgs=t.get("messages") or []; self.message.setPlainText("\n".join(f"[{m.get('time')}] {m.get('source')} {m.get('status')}  {m.get('message')}" for m in msgs[-30:]))
+        msgs=t.get("messages") or []
         alarm=t.get("alarm"); self.logs.setPlainText(("ALARM: "+str(alarm)+"\n\n" if alarm else "")+"\n".join(f"[{m.get('time')}] {m.get('source')} {m.get('status')} {m.get('message')}" for m in msgs))
+
+    def _refresh_lab_sense_panels(self, rd: dict, hole: dict, truck: dict) -> None:
+        """实验室右侧：相机图、两插孔 WORLD、雷达四角。"""
+        image = ""
+        pick = rd.get("pick_result") or {}
+        image = str(pick.get("image_path") or "")
+        if not image:
+            image = self._first_image(hole) or self._first_image(pick.get("capture"))
+        if image and Path(image).is_file():
+            pix = QPixmap(image)
+            if not pix.isNull():
+                scaled = pix.scaled(
+                    max(240, self.lab_camera_preview.width() - 8),
+                    max(180, self.lab_camera_preview.height() - 8),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                self.lab_camera_preview.setPixmap(scaled)
+                self.lab_camera_preview.setToolTip(image)
+            else:
+                self.lab_camera_preview.setText(f"无法加载图片：\n{image}")
+        else:
+            self.lab_camera_preview.setPixmap(QPixmap())
+            self.lab_camera_preview.setText("第 2 步执行后显示托盘/插孔识别图")
+
+        self.lab_hole_table.setRowCount(0)
+        for side, label in (("left", "左插孔"), ("right", "右插孔")):
+            world = hole.get(f"{side}_world_xyz_mm")
+            cam = hole.get(f"{side}_xyz_mm")
+            xyz = world if world is not None else cam
+            if xyz is None:
+                continue
+            frame = "WORLD" if world is not None else "相机"
+            r = self.lab_hole_table.rowCount()
+            self.lab_hole_table.insertRow(r)
+            vals = [f"{label}({frame})", f"{float(xyz[0]):.1f}", f"{float(xyz[1]):.1f}", f"{float(xyz[2]):.1f}"]
+            for c, val in enumerate(vals):
+                self.lab_hole_table.setItem(r, c, QTableWidgetItem(str(val)))
+
+        radar = rd.get("radar_result") or {}
+        corners = radar.get("world_points") or truck.get("corners") or {}
+        ids = list(radar.get("corner_ids") or [])
+        if not ids:
+            ids = sorted(corners.keys(), key=lambda x: int(x[1:]) if str(x)[1:].isdigit() else 999)
+        self.lab_radar_table.setRowCount(0)
+        for pid in ids:
+            q = corners.get(pid) or {}
+            r = self.lab_radar_table.rowCount()
+            self.lab_radar_table.insertRow(r)
+            for c, val in enumerate([pid, q.get("x"), q.get("y"), q.get("z")]):
+                self.lab_radar_table.setItem(r, c, QTableWidgetItem(str(val)))
 
     def _refresh_ext_devices(self,s):
         """顶栏紧凑状态：以 DEVICE_CHECK 探测结果为准。"""

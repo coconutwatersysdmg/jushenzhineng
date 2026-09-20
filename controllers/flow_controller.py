@@ -82,6 +82,15 @@ class FlowController:
         ("FEEDBACK", "11. 偏差回PLC / 修正下一托盘 / 更新空间"),
         ("RETURN", "12. 机械臂返回 / 下一轮"),
     ]
+    # 实验室模式：仅前两步（设备检查 + 相机插孔∥雷达四角），后续步骤以后再扩。
+    LAB_STEPS = [
+        ("DEVICE_CHECK", "1. 外接设备连接检查（PLC / 雷达 / 相机）"),
+        ("LAB_SENSE", "2. 相机插孔识别 ∥ 雷达底板四角粗定位"),
+    ]
+
+    @staticmethod
+    def is_lab_profile() -> bool:
+        return str(feature_switches.RUN_PROFILE or "").strip().lower() == "lab"
 
     def __init__(self, twin=None, plc=None, robot=None, radar=None, camera=None, algorithms=None):
         self.device_config = get_device_layout_config()
@@ -349,11 +358,17 @@ class FlowController:
     @property
     def is_first_round(self): return self.round_index == 0
     @property
-    def steps(self): return self.FIRST_STEPS if self.is_first_round else self.REPEAT_STEPS
+    def steps(self):
+        if self.is_lab_profile():
+            return self.LAB_STEPS
+        return self.FIRST_STEPS if self.is_first_round else self.REPEAT_STEPS
     @property
     def current_step(self):
-        if self.finished: return ("DONE", "全部货物装载完成")
-        return self.steps[min(self.step_index, len(self.steps)-1)]
+        if self.finished:
+            return ("DONE", "实验室前两步完成" if self.is_lab_profile() else "全部货物装载完成")
+        if self.step_index >= len(self.steps):
+            return ("DONE", "实验室前两步完成" if self.is_lab_profile() else "全部货物装载完成")
+        return self.steps[self.step_index]
     @property
     def current_cargo(self): return self.queue[self.round_index] if 0 <= self.round_index < len(self.queue) else None
 
@@ -889,6 +904,178 @@ class FlowController:
         self.plc.send_message("RADAR_LOCATE",status,result.get("message",""),result)
         return result
 
+    def _lab_pick_recognize(self):
+        """实验室 2.1：到插孔位拍照识别两孔，发布坐标供 PLC 确认；不做物理插取。"""
+        if self.round_data.get("pick_result", {}).get("success"):
+            return self.round_data["pick_result"]
+        self.twin.set_parallel("pick", "RUNNING", "实验室：插孔拍照识别中")
+        pick_cfg = ((self.device_config.get("robots") or {}).get("PICK_ARM") or {})
+        cargo_mount = pick_cfg.get("cargo_mount_pose") or {
+            "x_mm": 0.0, "y_mm": 1100.0, "z_mm": -350.0,
+            "roll_deg": 0.0, "pitch_deg": 0.0, "yaw_deg": 0.0,
+        }
+        staged_pose = Pose6D.from_any((self.twin.snapshot().get("cargo") or {}).get("pose"))
+        pickup_tool = parent_pose_for_child(staged_pose, Pose6D.from_any(cargo_mount)).to_dict()
+        approach = deepcopy(pickup_tool)
+        approach["z_mm"] += 700.0
+
+        # 接近位只更新孪生，不弹 PLC；识别出的插孔坐标再弹窗供用户改后下发。
+        emitter = getattr(self.robot, "command_emitter", None)
+        try:
+            if hasattr(self.robot, "command_emitter"):
+                self.robot.command_emitter = None
+            self.robot.move_tool_world("PICK_ARM", approach, "MOVE_TO_TAIL_STAGED_CARGO")
+            self.robot.move_tool_world("PICK_ARM", pickup_tool, "FIND_PALLET_HOLE")
+        finally:
+            if hasattr(self.robot, "command_emitter"):
+                self.robot.command_emitter = emitter
+
+        cam = self._camera_for_role("pallet_hole", "CAM_PICK")
+        cap = self.camera.capture_rgbd(cam, tag="pallet_hole")
+        if cap.get("success"):
+            started = perf_counter()
+            hole = self.algorithms.pallet_hole_recognize(cap["rgb_path"], cap["depth_path"], self.current_cargo)
+            self._evidence(
+                "PALLET_HOLE_YOLO",
+                {"rgb_path": cap["rgb_path"], "depth_path": cap["depth_path"]},
+                hole,
+                started,
+                model_invoked=True,
+            )
+        elif self.allow_demo:
+            hole = {
+                "success": True,
+                "demo": True,
+                "left_xyz_mm": [-120, 0, 1000],
+                "right_xyz_mm": [120, 0, 1000],
+                "result_image_path": "",
+                "message": "插孔联调数据",
+            }
+            started = perf_counter()
+            self._evidence(
+                "PALLET_HOLE_YOLO",
+                {"rgb_path": "", "depth_path": ""},
+                hole,
+                started,
+                model_invoked=False,
+                note="未取得RGB-D，使用联调插孔数据",
+                status="FALLBACK",
+            )
+        else:
+            hole = {"success": False, "message": "缺少插孔RGB-D"}
+
+        if hole.get("success"):
+            try:
+                T = self.calibration.dynamic_camera_world_matrix(
+                    cap.get("camera_world_pose") or self.twin.camera_world_pose(cam)
+                )
+                for side in ("left", "right"):
+                    xyz = hole.get(f"{side}_xyz_mm")
+                    if xyz is not None:
+                        q = self.calibration.transform_point(T, xyz)
+                        hole[f"{side}_world_xyz_mm"] = [float(x) for x in q]
+                hole["world_coordinate_frame"] = "world"
+            except Exception as exc:
+                hole["world_transform_warning"] = str(exc)
+
+            # 把左右插孔 WORLD 坐标作为可编辑下发目标（不做 fork）
+            yaw = float(pickup_tool.get("yaw_deg", -90.0) or -90.0)
+            for side, key, task in (
+                ("left", "left_world_xyz_mm", "PALLET_HOLE_LEFT"),
+                ("right", "right_world_xyz_mm", "PALLET_HOLE_RIGHT"),
+            ):
+                xyz = hole.get(key)
+                if not xyz:
+                    continue
+                pose = {
+                    "x_mm": float(xyz[0]),
+                    "y_mm": float(xyz[1]),
+                    "z_mm": float(xyz[2]),
+                    "roll_deg": 0.0,
+                    "pitch_deg": 0.0,
+                    "yaw_deg": yaw,
+                }
+                self.robot.move_tool_world("PICK_ARM", pose, task)
+
+            result = {
+                "success": True,
+                "lab_mode": True,
+                "fork_skipped": True,
+                "message": "插孔识别完成（实验室：仅下发坐标，不执行物理插取）",
+                "hole_result": hole,
+                "capture": deepcopy(cap) if isinstance(cap, Mapping) else cap,
+                "image_path": str(
+                    hole.get("result_image_path")
+                    or (cap or {}).get("rgb_path")
+                    or ""
+                ),
+            }
+        else:
+            result = {
+                "success": False,
+                "lab_mode": True,
+                "fork_skipped": True,
+                "message": hole.get("message", "插孔定位失败"),
+                "hole_result": hole,
+                "capture": deepcopy(cap) if isinstance(cap, Mapping) else cap,
+                "image_path": str((cap or {}).get("rgb_path") or ""),
+            }
+
+        self.round_data["pick_result"] = result
+        status = "SUCCESS" if result.get("success") else "FAILED"
+        self.twin.set_parallel("pick", status, result.get("message", ""), result)
+        self.plc.send_message("PALLET_PICK", status, result.get("message", ""), result)
+        return result
+
+    def _lab_sense(self):
+        """实验室第2步：相机插孔识别 ∥ 雷达底板四角；软失败，结果都展示。"""
+        need_pick = not self.round_data.get("pick_result", {}).get("success")
+        need_radar = not self.round_data.get("radar_result", {}).get("success")
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            fr = pool.submit(self._radar_task) if need_radar else None
+            pick = self._lab_pick_recognize() if need_pick else self.round_data["pick_result"]
+            radar = fr.result() if fr else self.round_data["radar_result"]
+
+        if radar.get("success"):
+            corners = {
+                pid: {"x": float(p["x"]), "y": float(p["y"]), "z": float(p["z"])}
+                for pid, p in (radar.get("world_points") or {}).items()
+            }
+            if corners:
+                self.twin.update_truck(
+                    corners=corners,
+                    board_mode="LAB_RADAR_COARSE",
+                    camera_board_geometry={
+                        "decision_source": "lab_radar_coarse",
+                        "corner_ids": list(radar.get("corner_ids") or corners.keys()),
+                    },
+                )
+
+        pick_ok = bool(pick.get("success"))
+        radar_ok = bool(radar.get("success"))
+        summary = {
+            "success": pick_ok and radar_ok,
+            "continue_anyway": True,
+            "lab_mode": True,
+            "pick": "SUCCESS" if pick_ok else "FAILED",
+            "radar": "SUCCESS" if radar_ok else "FAILED",
+            "pick_result": pick,
+            "radar_result": radar,
+            "message": (
+                "实验室感知完成：插孔与雷达四角均就绪"
+                if pick_ok and radar_ok
+                else f"实验室感知部分完成：插孔={('OK' if pick_ok else '失败')}，雷达={('OK' if radar_ok else '失败')}"
+            ),
+        }
+        self.round_data["lab_sense"] = summary
+        self.twin.add_message(
+            "LAB_SENSE",
+            "SUCCESS" if summary["success"] else "WARNING",
+            summary["message"],
+            {"pick": summary["pick"], "radar": summary["radar"]},
+        )
+        return summary
+
     def _parallel_locate(self):
         need_pick=not self.round_data.get("pick_result",{}).get("success")
         need_radar=not self.round_data.get("radar_result",{}).get("success")
@@ -1396,6 +1583,7 @@ class FlowController:
         code,name=self.current_step; self.twin.set_phase(name,self.round_index+1)
         try:
             if code=="DEVICE_CHECK": data=self._device_check()
+            elif code=="LAB_SENSE": data=self._lab_sense()
             elif code=="PRE_PICK_OFFSET": data=self._pre_pick_offset()
             elif code=="PARALLEL_LOCATE": data=self._parallel_locate()
             elif code=="PICK_ONLY":
@@ -1434,6 +1622,11 @@ class FlowController:
                 if not soft_ok:
                     rec_status="warning"
                     rec_message=str((data or {}).get("message") or name)
+            elif code=="LAB_SENSE":
+                soft_ok=bool((data or {}).get("success"))
+                if not soft_ok:
+                    rec_status="warning"
+                    rec_message=str((data or {}).get("message") or name)
             elif code=="PRE_PICK_OFFSET":
                 # 拍照/识别失败也继续；总体结果用 warning 标出来。
                 soft_ok=bool((data or {}).get("capture_success") and (data or {}).get("should_fork"))
@@ -1442,7 +1635,12 @@ class FlowController:
                     rec_message=str((data or {}).get("message") or name)
             self._record(code,name,rec_status,rec_message,data); self.step_index+=1
             self.twin.set_alarm(None)
-            self.twin.set_phase(self.current_step[1],self.round_index+1)
+            if self.is_lab_profile() and self.step_index >= len(self.steps):
+                self.finished = True
+                self.running = False
+                self.twin.set_phase("实验室前两步完成", self.round_index + 1)
+            else:
+                self.twin.set_phase(self.current_step[1],self.round_index+1)
         except Exception as exc:
             self._record(code,name,"failed",str(exc),{"error":str(exc),"parallel":deepcopy(self.twin.snapshot().get("parallel"))}); self.twin.set_alarm(str(exc)); raise
         self._save(); return self.snapshot()

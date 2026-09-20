@@ -13,12 +13,16 @@ from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QDialog,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QMessageBox,
     QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
+    QHeaderView,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +30,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # 流程步骤代码 → 界面文案（与 FlowController 一致）
 STEP_TITLES = {
     "DEVICE_CHECK": "1. 外接设备连接检查",
+    "LAB_SENSE": "2. 相机插孔识别 ∥ 雷达四角",
     "PRE_PICK_OFFSET": "2. 货物-托盘偏差分析",
     "PARALLEL_LOCATE": "3. 并行：3.1 插取 ∥ 3.2 雷达",
     "PICK_ONLY": "3.1 机械臂找插孔并插取",
@@ -47,6 +52,8 @@ STEP_TITLES = {
 
 # 运动 task → 中文目的（前缀匹配，长的在前）
 _TASK_PURPOSE = (
+    ("PALLET_HOLE_LEFT", "左插孔目标坐标（可改后下发）"),
+    ("PALLET_HOLE_RIGHT", "右插孔目标坐标（可改后下发）"),
     ("MOVE_TO_TAIL_STAGED_CARGO", "移到车尾待装货物上方，准备找插孔"),
     ("FIND_PALLET_HOLE", "到插孔识别位，便于相机定位插孔"),
     ("LIFT_STAGED_CARGO", "插取完成后抬升带货，离开货位"),
@@ -246,7 +253,22 @@ class PlcMotionDialog(QDialog):
         self.cmd_view.setReadOnly(True)
         self.cmd_view.setPlaceholderText("WORLD / XYZR JSON 将显示在这里")
         self.cmd_view.setFont(QFont("Consolas", 12))
+        self.cmd_view.setMaximumHeight(140)
         layout.addWidget(self.cmd_view, 1)
+
+        edit_box = QGroupBox("可编辑下发坐标 XYZR（修改后点确认生效）")
+        edit_layout = QVBoxLayout(edit_box)
+        tip = QLabel("每段一行；确认下发前可直接改表中数值。")
+        tip.setStyleSheet("color:#aaaaaa;")
+        edit_layout.addWidget(tip)
+        self.xyzr_table = QTableWidget(0, 5)
+        self.xyzr_table.setHorizontalHeaderLabels(["段/任务", "X", "Y", "Z", "R"])
+        self.xyzr_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for col in (1, 2, 3, 4):
+            self.xyzr_table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        self.xyzr_table.setMinimumHeight(110)
+        edit_layout.addWidget(self.xyzr_table)
+        layout.addWidget(edit_box)
 
         self.push_status = QLabel("下发状态：未下发")
         self.push_status.setObjectName("statusLabel")
@@ -276,6 +298,7 @@ class PlcMotionDialog(QDialog):
         self.purpose_label.setText("本步移动段：—")
         self.summary.setText("等待流程产生运动目标…")
         self.cmd_view.clear()
+        self.xyzr_table.setRowCount(0)
         self.push_status.setText("下发状态：未下发")
         self.confirm_btn.setText("确认下发到 PLC")
         self.confirm_btn.setEnabled(False)
@@ -283,6 +306,57 @@ class PlcMotionDialog(QDialog):
 
     def apply_command(self, cmd: dict, *, auto_pushed: bool = False, push_result: dict | None = None) -> None:
         self.apply_batch([cmd], auto_pushed=auto_pushed, push_result=push_result)
+
+    def _fill_xyzr_table(self, batch: list) -> None:
+        self.xyzr_table.setRowCount(0)
+        for i, cmd in enumerate(batch, 1):
+            _, purpose = describe_motion(cmd)
+            xyzr = cmd.get("gantry_xyzr") if isinstance(cmd.get("gantry_xyzr"), Mapping) else {}
+            world = cmd.get("world_pose") or {}
+            values = {
+                "X": float(xyzr.get("X", world.get("x_mm", 0.0)) or 0.0),
+                "Y": float(xyzr.get("Y", world.get("y_mm", 0.0)) or 0.0),
+                "Z": float(xyzr.get("Z", world.get("z_mm", 0.0)) or 0.0),
+                "R": float(xyzr.get("R", world.get("yaw_deg", 0.0)) or 0.0),
+            }
+            row = self.xyzr_table.rowCount()
+            self.xyzr_table.insertRow(row)
+            label = QTableWidgetItem(f"{i}/{len(batch)} {purpose}")
+            label.setFlags(label.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.xyzr_table.setItem(row, 0, label)
+            for col, axis in enumerate(("X", "Y", "Z", "R"), 1):
+                item = QTableWidgetItem(f"{values[axis]:.3f}")
+                self.xyzr_table.setItem(row, col, item)
+
+    def _read_xyzr_edits(self) -> list[dict]:
+        """把表中编辑写回 _latest_cmds 的 gantry_xyzr，并返回副本。"""
+        out = []
+        for row, cmd in enumerate(self._latest_cmds):
+            data = dict(cmd or {})
+            if row >= self.xyzr_table.rowCount():
+                out.append(data)
+                continue
+            try:
+                xyzr = {
+                    "X": float(self.xyzr_table.item(row, 1).text()),
+                    "Y": float(self.xyzr_table.item(row, 2).text()),
+                    "Z": float(self.xyzr_table.item(row, 3).text()),
+                    "R": float(self.xyzr_table.item(row, 4).text()),
+                }
+            except Exception:
+                xyzr = dict(data.get("gantry_xyzr") or {})
+            data["gantry_xyzr"] = xyzr
+            # 同步粗略回写 world，避免只改了表但 JSON 仍显示旧值
+            world = dict(data.get("world_pose") or {})
+            world["x_mm"] = float(xyzr.get("X", 0.0))
+            world["y_mm"] = float(xyzr.get("Y", 0.0))
+            world["z_mm"] = float(xyzr.get("Z", 0.0))
+            world["yaw_deg"] = float(xyzr.get("R", 0.0))
+            data["world_pose"] = world
+            out.append(data)
+        self._latest_cmds = out
+        self._latest_cmd = out[0] if out else None
+        return out
 
     def apply_batch(self, cmds: list, *, auto_pushed: bool = False, push_result: dict | None = None) -> None:
         batch = [dict(item or {}) for item in (cmds or []) if item]
@@ -294,9 +368,10 @@ class PlcMotionDialog(QDialog):
         total = len(batch)
         lines = [format_waypoint_line(i, total, cmd) for i, cmd in enumerate(batch, 1)]
         self.step_label.setText(f"流程步骤：{step_title}")
-        self.purpose_label.setText(f"本步共 {total} 段，按顺序执行：")
+        self.purpose_label.setText(f"本步共 {total} 段，按顺序执行（可先改 XYZR）：")
         self.summary.setText("\n\n".join(lines))
         self.cmd_view.setPlainText(json.dumps(batch if total > 1 else batch[0], ensure_ascii=False, indent=2))
+        self._fill_xyzr_table(batch)
         self.confirm_btn.setEnabled(True)
         self.confirm_btn.setText("确认下发到 PLC" if total == 1 else f"确认按顺序下发全部 {total} 段")
 
@@ -308,7 +383,7 @@ class PlcMotionDialog(QDialog):
                 return
             self.push_status.setText(f"下发状态：自动推送失败 · {push.get('message', '')}")
         else:
-            self.push_status.setText("下发状态：待处理（确认后按 1→N 顺序推送）")
+            self.push_status.setText("下发状态：待处理（可改坐标后确认，按 1→N 顺序下发）")
 
         self._begin_blocking()
 
@@ -354,6 +429,8 @@ class PlcMotionDialog(QDialog):
             return
         if not callable(self._on_confirm_push):
             return
+        edited = self._read_xyzr_edits()
+        self.cmd_view.setPlainText(json.dumps(edited if len(edited) > 1 else edited[0], ensure_ascii=False, indent=2))
         result = self._on_confirm_push() or {}
         if result.get("success"):
             self.push_status.setText(f"下发状态：已确认推送 · {result.get('message', 'OK')}")
