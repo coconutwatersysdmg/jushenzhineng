@@ -1228,7 +1228,6 @@ class FlowController:
                 "capture_groups": captured_groups,
             },
         )
-        self.round_data["lab_corner_shell"] = result
         self.twin.add_message(
             "LAB_CORNER_SHELL",
             "SUCCESS" if result["success"] else "WARNING",
