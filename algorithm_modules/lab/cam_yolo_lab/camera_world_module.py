@@ -63,23 +63,29 @@ class CameraWorldTransform:
         """
         if len(target_world_xyz) != 3:
             raise ValueError("WORLD target must contain x, y and z")
+        target = tuple(float(value) for value in target_world_xyz)
+        if not all(math.isfinite(value) for value in target):
+            raise ValueError("WORLD target contains a non-finite value")
         pose = {"x": 0.0, "y": 0.0, "z": plc_pose["z"], "r": plc_pose["r"]}
         t_world_from_camera = self.camera_pose_from_plc(pose)
         origin = tuple(float(t_world_from_camera[row][3]) for row in range(3))
         axis = tuple(float(t_world_from_camera[row][2]) for row in range(3))
         if abs(axis[2]) < 1e-9:
             raise ValueError("相机光轴 Z 分量过小，无法反算 PLC 坐标")
-        distance = (float(target_world_xyz[2]) - origin[2]) / axis[2]
-        if distance < 0:
+        distance = (target[2] - origin[2]) / axis[2]
+        if distance <= 0:
             raise ValueError("目标位于相机光轴后方，无法反算 PLC 坐标")
         desired_origin = (
-            float(target_world_xyz[0]) - distance * axis[0],
-            float(target_world_xyz[1]) - distance * axis[1],
+            target[0] - distance * axis[0],
+            target[1] - distance * axis[1],
         )
-        return {
+        command = {
             "X": desired_origin[0] - origin[0],
             "Y": desired_origin[1] - origin[1],
         }
+        if not all(math.isfinite(value) for value in command.values()):
+            raise ValueError("相机光轴对准反算得到非有限 PLC 坐标")
+        return command
 
     def camera_to_world(self, point_c: Sequence[float], plc_pose: Mapping[str, float]):
         if len(point_c) != 3:
