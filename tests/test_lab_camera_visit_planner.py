@@ -10,20 +10,34 @@ ROOT = Path(__file__).resolve().parents[1]
 CAMERA_EXTRINSIC = ROOT / "config" / "camera_extrinsic.json"
 
 
-def test_lab_visit_plan_uses_p3p4_then_p1p2_and_fixed_camera_pose():
+def test_lab_visit_plan_uses_radar_centers_for_plc_xy_and_fixed_zr():
     planner = LabCameraVisitPlanner(CameraWorldTransform.from_json(CAMERA_EXTRINSIC))
+    world_points = {
+        "P1": {"x": 100, "y": 800, "z": 1200},
+        "P2": {"x": 300, "y": 800, "z": 1200},
+        "P3": {"x": 500, "y": 200, "z": 1200},
+        "P4": {"x": 700, "y": 200, "z": 1200},
+    }
     targets = planner.build_pair_targets(
-        {
-            "P1": {"x": 100, "y": 800, "z": 1200},
-            "P2": {"x": 300, "y": 800, "z": 1200},
-            "P3": {"x": 100, "y": 200, "z": 1200},
-            "P4": {"x": 300, "y": 200, "z": 1200},
-        },
+        world_points,
         {"x": 0, "y": 0, "z": 380, "r": -80},
     )
 
     assert [item["pair"] for item in targets] == [("P3", "P4"), ("P1", "P2")]
-    assert all(item["plc_command"]["X"] == 230.0 for item in targets)
+    expected_x = []
+    for pair in (("P3", "P4"), ("P1", "P2")):
+        center = tuple(
+            (world_points[pair[0]][axis] + world_points[pair[1]][axis]) / 2.0
+            for axis in ("x", "y", "z")
+        )
+        expected_x.append(
+            planner.transform.plc_xy_for_camera_axis_target(
+                center, {"x": 0.0, "y": 0.0, "z": 380.0, "r": -80.0}
+            )["X"]
+        )
+    assert [item["plc_command"]["X"] for item in targets] == pytest.approx(expected_x)
+    assert targets[0]["plc_command"]["X"] != pytest.approx(230.0)
+    assert targets[0]["plc_command"]["X"] != pytest.approx(targets[1]["plc_command"]["X"])
     assert all(item["plc_command"]["Z"] == 380.0 for item in targets)
     assert all(item["plc_command"]["R"] == -80.0 for item in targets)
 

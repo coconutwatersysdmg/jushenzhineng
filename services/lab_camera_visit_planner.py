@@ -9,7 +9,6 @@ from algorithm_modules.lab.cam_yolo_lab.camera_world_module import CameraWorldTr
 LAB_CORNER_PAIRS = (("P3", "P4"), ("P1", "P2"))
 LAB_CAMERA_Z_MM = 380.0
 LAB_CAMERA_R_DEG = -80.0
-LAB_CAMERA_X_MM = 230.0
 
 
 def merge_lab_corner_points(
@@ -72,7 +71,7 @@ class LabCameraVisitPlanner:
                     "pair": pair,
                     "target_world": list(center),
                     "plc_command": {
-                        "X": LAB_CAMERA_X_MM,
+                        "X": float(xy["X"]),
                         "Y": float(xy["Y"]),
                         "Z": LAB_CAMERA_Z_MM,
                         "R": LAB_CAMERA_R_DEG,
