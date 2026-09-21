@@ -126,6 +126,11 @@ class LabCameraCornerService:
             )
         return self._localizer
 
+    @property
+    def transform(self):
+        """Expose the validated lab camera transform without leaking _ensure()."""
+        return self._ensure().transform
+
     def locate_from_capture_meta(
         self,
         corner_ids: Sequence[str],

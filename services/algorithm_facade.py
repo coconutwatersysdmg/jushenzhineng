@@ -81,3 +81,7 @@ class AlgorithmFacade:
             capture_meta=capture_meta,
             group_captures=group_captures,
         )
+
+    def lab_camera_transform(self):
+        """Return the lab-only camera/PLC/WORLD transform used by visit planning."""
+        return self._lab_camera_service().transform

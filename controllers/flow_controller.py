@@ -15,6 +15,7 @@ from core.digital_twin_state import DigitalTwinState
 from core.geometry import Pose6D, parent_pose_for_child
 from devices.device_factory import create_device_adapters
 from services.algorithm_facade import AlgorithmFacade
+from services.lab_camera_visit_planner import LabCameraVisitPlanner, merge_lab_corner_points
 from services.sensor_calibration_service import SensorCalibrationService
 from services.camera_corner_world_service import CameraCornerWorldService
 from services.camera_board_geometry_service import CameraBoardGeometryService
@@ -1099,18 +1100,141 @@ class FlowController:
         return summary
 
     def _lab_corner_shell(self):
-        """实验室第3步：精定位/轮廓确认空壳（机械臂无法插取，仅占位）。"""
+        """实验室第3步：雷达粗点引导 PLC 分组拍摄，相机 WORLD 点做最终角点。"""
+        preserved_camera = self.round_data.get("camera_world_corners")
+        preserved_final = self.round_data.get("final_world_corners")
+        if preserved_camera and preserved_final:
+            result = deepcopy(self.round_data.get("lab_corner_shell") or {})
+            result.update(
+                {
+                    "success": True,
+                    "lab_mode": True,
+                    "reused": True,
+                    "camera_world_corners": deepcopy(preserved_camera),
+                    "final_world_corners": deepcopy(preserved_final),
+                    "message": "实验室角点复用首轮相机 WORLD 结果，未重复移动相机扫描",
+                }
+            )
+            self.twin.update_truck(
+                corners=deepcopy(preserved_final),
+                board_mode="LAB_CAMERA_FINAL",
+                camera_board_geometry={"decision_source": "lab_camera_world_reused"},
+            )
+            self.round_data["lab_corner_shell"] = result
+            self.twin.add_message("LAB_CORNER_SHELL", "SUCCESS", result["message"], result)
+            self.twin.set_phase(result["message"], self.round_index + 1)
+            return result
+
+        radar = self.round_data.get("radar_result") or {}
+        radar_points = radar.get("world_points") or {}
+        if not radar.get("success") or not radar_points:
+            result = {
+                "success": False,
+                "lab_mode": True,
+                "camera_world_corners": {},
+                "final_world_corners": {},
+                "message": "实验室雷达没有可用 WORLD 角点，已停止本轮相机精定位",
+            }
+            self.round_data["lab_corner_shell"] = result
+            self.twin.add_message("LAB_CORNER_SHELL", "WARNING", result["message"], result)
+            return result
+
+        try:
+            planner = LabCameraVisitPlanner(self.algorithms.lab_camera_transform())
+            targets = planner.build_pair_targets(
+                radar_points,
+                {"x": 0.0, "y": 0.0, "z": 380.0, "r": -80.0},
+            )
+            mapping = getattr(self.robot, "world_to_gantry", None)
+            if not mapping:
+                from config.external_devices_config import GANTRY
+
+                mapping = GANTRY.get("world_to_gantry") or {}
+        except Exception as exc:
+            raise RuntimeError(f"实验室相机访问规划失败：{exc}") from exc
+
+        camera_id = self._camera_for_role("corner", "CAM_PICK")
+        capture_meta: dict[str, dict[str, Any]] = {}
+        group_captures: dict[str, dict[str, Any]] = {}
+        captured_groups: list[str] = []
+        for item in targets:
+            pair = tuple(item["pair"])
+            group = "".join(pair)
+            target_world_pose = planner.plc_to_world_pose(item["plc_command"], mapping)
+            moved = self.robot.move_tool_world(
+                "PICK_ARM",
+                target_world_pose,
+                f"LAB_CORNER_{group}",
+            )
+            plc_pose = self._plc_pose_for_lab_camera(moved, target_world_pose)
+            cap = self._capture_rgbd(camera_id, f"LAB_CORNER_{group}")
+            group_captures[group] = deepcopy(cap)
+            captured_groups.append(group)
+            camera_world_pose = deepcopy(cap.get("camera_world_pose") or self.twin.camera_world_pose(camera_id))
+            for point_id in pair:
+                capture_meta[point_id] = {
+                    "camera_id": camera_id,
+                    "capture_group": group,
+                    "camera_world_pose": camera_world_pose,
+                    "rgb_path": cap.get("rgb_path"),
+                    "depth_path": cap.get("depth_path"),
+                    "plc_pose": deepcopy(plc_pose),
+                    "depth_scale_mm": cap.get("depth_scale_mm"),
+                    "radar_coarse_world_xyz_mm": deepcopy(radar_points.get(point_id)),
+                }
+
+        try:
+            camera_result = self.algorithms.lab_corner_world_recognize(
+                ["P1", "P2", "P3", "P4"],
+                capture_meta,
+                group_captures,
+            )
+        except FileNotFoundError:
+            raise
+        except Exception as exc:
+            camera_result = {
+                "success": False,
+                "algorithm": "lab_camera",
+                "world_points": {},
+                "message": f"实验室相机角点识别失败，逐点使用雷达兜底：{exc}",
+            }
+
+        camera_points = camera_result.get("world_points") or {}
+        final_points = merge_lab_corner_points(radar_points, camera_points)
         result = {
-            "success": True,
+            "success": bool(final_points),
             "lab_mode": True,
-            "shell_only": True,
+            "camera_capture_groups": captured_groups,
+            "capture_meta": deepcopy(capture_meta),
+            "camera_result": deepcopy(camera_result),
+            "radar_world_corners": deepcopy(radar_points),
+            "camera_world_corners": deepcopy(camera_points),
+            "final_world_corners": deepcopy(final_points),
             "message": (
-                "实验室空壳：跳过相机精定位与轮廓确认。"
-                "请手动将托盘搬到车板目标位后，再执行第4步俯拍校验。"
+                "实验室相机 WORLD 角点已完成，逐点融合结果已更新"
+                if camera_result.get("success")
+                else "实验室相机角点部分失败，已逐点使用雷达 WORLD 点兜底"
             ),
         }
+        self.round_data["camera_world_corners"] = deepcopy(camera_points)
+        self.round_data["final_world_corners"] = deepcopy(final_points)
         self.round_data["lab_corner_shell"] = result
-        self.twin.add_message("LAB_CORNER_SHELL", "SUCCESS", result["message"], result)
+        self.twin.update_truck(
+            corners=deepcopy(final_points),
+            board_mode="LAB_CAMERA_FINAL",
+            camera_board_geometry={
+                "decision_source": "lab_camera_world_priority",
+                "corner_sources": {pid: point.get("source") for pid, point in final_points.items()},
+                "capture_groups": captured_groups,
+            },
+        )
+        self.round_data["lab_corner_shell"] = result
+        self.twin.add_message(
+            "LAB_CORNER_SHELL",
+            "SUCCESS" if result["success"] else "WARNING",
+            result["message"],
+            result,
+        )
         self.twin.set_phase(result["message"], self.round_index + 1)
         return result
 
@@ -1193,19 +1317,30 @@ class FlowController:
         return result
 
     def _advance_lab_round(self):
-        """实验室一轮结束：进入下一托；雷达车板结果带到下一轮 round_data。"""
+        """实验室一轮结束：进入下一托；雷达和首轮相机车板结果带到下一轮。"""
         self.completed.append(deepcopy(self.round_data))
         preserved_radar = None
+        preserved_camera = None
+        preserved_final = None
         for item in reversed(self.completed):
             radar = item.get("radar_result")
             if isinstance(radar, Mapping) and radar.get("success") and radar.get("world_points"):
                 preserved_radar = deepcopy(radar)
+            camera = item.get("camera_world_corners")
+            final = item.get("final_world_corners")
+            if camera and final:
+                preserved_camera = deepcopy(camera)
+                preserved_final = deepcopy(final)
+            if preserved_radar and preserved_camera and preserved_final:
                 break
         self.round_index += 1
         self.step_index = 0
         self.round_data = {}
         if preserved_radar:
             self.round_data["radar_result"] = preserved_radar
+        if preserved_camera and preserved_final:
+            self.round_data["camera_world_corners"] = preserved_camera
+            self.round_data["final_world_corners"] = preserved_final
         if self.round_index >= len(self.queue):
             self.finished = True
             self.running = False

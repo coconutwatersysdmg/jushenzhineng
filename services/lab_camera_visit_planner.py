@@ -12,6 +12,36 @@ LAB_CAMERA_R_DEG = -80.0
 LAB_CAMERA_X_MM = 230.0
 
 
+def merge_lab_corner_points(
+    radar_points: Mapping[str, Any],
+    camera_points: Mapping[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """Merge camera WORLD points over radar WORLD points one corner at a time."""
+    merged: dict[str, dict[str, Any]] = {}
+    camera_points = camera_points or {}
+    for name, radar_raw in (radar_points or {}).items():
+        radar_xyz = _try_point_xyz(radar_raw)
+        if radar_xyz is None:
+            continue
+        camera_xyz = _try_point_xyz(camera_points.get(name))
+        if camera_xyz is not None:
+            xyz = camera_xyz
+            source = "camera_yolo"
+        else:
+            xyz = radar_xyz
+            source = "lidar_fallback"
+        merged[str(name)] = {
+            "x": float(xyz[0]),
+            "y": float(xyz[1]),
+            "z": float(xyz[2]),
+            "source": source,
+            "camera_world_xyz_mm": list(camera_xyz) if camera_xyz is not None else None,
+            "lidar_world_xyz_mm": list(radar_xyz),
+            "final_world_xyz_mm": list(xyz),
+        }
+    return merged
+
+
 class LabCameraVisitPlanner:
     """Plan the archived laboratory two-shot camera visit in WORLD coordinates."""
 
@@ -98,3 +128,23 @@ class LabCameraVisitPlanner:
         if not all(math.isfinite(value) for value in point):
             raise ValueError(f"实验室雷达 WORLD 点 {name} 无效")
         return point
+
+
+def _try_point_xyz(raw: Any) -> tuple[float, float, float] | None:
+    if isinstance(raw, Mapping):
+        values = (
+            raw.get("x", raw.get("x_mm")),
+            raw.get("y", raw.get("y_mm")),
+            raw.get("z", raw.get("z_mm")),
+        )
+    elif isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+        values = tuple(raw[:3])
+    else:
+        return None
+    if len(values) != 3 or any(value is None for value in values):
+        return None
+    try:
+        point = tuple(float(value) for value in values)
+    except (TypeError, ValueError):
+        return None
+    return point if all(math.isfinite(value) for value in point) else None
