@@ -8,4 +8,3 @@ def test_lab_docs_describe_camera_final_world_points():
 
     assert "P3/P4、P1/P2" in camera_doc
     assert "相机 WORLD 角点优先" in corner_doc
-
