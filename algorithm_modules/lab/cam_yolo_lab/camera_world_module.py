@@ -46,6 +46,41 @@ class CameraWorldTransform:
             (0.0, 0.0, 0.0, 1.0),
         )
 
+    def camera_pose_from_plc(self, plc_pose: Mapping[str, float]):
+        """Return WORLD_T_CAMERA for the supplied PLC pose."""
+        return _matmul4(self.world_pose_from_plc(plc_pose), self._t_e_from_c)
+
+    def plc_xy_for_camera_axis_target(
+        self,
+        target_world_xyz: Sequence[float],
+        plc_pose: Mapping[str, float],
+    ) -> dict[str, float]:
+        """Solve the PLC X/Y correction that puts a WORLD target on the optical axis.
+
+        The laboratory camera is mounted on the R-axis.  X/Y are therefore
+        solved from the camera origin and its local Z axis while keeping the
+        requested Z/R fixed, matching the archived laboratory workflow.
+        """
+        if len(target_world_xyz) != 3:
+            raise ValueError("WORLD target must contain x, y and z")
+        pose = {"x": 0.0, "y": 0.0, "z": plc_pose["z"], "r": plc_pose["r"]}
+        t_world_from_camera = self.camera_pose_from_plc(pose)
+        origin = tuple(float(t_world_from_camera[row][3]) for row in range(3))
+        axis = tuple(float(t_world_from_camera[row][2]) for row in range(3))
+        if abs(axis[2]) < 1e-9:
+            raise ValueError("相机光轴 Z 分量过小，无法反算 PLC 坐标")
+        distance = (float(target_world_xyz[2]) - origin[2]) / axis[2]
+        if distance < 0:
+            raise ValueError("目标位于相机光轴后方，无法反算 PLC 坐标")
+        desired_origin = (
+            float(target_world_xyz[0]) - distance * axis[0],
+            float(target_world_xyz[1]) - distance * axis[1],
+        )
+        return {
+            "X": desired_origin[0] - origin[0],
+            "Y": desired_origin[1] - origin[1],
+        }
+
     def camera_to_world(self, point_c: Sequence[float], plc_pose: Mapping[str, float]):
         if len(point_c) != 3:
             raise ValueError("camera point must contain x, y and z")
@@ -249,6 +284,13 @@ def _transform_point(matrix, point: Sequence[float]):
         + matrix[row][3]
         for row in range(3)
     )
+
+
+def _matmul4(a, b):
+    return [
+        [sum(float(a[i][k]) * float(b[k][j]) for k in range(4)) for j in range(4)]
+        for i in range(4)
+    ]
 
 
 def _to_numpy(value):
