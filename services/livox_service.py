@@ -47,7 +47,7 @@ class LivoxService:
             "exe_path": self._get_option(values, "exe_path", "third_party/livox_runtime/livox_realtime_select_and_move.exe"),
             "config_path": self._get_option(values, "config_path", "third_party/livox_runtime/mid360s_config.json"),
             "save_dir": self._get_option(values, "save_dir", "data/lidar"),
-            "capture_ms": self._get_option(values, "capture_ms", "2000"),
+            "capture_ms": self._get_option(values, "capture_ms", "3000"),
             "max_points": self._get_option(values, "max_points", "300000"),
             "timeout_sec": self._get_option(values, "timeout_sec", "20"),
         }

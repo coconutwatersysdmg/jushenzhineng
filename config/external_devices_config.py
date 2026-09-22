@@ -90,7 +90,7 @@ LIVOX = {
     "exe_path": "third_party/livox_runtime/livox_realtime_select_and_move.exe",
     "mid360_json_path": "third_party/livox_runtime/mid360s_config.json",
     "save_dir": "data/lidar",
-    "capture_ms": 2000,
+    "capture_ms": 3000,
     "max_points": 300000,
     "timeout_sec": 20,
     # 电脑「连雷达网卡」IPv4，必须与现场 ipconfig 一致

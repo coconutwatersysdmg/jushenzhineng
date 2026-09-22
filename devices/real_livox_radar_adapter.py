@@ -13,6 +13,26 @@ from services.livox_service import LivoxService
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+def _read_pcd_points_header(path: Path) -> int | None:
+    """Read POINTS count from a PCD header without loading the whole cloud."""
+    try:
+        with path.open("rb") as handle:
+            for _ in range(64):
+                line = handle.readline()
+                if not line:
+                    break
+                text = line.decode("ascii", errors="ignore").strip()
+                if text.upper().startswith("POINTS"):
+                    parts = text.split()
+                    if len(parts) >= 2:
+                        return int(float(parts[1]))
+                if text.upper().startswith("DATA"):
+                    break
+    except Exception:
+        return None
+    return None
+
+
 def _local_ipv4_addresses() -> set[str]:
     """本机当前网卡上的 IPv4（不含仅回环以外的探测失败则尽量兜底）。"""
     found: set[str] = {"127.0.0.1"}
@@ -169,11 +189,30 @@ class RealLivoxRadarAdapter(RadarAdapter):
             }
 
         path = str(Path(result.pcd_path).resolve())
+        point_count = result.point_count
+        if point_count is None:
+            point_count = _read_pcd_points_header(Path(path))
+        if point_count is not None and int(point_count) <= 0:
+            self.twin.update_device("RADAR", status="FAILED", task="LIVOX_EMPTY")
+            return {
+                "success": False,
+                "pcd_path": path,
+                "point_count": 0,
+                "source": "livox_mid360",
+                "return_code": result.return_code,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "message": (
+                    f"Livox 采集成功但点云为空（0 点）：{path}。"
+                    "请检查雷达是否在扫到车板、采集时长 capture_ms、以及 mid360s_config 网络配置。"
+                ),
+            }
+
         self.twin.update_device("RADAR", status="ONLINE", task="PCD_READY")
         return {
             "success": True,
             "pcd_path": path,
-            "point_count": result.point_count,
+            "point_count": point_count,
             "source": "livox_mid360",
-            "message": f"Livox Mid360 采集完成：{path}",
+            "message": f"Livox Mid360 采集完成：{path}（points={point_count}）",
         }

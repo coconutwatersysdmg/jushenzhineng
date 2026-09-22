@@ -37,7 +37,10 @@ def process_lab_lidar_pcd(
     except Exception as exc:
         return {
             "success": False,
-            "message": f"实验室雷达点云处理失败：{exc}",
+            "message": (
+                f"实验室雷达点云处理失败：{exc} "
+                f"（pcd={path.name}，完整路径={path}）"
+            ),
             "algorithm": "lab_lidar",
             "pcd_path": str(path),
             "result_tag": result_tag,
