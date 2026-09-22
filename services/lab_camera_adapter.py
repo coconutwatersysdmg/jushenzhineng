@@ -222,3 +222,41 @@ class LabCameraCornerService:
             "reviewed": False,
             "review_skipped": True,
         }
+
+    def locate_pallet_holes(
+        self,
+        rgb_path: str | Path,
+        depth_path: str | Path,
+        plc_pose: Mapping[str, Any],
+        *,
+        depth_scale_mm: float = 1.0,
+    ) -> Dict[str, Any]:
+        """用 cam_yolo_lab 的双目标检测定位左右插孔并直接输出 WORLD。"""
+        localizer = self._ensure()
+        normalized_pose = _plc_pose_from_meta({"plc_pose": plc_pose})
+        frame = build_frame_from_paths(
+            rgb_path,
+            depth_path,
+            depth_scale_mm=float(depth_scale_mm),
+        )
+        pair = localizer.detect_pair(frame, normalized_pose, ("left", "right"))
+        left = [float(value) for value in pair["left"]]
+        right = [float(value) for value in pair["right"]]
+        return {
+            "success": True,
+            "algorithm": "cam_yolo_lab",
+            "source": "cam_yolo_lab_pallet_holes",
+            "recognition_source": "cam_yolo_lab_pallet_holes",
+            "coordinate_frame": "world",
+            "world_coordinate_frame": "world",
+            "coordinate_unit": "mm",
+            "left_world_xyz_mm": left,
+            "right_world_xyz_mm": right,
+            "result_image_path": str(Path(rgb_path).expanduser().resolve()),
+            "rgb_path": str(Path(rgb_path).expanduser().resolve()),
+            "depth_path": str(Path(depth_path).expanduser().resolve()),
+            "plc_pose": deepcopy(normalized_pose),
+            "model_path": str(self.model_path),
+            "extrinsic_path": str(self.extrinsic_path),
+            "message": "cam_yolo_lab 已识别左右插孔并输出 WORLD 坐标",
+        }

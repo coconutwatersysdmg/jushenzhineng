@@ -944,11 +944,12 @@ class FlowController:
 
         # 接近位只更新孪生，不弹 PLC；识别出的插孔坐标再弹窗供用户改后下发。
         emitter = getattr(self.robot, "command_emitter", None)
+        pickup_move = None
         try:
             if hasattr(self.robot, "command_emitter"):
                 self.robot.command_emitter = None
             self.robot.move_tool_world("PICK_ARM", approach, "MOVE_TO_TAIL_STAGED_CARGO")
-            self.robot.move_tool_world("PICK_ARM", pickup_tool, "FIND_PALLET_HOLE")
+            pickup_move = self.robot.move_tool_world("PICK_ARM", pickup_tool, "FIND_PALLET_HOLE")
         finally:
             if hasattr(self.robot, "command_emitter"):
                 self.robot.command_emitter = emitter
@@ -957,13 +958,29 @@ class FlowController:
         cap = self.camera.capture_rgbd(cam, tag="pallet_hole")
         if cap.get("success"):
             started = perf_counter()
-            hole = self.algorithms.pallet_hole_recognize(cap["rgb_path"], cap["depth_path"], self.current_cargo)
+            try:
+                plc_pose = self._plc_pose_for_lab_camera(pickup_move, pickup_tool)
+                hole = self.algorithms.lab_pallet_hole_world_recognize(
+                    cap,
+                    plc_pose,
+                    self.current_cargo,
+                )
+            except Exception as exc:
+                hole = {
+                    "success": False,
+                    "algorithm": "cam_yolo_lab",
+                    "recognition_source": "cam_yolo_lab_pallet_holes",
+                    "result_image_path": str(cap.get("rgb_path") or ""),
+                    "message": f"cam_yolo_lab 插孔识别失败：{exc}",
+                }
             self._evidence(
                 "PALLET_HOLE_YOLO",
                 {"rgb_path": cap["rgb_path"], "depth_path": cap["depth_path"]},
                 hole,
                 started,
                 model_invoked=True,
+                note="实验室 cam_yolo_lab：实时 RGB-D + PLC XYZR 直接输出左右插孔 WORLD",
+                status="SUCCESS" if hole.get("success") else "FAILED",
             )
         elif self.allow_demo:
             hole = {
@@ -987,7 +1004,7 @@ class FlowController:
         else:
             hole = {"success": False, "message": "缺少插孔RGB-D"}
 
-        if hole.get("success"):
+        if hole.get("success") and hole.get("world_coordinate_frame") != "world":
             try:
                 T = self.calibration.dynamic_camera_world_matrix(
                     cap.get("camera_world_pose") or self.twin.camera_world_pose(cam)
@@ -1001,6 +1018,7 @@ class FlowController:
             except Exception as exc:
                 hole["world_transform_warning"] = str(exc)
 
+        if hole.get("success"):
             # 把左右插孔 WORLD 坐标作为可编辑下发目标（不做 fork）
             yaw = float(pickup_tool.get("yaw_deg", -90.0) or -90.0)
             for side, key, task in (

@@ -82,6 +82,15 @@ class AlgorithmFacade:
             group_captures=group_captures,
         )
 
+    def lab_pallet_hole_world_recognize(self, capture: dict, plc_pose: dict, cargo: dict):
+        """实验室插孔：复用 cam_yolo_lab 双目标检测，直接输出 WORLD。"""
+        return self._lab_camera_service().locate_pallet_holes(
+            capture["rgb_path"],
+            capture["depth_path"],
+            plc_pose,
+            depth_scale_mm=float(capture.get("depth_scale_mm", 1.0) or 1.0),
+        )
+
     def lab_camera_transform(self):
         """Return the lab-only camera/PLC/WORLD transform used by visit planning."""
         return self._lab_camera_service().transform
