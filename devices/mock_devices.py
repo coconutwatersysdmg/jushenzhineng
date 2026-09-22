@@ -11,6 +11,7 @@ from core.geometry import Pose6D
 from core.digital_twin_state import DigitalTwinState
 from utils.demo_assets import ensure_demo_corner_rgbd, ensure_demo_pre_pick_image, ensure_demo_rgb_image
 from .base import PLCAdapter, RobotAdapter, RadarAdapter, ArmCameraAdapter
+from .r_axis_hold import RAxisHold
 
 
 class MockPLCAdapter(PLCAdapter):
@@ -64,6 +65,7 @@ class MockRobotAdapter(RobotAdapter):
         self.command_emitter = None
         self.world_to_gantry = dict(self.config.get("world_to_gantry") or {})
         self.default_speed = float(self.config.get("default_speed", 30.0))
+        self.r_hold = RAxisHold(enabled=bool(self.config.get("hold_r_axis", True)))
 
     def _gantry_xyzr(self, pose: dict):
         mapping = self.world_to_gantry
@@ -83,12 +85,15 @@ class MockRobotAdapter(RobotAdapter):
 
     def move_tool_world(self, robot_id: str, pose: dict, task: str = "") -> dict:
         # 孪生轨迹仍本地播放；真机写轴改由 plc_console 接收发布指令后执行
-        cmd = self.plc.send_command("MOVE_TOOL_WORLD", {"robot_id": robot_id, "pose": pose, "task": task})
+        current = dict((((self.twin.snapshot().get("devices") or {}).get(robot_id) or {}).get("pose") or {}))
+        self.r_hold.capture_from_pose(current or pose, self._gantry_xyzr(current or pose))
+        held_pose = self.r_hold.apply_to_pose(pose)
+        cmd = self.plc.send_command("MOVE_TOOL_WORLD", {"robot_id": robot_id, "pose": held_pose, "task": task})
         ack = self.plc.wait_ack(cmd["command_id"])
         if not ack.get("success"):
             return ack
-        start = Pose6D.from_any((self.twin.snapshot().get("devices", {}).get(robot_id, {}).get("pose") or {}))
-        target = Pose6D.from_any(pose)
+        start = Pose6D.from_any(current)
+        target = Pose6D.from_any(held_pose)
         distance = sqrt(
             (target.x_mm-start.x_mm)**2 +
             (target.y_mm-start.y_mm)**2 +
@@ -113,7 +118,7 @@ class MockRobotAdapter(RobotAdapter):
             self.twin.update_robot_pose(robot_id, Pose6D.from_any(sample), task=task or "MOVING")
             if callable(self.motion_callback):
                 self.motion_callback(robot_id, deepcopy(sample), task or "MOVING")
-        gantry_xyzr = self._gantry_xyzr(target.to_dict())
+        gantry_xyzr = self.r_hold.apply_to_gantry(self._gantry_xyzr(target.to_dict()))
         if callable(self.command_emitter):
             self.command_emitter({
                 "robot_id": robot_id,
@@ -121,12 +126,16 @@ class MockRobotAdapter(RobotAdapter):
                 "task": task or "MOVE_TOOL_WORLD",
                 "gantry_xyzr": gantry_xyzr,
                 "speed": self.default_speed,
+                "r_axis_held": bool(self.r_hold.enabled),
+                "locked_r_deg": self.r_hold.locked_r_deg,
             })
         return {
             "success": True, "robot_id": robot_id, "pose": target.to_dict(),
             "trajectory_segments": segment_count,
             "gantry_xyzr": gantry_xyzr,
             "export_only": True,
+            "r_axis_held": bool(self.r_hold.enabled),
+            "locked_r_deg": self.r_hold.locked_r_deg,
             "message": f"{robot_id} 已连续运动到目标位（指令已发布）",
         }
 

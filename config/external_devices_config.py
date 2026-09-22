@@ -65,6 +65,8 @@ GANTRY = {
     },
     "r_forbidden_zones_enabled": False,
     "r_forbidden_zones": [],
+    # 叉车臂运动时锁定 R：启动/首次运动时的角度保持不变，只动 XYZ
+    "hold_r_axis": True,
     # TODO 待确认方向，由于目前没确认车头在哪，先打开看看了
     "world_to_gantry": {
         "placeholder": False,

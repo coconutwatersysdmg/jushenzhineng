@@ -12,6 +12,7 @@ from typing import Any, Callable, Mapping
 from core.digital_twin_state import DigitalTwinState
 from core.geometry import Pose6D
 from devices.base import PLCAdapter, RobotAdapter
+from devices.r_axis_hold import RAxisHold
 from devices.world_to_gantry import WorldToGantryError, transform_world_to_gantry
 
 
@@ -33,6 +34,7 @@ class RealGantryRobotAdapter(RobotAdapter):
         self.default_speed = float(self.config.get("default_speed", 30.0))
         self.move_timeout_s = float(self.config.get("move_timeout_s", 60.0))
         self.soft_limits = dict(self.config.get("soft_limits") or {})
+        self.r_hold = RAxisHold(enabled=bool(self.config.get("hold_r_axis", True)))
 
     def _resolve_gantry(self, pose: Mapping[str, Any]) -> tuple[dict[str, float] | None, str | None]:
         if not self.world_to_gantry:
@@ -42,13 +44,26 @@ class RealGantryRobotAdapter(RobotAdapter):
         except WorldToGantryError as exc:
             return None, str(exc)
 
+    def _current_pose(self, robot_id: str) -> dict[str, Any]:
+        device = ((self.twin.snapshot().get("devices") or {}).get(robot_id) or {})
+        return dict(device.get("pose") or {})
+
+    def _with_held_r(self, robot_id: str, pose: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, float] | None, str | None]:
+        current = self._current_pose(robot_id)
+        current_gantry, _ = self._resolve_gantry(current) if current else (None, None)
+        self.r_hold.capture_from_pose(current or pose, current_gantry)
+        held_pose = self.r_hold.apply_to_pose(pose)
+        gantry_xyzr, transform_error = self._resolve_gantry(held_pose)
+        gantry_xyzr = self.r_hold.apply_to_gantry(gantry_xyzr)
+        return held_pose, gantry_xyzr, transform_error
+
     def _emit_command(self, payload: dict) -> None:
         if callable(self.command_emitter):
             self.command_emitter(payload)
 
     def move_tool_world(self, robot_id: str, pose: dict, task: str = "") -> dict:
-        gantry_xyzr, transform_error = self._resolve_gantry(pose)
-        target = Pose6D.from_any(pose)
+        held_pose, gantry_xyzr, transform_error = self._with_held_r(robot_id, pose)
+        target = Pose6D.from_any(held_pose)
         self.twin.update_robot_pose(robot_id, target, task=task or "MOVED")
         if callable(self.motion_callback):
             self.motion_callback(robot_id, target.to_dict(), task or "MOVED")
@@ -58,7 +73,7 @@ class RealGantryRobotAdapter(RobotAdapter):
             "MOVE_TOOL_WORLD",
             {
                 "robot_id": robot_id,
-                "pose": pose,
+                "pose": held_pose,
                 "task": task,
                 "gantry_xyzr": gantry_xyzr,
                 "export_only": True,
@@ -74,10 +89,14 @@ class RealGantryRobotAdapter(RobotAdapter):
             "speed": self.default_speed,
             "transform_error": transform_error,
             "plc_command_id": cmd.get("command_id"),
+            "r_axis_held": bool(self.r_hold.enabled),
+            "locked_r_deg": self.r_hold.locked_r_deg,
         }
         self._emit_command(emit_payload)
 
         message = f"{robot_id} 目标已发布到运动指令通道"
+        if self.r_hold.enabled and self.r_hold.locked_r_deg is not None:
+            message += f"（R轴锁定 {self.r_hold.locked_r_deg:.2f}°）"
         if transform_error:
             message += f"（XYZR 未换算：{transform_error}）"
         elif not self.allow_real_motion:
@@ -92,6 +111,8 @@ class RealGantryRobotAdapter(RobotAdapter):
             "transform_error": transform_error,
             "export_only": True,
             "plc_ack": ack,
+            "r_axis_held": bool(self.r_hold.enabled),
+            "locked_r_deg": self.r_hold.locked_r_deg,
             "message": message,
         }
 

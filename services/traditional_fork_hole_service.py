@@ -14,8 +14,9 @@ DEFAULT_INTRINSIC_PATH = PROJECT_ROOT / "config" / "sensor_coordinate_config" / 
 
 
 class TraditionalForkHoleService:
-    def __init__(self, dark_threshold: int = 88) -> None:
-        self.dark_threshold = int(dark_threshold)
+    def __init__(self, dark_threshold: int | None = None) -> None:
+        # None = 使用 stable 算法自适应阈值，与 zip 默认行为一致
+        self.dark_threshold = None if dark_threshold is None else int(dark_threshold)
 
     @staticmethod
     def _fallback_intrinsics() -> dict[str, float]:
