@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from config import feature_switches
+from services.lab_space_planner import build_lab_space_plan
 from services.lab_camera_visit_planner import merge_lab_corner_points
 
 
@@ -33,6 +34,8 @@ def test_lab_corner_shell_is_real_camera_flow_and_round_reuse_is_present():
     assert 'group = "".join(pair)' in shell
     assert 'f"LAB_CORNER_{group}"' in shell
     assert "lab_corner_world_recognize" in shell
+    assert "build_lab_space_plan(" in shell
+    assert '"lab_space_plan"' in shell
     assert "shell_only" not in shell
     assert "preserved_camera" in advance
     assert "preserved_final" in advance
@@ -47,3 +50,19 @@ def test_non_lab_profile_does_not_load_lab_corner_visit():
         assert "def _lab_corner_shell" in source
     finally:
         feature_switches.apply_run_profile(previous, persist=False)
+
+
+def test_lab_backend_grid_plan_uses_final_world_corners_without_ui_grid_payload():
+    final_points = {
+        "P1": {"x": 0.0, "y": 0.0, "z": 0.0},
+        "P2": {"x": 1000.0, "y": 0.0, "z": 0.0},
+        "P3": {"x": 0.0, "y": 2400.0, "z": 0.0},
+        "P4": {"x": 1000.0, "y": 2400.0, "z": 0.0},
+    }
+
+    result = build_lab_space_plan(final_points, ["P1", "P2", "P3", "P4"])
+
+    assert result["success"] is True
+    assert result["geometry"]["decision_source"] == "camera_world_corners"
+    assert len(result["space"]["regions"]) == 4
+    assert result["ui_display"] is False

@@ -16,6 +16,7 @@ from core.geometry import Pose6D, parent_pose_for_child
 from devices.device_factory import create_device_adapters
 from services.algorithm_facade import AlgorithmFacade
 from services.lab_camera_visit_planner import LabCameraVisitPlanner, merge_lab_corner_points
+from services.lab_space_planner import build_lab_space_plan
 from services.sensor_calibration_service import SensorCalibrationService
 from services.camera_corner_world_service import CameraCornerWorldService
 from services.camera_board_geometry_service import CameraBoardGeometryService
@@ -1319,6 +1320,27 @@ class FlowController:
 
         camera_points = camera_result.get("world_points") or {}
         final_points = merge_lab_corner_points(radar_points, camera_points)
+        final_corner_ids = [
+            pid
+            for pid in (radar.get("corner_ids") or ("P1", "P2", "P3", "P4"))
+            if pid in final_points
+        ]
+        try:
+            lab_space_plan = build_lab_space_plan(
+                final_points,
+                final_corner_ids,
+                board_geometry=self.board_geometry,
+                space_manager=self.space,
+            )
+        except Exception as exc:
+            lab_space_plan = {
+                "success": False,
+                "geometry": {},
+                "space": {},
+                "ui_display": False,
+                "message": f"实验室后台划格失败：{exc}",
+            }
+        self.round_data["lab_space_plan"] = deepcopy(lab_space_plan)
         coord_lines = []
         for pid in ("P1", "P2", "P3", "P4"):
             point = final_points.get(pid) or {}
@@ -1350,9 +1372,17 @@ class FlowController:
             ),
             "yolo_invoked": bool(yolo_invoked),
             "yolo_success": bool(camera_result.get("success")),
+            "lab_space_plan": {
+                "success": bool(lab_space_plan.get("success")),
+                "board_mode": (lab_space_plan.get("geometry") or {}).get("board_mode"),
+                "region_count": len((lab_space_plan.get("space") or {}).get("regions") or []),
+                "available_count": len((lab_space_plan.get("space") or {}).get("available") or []),
+                "ui_display": False,
+                "message": lab_space_plan.get("message"),
+            },
             "message": (
                 f"实验室相机精定位完成：拍照{len(captured_groups)}组，YOLO={'成功' if camera_result.get('success') else '失败/兜底'}；"
-                f"最终角点 {coord_text}"
+                f"最终角点 {coord_text}；{lab_space_plan.get('message')}"
             ),
         }
         self.round_data["camera_world_corners"] = deepcopy(camera_points)
