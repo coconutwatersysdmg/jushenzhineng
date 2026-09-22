@@ -52,7 +52,7 @@ class MainWindow(QMainWindow):
     LAB_FLOW_STAGES = [
         (1, "设备连接检查"),
         (2, "相机插孔识别 ∥ 雷达四角粗定位"),
-        (3, "精定位/轮廓确认（空壳）"),
+        (3, "相机精定位（拍照+YOLO）"),
         (4, "手动放货后俯拍校验"),
     ]
     STEP_STAGE = {
@@ -303,9 +303,9 @@ class MainWindow(QMainWindow):
         cam_l.addWidget(self.lab_hole_table,1)
         lab_rl.addWidget(cam_card,3)
 
-        radar_card,radar_l,_=self._collapsible_card("雷达底板四角点（WORLD / mm）",expanded=True)
-        self.lab_radar_table=QTableWidget(0,4)
-        self.lab_radar_table.setHorizontalHeaderLabels(["角点","X","Y","Z"])
+        radar_card,radar_l,_=self._collapsible_card("角点 WORLD（相机优先 / 雷达兜底，mm）",expanded=True)
+        self.lab_radar_table=QTableWidget(0,5)
+        self.lab_radar_table.setHorizontalHeaderLabels(["角点","X","Y","Z","来源"])
         self.lab_radar_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         radar_l.addWidget(self.lab_radar_table,1)
         lab_rl.addWidget(radar_card,2)
@@ -425,7 +425,7 @@ class MainWindow(QMainWindow):
             self.lab_right_panel.setVisible(lab)
         if hasattr(self, "debug_btn"):
             self.debug_btn.setVisible(not lab)
-        title = "实验室装载测试 · 四步流程（插孔/雷达/空壳精定位/俯拍校验）" if lab else "具身智能装载数字孪生 · 单机械臂携货 / 挂载相机角点识别"
+        title = "实验室装载测试 · 四步流程（插孔∥雷达 / 相机精定位 / 俯拍校验）" if lab else "具身智能装载数字孪生 · 单机械臂携货 / 挂载相机角点识别"
         self.setWindowTitle(title)
         if lab and hasattr(self, "main_splitter"):
             self.main_splitter.setSizes([280, 780, 420])
@@ -926,7 +926,7 @@ class MainWindow(QMainWindow):
                 ("当前 WORLD XYZ",f"{p.get('x_mm','-')}, {p.get('y_mm','-')}, {p.get('z_mm','-')}"),
                 ("插孔识别", (rd.get("pick_result") or {}).get("message","等待第2步")),
                 ("雷达粗定位", (rd.get("radar_result") or {}).get("message","等待第2步")),
-                ("精定位空壳", (rd.get("lab_corner_shell") or {}).get("message","等待第3步")),
+                ("相机精定位", (rd.get("lab_corner_shell") or {}).get("message","等待第3步")),
                 ("俯拍校验", (rd.get("lab_place_verify") or {}).get("message","等待第4步（请先手动搬托盘到车板）")),
             ])
             self._refresh_lab_sense_panels(rd, hole, truck)
@@ -995,19 +995,24 @@ class MainWindow(QMainWindow):
         alarm=t.get("alarm"); self.logs.setPlainText(("ALARM: "+str(alarm)+"\n\n" if alarm else "")+"\n".join(f"[{m.get('time')}] {m.get('source')} {m.get('status')} {m.get('message')}" for m in msgs))
 
     def _refresh_lab_sense_panels(self, rd: dict, hole: dict, truck: dict) -> None:
-        """实验室右侧：相机图（插孔或俯拍）、两插孔 WORLD、雷达四角。"""
+        """实验室右侧：相机图、插孔坐标、角点 WORLD（含来源）。"""
         place = rd.get("lab_place_verify") or {}
         pick = rd.get("pick_result") or {}
+        corner = rd.get("lab_corner_shell") or {}
         image = str(place.get("image_path") or "")
-        caption_default = "执行后显示相机照片（第2步插孔图 / 第4步俯拍校验图）"
+        caption_default = "执行后显示相机照片（第2步插孔 / 第3步角点 / 第4步俯拍）"
         if image:
             caption_default = "第4步：手动放货后俯拍"
         else:
-            image = str(pick.get("image_path") or "")
+            image = str(corner.get("image_path") or "")
             if image:
-                caption_default = "第2步：托盘插孔识别图"
+                caption_default = "第3步：角点精定位拍照"
             else:
-                image = self._first_image(hole) or self._first_image(pick.get("capture")) or ""
+                image = str(pick.get("image_path") or "")
+                if image:
+                    caption_default = "第2步：托盘插孔识别图"
+                else:
+                    image = self._first_image(hole) or self._first_image(pick.get("capture")) or ""
         if image and Path(image).is_file():
             pix = QPixmap(image)
             if not pix.isNull():
@@ -1039,18 +1044,36 @@ class MainWindow(QMainWindow):
             for c, val in enumerate(vals):
                 self.lab_hole_table.setItem(r, c, QTableWidgetItem(str(val)))
 
+        final_corners = corner.get("final_world_corners") or {}
+        camera_corners = corner.get("camera_world_corners") or {}
         radar = rd.get("radar_result") or {}
-        corners = radar.get("world_points") or truck.get("corners") or {}
-        ids = list(radar.get("corner_ids") or [])
+        radar_corners = radar.get("world_points") or {}
+        corners = final_corners or camera_corners or radar_corners or truck.get("corners") or {}
+        ids = list(corners.keys()) or list(radar.get("corner_ids") or [])
         if not ids:
             ids = sorted(corners.keys(), key=lambda x: int(x[1:]) if str(x)[1:].isdigit() else 999)
+        else:
+            ids = sorted(ids, key=lambda x: int(str(x)[1:]) if str(x)[1:].isdigit() else 999)
         self.lab_radar_table.setRowCount(0)
         for pid in ids:
             q = corners.get(pid) or {}
+            source = q.get("source")
+            if not source:
+                if pid in camera_corners:
+                    source = "camera_yolo"
+                elif pid in radar_corners:
+                    source = "lidar"
+                else:
+                    source = "-"
+            xyz = q
+            if "final_world_xyz_mm" in q and isinstance(q.get("final_world_xyz_mm"), (list, tuple)):
+                xyz = {"x": q["final_world_xyz_mm"][0], "y": q["final_world_xyz_mm"][1], "z": q["final_world_xyz_mm"][2]}
             r = self.lab_radar_table.rowCount()
             self.lab_radar_table.insertRow(r)
-            for c, val in enumerate([pid, q.get("x"), q.get("y"), q.get("z")]):
-                self.lab_radar_table.setItem(r, c, QTableWidgetItem(str(val)))
+            vals = [pid, xyz.get("x"), xyz.get("y"), xyz.get("z"), source]
+            for c, val in enumerate(vals):
+                text = f"{float(val):.1f}" if isinstance(val, (int, float)) else str(val)
+                self.lab_radar_table.setItem(r, c, QTableWidgetItem(text))
 
     def _refresh_ext_devices(self,s):
         """顶栏紧凑状态：以 DEVICE_CHECK 探测结果为准。"""

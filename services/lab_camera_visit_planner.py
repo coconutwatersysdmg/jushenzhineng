@@ -54,9 +54,10 @@ class LabCameraVisitPlanner:
     ) -> list[dict[str, Any]]:
         pose = dict(planning_pose or {})
         z = float(pose.get("z", LAB_CAMERA_Z_MM))
+        # R 由启动锁定角度传入；不再强制改成 -80
         r = float(pose.get("r", LAB_CAMERA_R_DEG))
-        if not math.isclose(z, LAB_CAMERA_Z_MM) or not math.isclose(r, LAB_CAMERA_R_DEG):
-            raise ValueError("实验室相机访问姿态必须是 Z=380、R=-80")
+        if not math.isclose(z, LAB_CAMERA_Z_MM):
+            raise ValueError(f"实验室相机访问姿态 Z 必须是 {LAB_CAMERA_Z_MM}，当前为 {z}")
 
         targets: list[dict[str, Any]] = []
         for pair in LAB_CORNER_PAIRS:
@@ -64,7 +65,7 @@ class LabCameraVisitPlanner:
             center = tuple(sum(point[index] for point in points) / 2.0 for index in range(3))
             xy = self.transform.plc_xy_for_camera_axis_target(
                 center,
-                {"x": 0.0, "y": 0.0, "z": LAB_CAMERA_Z_MM, "r": LAB_CAMERA_R_DEG},
+                {"x": 0.0, "y": 0.0, "z": LAB_CAMERA_Z_MM, "r": r},
             )
             targets.append(
                 {
@@ -74,7 +75,7 @@ class LabCameraVisitPlanner:
                         "X": float(xy["X"]),
                         "Y": float(xy["Y"]),
                         "Z": LAB_CAMERA_Z_MM,
-                        "R": LAB_CAMERA_R_DEG,
+                        "R": float(r),
                     },
                 }
             )

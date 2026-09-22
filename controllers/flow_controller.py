@@ -83,16 +83,16 @@ class FlowController:
         ("FEEDBACK", "11. 偏差回PLC / 修正下一托盘 / 更新空间"),
         ("RETURN", "12. 机械臂返回 / 下一轮"),
     ]
-    # 实验室模式：设备检查 → 插孔∥雷达 → 精定位空壳 → 手动放货后俯拍校验（可多轮）
+    # 实验室模式：设备检查 → 插孔∥雷达 → 相机精定位 → 手动放货后俯拍校验（可多轮）
     LAB_FIRST_STEPS = [
         ("DEVICE_CHECK", "1. 外接设备连接检查（PLC / 雷达 / 相机）"),
         ("LAB_SENSE", "2. 相机插孔识别 ∥ 雷达底板四角粗定位"),
-        ("LAB_CORNER_SHELL", "3. 相机精定位与轮廓确认（实验室空壳）"),
+        ("LAB_CORNER_SHELL", "3. 相机精定位（到位拍照 + YOLO WORLD）"),
         ("LAB_PLACE_VERIFY", "4. 手动放货后俯拍位置校验"),
     ]
     LAB_REPEAT_STEPS = [
         ("LAB_SENSE", "2. 相机插孔识别（复用首轮雷达车板）"),
-        ("LAB_CORNER_SHELL", "3. 相机精定位与轮廓确认（实验室空壳）"),
+        ("LAB_CORNER_SHELL", "3. 相机精定位（到位拍照 + YOLO WORLD）"),
         ("LAB_PLACE_VERIFY", "4. 手动放货后俯拍位置校验"),
     ]
 
@@ -1128,8 +1128,31 @@ class FlowController:
         )
         return summary
 
+    def _lab_held_r_deg(self) -> float:
+        """实验室第3步规划用的 R：优先已锁定值，否则用当前臂姿态换算。"""
+        hold = getattr(self.robot, "r_hold", None)
+        if hold is not None and getattr(hold, "enabled", False) and hold.locked_r_deg is not None:
+            return float(hold.locked_r_deg)
+        pose = ((self.twin.snapshot().get("devices") or {}).get("PICK_ARM") or {}).get("pose") or {}
+        mapping = getattr(self.robot, "world_to_gantry", None) or {}
+        if not mapping:
+            try:
+                from config.external_devices_config import GANTRY
+
+                mapping = GANTRY.get("world_to_gantry") or {}
+            except Exception:
+                mapping = {}
+        if mapping and pose:
+            try:
+                from devices.world_to_gantry import transform_world_to_gantry
+
+                return float(transform_world_to_gantry(pose, mapping)["R"])
+            except Exception:
+                pass
+        return float(pose.get("yaw_deg", -80.0) or -80.0)
+
     def _lab_corner_shell(self):
-        """实验室第3步：雷达粗点引导 PLC 分组拍摄，相机 WORLD 点做最终角点。"""
+        """实验室第3步：雷达粗点引导到位→RGB-D→YOLO WORLD，并写清过程日志。"""
         preserved_camera = self.round_data.get("camera_world_corners")
         preserved_final = self.round_data.get("final_world_corners")
         if preserved_camera and preserved_final:
@@ -1168,11 +1191,12 @@ class FlowController:
             self.twin.add_message("LAB_CORNER_SHELL", "WARNING", result["message"], result)
             return result
 
+        held_r = self._lab_held_r_deg()
         try:
             planner = LabCameraVisitPlanner(self.algorithms.lab_camera_transform())
             targets = planner.build_pair_targets(
                 radar_points,
-                {"x": 0.0, "y": 0.0, "z": 380.0, "r": -80.0},
+                {"x": 0.0, "y": 0.0, "z": 380.0, "r": held_r},
             )
             mapping = getattr(self.robot, "world_to_gantry", None)
             if not mapping:
@@ -1182,10 +1206,18 @@ class FlowController:
         except Exception as exc:
             raise RuntimeError(f"实验室相机访问规划失败：{exc}") from exc
 
+        self.twin.add_message(
+            "LAB_CORNER_SHELL",
+            "INFO",
+            f"开始相机精定位：{len(targets)} 组到位，R 锁定 {held_r:.2f}°（不改 R）",
+            {"held_r_deg": held_r, "groups": ["".join(item["pair"]) for item in targets]},
+        )
+
         camera_id = self._camera_for_role("corner", "CAM_PICK")
         capture_meta: dict[str, dict[str, Any]] = {}
         group_captures: dict[str, dict[str, Any]] = {}
         captured_groups: list[str] = []
+        capture_log: list[dict[str, Any]] = []
         for item in targets:
             pair = tuple(item["pair"])
             group = "".join(pair)
@@ -1196,9 +1228,48 @@ class FlowController:
                 f"LAB_CORNER_{group}",
             )
             plc_pose = self._plc_pose_for_lab_camera(moved, target_world_pose)
+            cmd_r = None
+            if isinstance(moved.get("gantry_xyzr"), Mapping):
+                cmd_r = moved["gantry_xyzr"].get("R")
+            self.twin.add_message(
+                "LAB_CORNER_SHELL",
+                "INFO",
+                (
+                    f"组 {group} 已到位（目标点 {pair[0]}/{pair[1]}），"
+                    f"发布 XYZR={moved.get('gantry_xyzr')}，R保持={cmd_r}"
+                ),
+                {"group": group, "moved": deepcopy(moved), "plc_pose": deepcopy(plc_pose)},
+            )
             cap = self._capture_rgbd(camera_id, f"LAB_CORNER_{group}")
             group_captures[group] = deepcopy(cap)
             captured_groups.append(group)
+            shot_ok = bool(cap.get("success"))
+            capture_log.append(
+                {
+                    "group": group,
+                    "pair": list(pair),
+                    "capture_success": shot_ok,
+                    "rgb_path": cap.get("rgb_path"),
+                    "depth_path": cap.get("depth_path"),
+                    "message": cap.get("message"),
+                    "gantry_xyzr": deepcopy(moved.get("gantry_xyzr")),
+                    "locked_r_deg": moved.get("locked_r_deg", held_r),
+                }
+            )
+            self.twin.add_message(
+                "LAB_CORNER_SHELL",
+                "SUCCESS" if shot_ok else "FAILED",
+                (
+                    f"组 {group} 已拍照 RGB-D"
+                    if shot_ok
+                    else f"组 {group} 拍照失败：{cap.get('message')}"
+                ),
+                {
+                    "rgb_path": cap.get("rgb_path"),
+                    "depth_path": cap.get("depth_path"),
+                    "source": cap.get("source"),
+                },
+            )
             camera_world_pose = deepcopy(cap.get("camera_world_pose") or self.twin.camera_world_pose(camera_id))
             for point_id in pair:
                 capture_meta[point_id] = {
@@ -1212,37 +1283,76 @@ class FlowController:
                     "radar_coarse_world_xyz_mm": deepcopy(radar_points.get(point_id)),
                 }
 
+        started = perf_counter()
         try:
             camera_result = self.algorithms.lab_corner_world_recognize(
                 ["P1", "P2", "P3", "P4"],
                 capture_meta,
                 group_captures,
             )
+            yolo_invoked = True
         except FileNotFoundError:
             raise
         except Exception as exc:
+            yolo_invoked = True
             camera_result = {
                 "success": False,
                 "algorithm": "lab_camera",
                 "world_points": {},
                 "message": f"实验室相机角点识别失败，逐点使用雷达兜底：{exc}",
             }
+        self._evidence(
+            "CORNER_YOLO",
+            {
+                "capture_groups": captured_groups,
+                "rgb_paths": {g: (group_captures.get(g) or {}).get("rgb_path") for g in captured_groups},
+                "depth_paths": {g: (group_captures.get(g) or {}).get("depth_path") for g in captured_groups},
+                "held_r_deg": held_r,
+                "use_lab_camera_algo": True,
+            },
+            camera_result,
+            started,
+            model_invoked=yolo_invoked,
+            note="实验室第3步：到位拍照后 cam_yolo_lab 直接输出 WORLD 角点",
+            status="SUCCESS" if camera_result.get("success") else "FAILED",
+        )
 
         camera_points = camera_result.get("world_points") or {}
         final_points = merge_lab_corner_points(radar_points, camera_points)
+        coord_lines = []
+        for pid in ("P1", "P2", "P3", "P4"):
+            point = final_points.get(pid) or {}
+            if not point:
+                continue
+            coord_lines.append(
+                f"{pid}=({float(point.get('x', 0)):.1f},{float(point.get('y', 0)):.1f},{float(point.get('z', 0)):.1f})"
+                f"[{point.get('source', '-')}]"
+            )
+        coord_text = "；".join(coord_lines) if coord_lines else "无有效角点"
         result = {
             "success": bool(final_points),
             "lab_mode": True,
+            "held_r_deg": held_r,
             "camera_capture_groups": captured_groups,
+            "capture_log": capture_log,
             "capture_meta": deepcopy(capture_meta),
             "camera_result": deepcopy(camera_result),
             "radar_world_corners": deepcopy(radar_points),
             "camera_world_corners": deepcopy(camera_points),
             "final_world_corners": deepcopy(final_points),
+            "image_path": next(
+                (
+                    str((group_captures.get(g) or {}).get("rgb_path") or "")
+                    for g in captured_groups
+                    if (group_captures.get(g) or {}).get("rgb_path")
+                ),
+                "",
+            ),
+            "yolo_invoked": bool(yolo_invoked),
+            "yolo_success": bool(camera_result.get("success")),
             "message": (
-                "实验室相机 WORLD 角点已完成，逐点融合结果已更新"
-                if camera_result.get("success")
-                else "实验室相机角点部分失败，已逐点使用雷达 WORLD 点兜底"
+                f"实验室相机精定位完成：拍照{len(captured_groups)}组，YOLO={'成功' if camera_result.get('success') else '失败/兜底'}；"
+                f"最终角点 {coord_text}"
             ),
         }
         self.round_data["camera_world_corners"] = deepcopy(camera_points)
@@ -1261,7 +1371,12 @@ class FlowController:
             "LAB_CORNER_SHELL",
             "SUCCESS" if result["success"] else "WARNING",
             result["message"],
-            result,
+            {
+                "final_world_corners": deepcopy(final_points),
+                "camera_world_corners": deepcopy(camera_points),
+                "yolo_success": result["yolo_success"],
+                "capture_log": capture_log,
+            },
         )
         self.twin.set_phase(result["message"], self.round_index + 1)
         return result

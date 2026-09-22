@@ -31,7 +31,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 STEP_TITLES = {
     "DEVICE_CHECK": "1. 外接设备连接检查",
     "LAB_SENSE": "2. 相机插孔识别 ∥ 雷达四角",
-    "LAB_CORNER_SHELL": "3. 精定位/轮廓确认（空壳）",
+    "LAB_CORNER_SHELL": "3. 相机精定位（拍照+YOLO）",
     "LAB_PLACE_VERIFY": "4. 手动放货后俯拍校验",
     "PRE_PICK_OFFSET": "2. 货物-托盘偏差分析",
     "PARALLEL_LOCATE": "3. 并行：3.1 插取 ∥ 3.2 雷达",
