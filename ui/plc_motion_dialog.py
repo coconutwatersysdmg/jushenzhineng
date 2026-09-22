@@ -32,7 +32,9 @@ STEP_TITLES = {
     "DEVICE_CHECK": "1. 外接设备连接检查",
     "LAB_SENSE": "2. 相机插孔识别 ∥ 雷达四角",
     "LAB_CORNER_SHELL": "3. 相机精定位（拍照+YOLO）",
-    "LAB_PLACE_VERIFY": "4. 手动放货后俯拍校验",
+    "LAB_RETURN_ORIGIN": "返回实验室原点（R保持）",
+    "LAB_PRE_PLACE_MONITOR": "上一 B 区放货前监测",
+    "LAB_PLACE_VERIFY": "当前 B 区手动放货后检测",
     "PRE_PICK_OFFSET": "2. 货物-托盘偏差分析",
     "PARALLEL_LOCATE": "3. 并行：3.1 插取 ∥ 3.2 雷达",
     "PICK_ONLY": "3.1 机械臂找插孔并插取",
@@ -54,7 +56,9 @@ STEP_TITLES = {
 
 # 运动 task → 中文目的（前缀匹配，长的在前）
 _TASK_PURPOSE = (
-    ("LAB_PLACE_OVERHEAD", "到车板上方俯拍位，确认托盘落点"),
+    ("LAB_RETURN_ORIGIN", "返回实验室原点，R轴保持启动角度"),
+    ("LAB_PRE_PLACE_", "到上一 B 区几何中心做放货前监测"),
+    ("LAB_POST_PLACE_", "到当前 B 区几何中心做放货后检测"),
     ("PALLET_HOLE_LEFT", "左插孔目标坐标（可改后下发）"),
     ("PALLET_HOLE_RIGHT", "右插孔目标坐标（可改后下发）"),
     ("MOVE_TO_TAIL_STAGED_CARGO", "移到车尾待装货物上方，准备找插孔"),

@@ -22,6 +22,14 @@
       "example_output": "examples/module_outputs/PALLET_HOLE_YOLO.json"
     },
     {
+      "module_id": "LAB_PALLET_HOLE_TRADITIONAL",
+      "name": "实验室托盘左右插孔识别",
+      "flow_stage": "实验室第2步/循环第2步",
+      "category": "D435i RGB-D 传统视觉算法",
+      "implementation": "TraditionalForkHoleService + fork_hole_final",
+      "example_inputs": {"capture": "D435i 实时彩色图和对齐深度图"}
+    },
+    {
       "module_id": "POINTNET_TRUCK",
       "name": "雷达点云车板分割/粗定位",
       "flow_stage": "3.2",
@@ -124,6 +132,22 @@
       "implementation": "dynamic_monitoring_opencv_rgbd",
       "example_inputs": {"rgb_path": "examples/dynamic_monitoring/color.png", "depth_path": "examples/dynamic_monitoring/depth_z16.png", "camera_path": "examples/dynamic_monitoring/camera.json"},
       "example_output": "examples/module_outputs/DYNAMIC_POST_PLACE.json"
+    },
+    {
+      "module_id": "LAB_DYNAMIC_PRE_PLACE",
+      "name": "实验室 B 列放货前动态监测",
+      "flow_stage": "实验室循环-放货前",
+      "category": "D435i RGB-D 传统视觉算法",
+      "implementation": "algorithm_modules/lab/dynamic_box_monitor/dynamic_box_monitor.py + LabDynamicBoxMonitorService",
+      "example_inputs": {"capture": "D435i 实时彩色图和对齐深度图", "planned_region": "上一轮 B 区 WORLD 四角"}
+    },
+    {
+      "module_id": "LAB_DYNAMIC_POST_PLACE",
+      "name": "实验室 B 列人工放货后区域确认",
+      "flow_stage": "实验室循环-放货后",
+      "category": "D435i RGB-D 传统视觉算法",
+      "implementation": "algorithm_modules/lab/dynamic_box_monitor/dynamic_box_monitor.py + LabDynamicBoxMonitorService",
+      "example_inputs": {"capture": "D435i 实时彩色图和对齐深度图", "planned_region": "当前 B 区 WORLD 四角"}
     },
     {
       "module_id": "REGION_DEVIATION",

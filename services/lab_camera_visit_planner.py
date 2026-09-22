@@ -81,6 +81,37 @@ class LabCameraVisitPlanner:
             )
         return targets
 
+    def build_world_target(
+        self,
+        target_world: Sequence[float],
+        planning_pose: Mapping[str, float] | None = None,
+        *,
+        task: str = "LAB_REGION_MONITOR",
+    ) -> dict[str, Any]:
+        """让相机光轴对准一个 WORLD 点；Z 固定，R 保持启动时角度。"""
+        values = tuple(float(value) for value in target_world[:3])
+        if len(values) != 3 or not all(math.isfinite(value) for value in values):
+            raise ValueError("实验室相机目标 WORLD 坐标无效")
+        pose = dict(planning_pose or {})
+        z = float(pose.get("z", LAB_CAMERA_Z_MM))
+        r = float(pose.get("r", LAB_CAMERA_R_DEG))
+        if not math.isclose(z, LAB_CAMERA_Z_MM):
+            raise ValueError(f"实验室相机访问姿态 Z 必须是 {LAB_CAMERA_Z_MM}，当前为 {z}")
+        xy = self.transform.plc_xy_for_camera_axis_target(
+            values,
+            {"x": 0.0, "y": 0.0, "z": z, "r": r},
+        )
+        return {
+            "task": str(task),
+            "target_world": list(values),
+            "plc_command": {
+                "X": float(xy["X"]),
+                "Y": float(xy["Y"]),
+                "Z": z,
+                "R": r,
+            },
+        }
+
     @staticmethod
     def plc_to_world_pose(
         command: Mapping[str, float],

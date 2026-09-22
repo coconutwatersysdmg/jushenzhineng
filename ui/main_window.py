@@ -53,10 +53,11 @@ class MainWindow(QMainWindow):
         (1, "设备连接检查"),
         (2, "相机插孔识别 ∥ 雷达四角粗定位"),
         (3, "相机精定位（拍照+YOLO）"),
-        (4, "手动放货后俯拍校验"),
+        (4, "B列循环：放前监测 / 手动放货 / 放后检测"),
     ]
     STEP_STAGE = {
-        "DEVICE_CHECK":1,"LAB_SENSE":2,"LAB_CORNER_SHELL":3,"LAB_PLACE_VERIFY":4,
+        "DEVICE_CHECK":1,"LAB_SENSE":2,"LAB_CORNER_SHELL":3,
+        "LAB_RETURN_ORIGIN":4,"LAB_PRE_PLACE_MONITOR":4,"LAB_PLACE_VERIFY":4,
         "PRE_PICK_OFFSET":2,"PARALLEL_LOCATE":3,"PICK_ONLY":3,"RADAR_TO_CAMERA":4,
         "CAPTURE_CORNERS":5,"CORNER_RECOGNITION":6,"CAMERA_TO_WORLD":7,
         "INITIAL_SPACE_PLAN":8,"NEIGHBOR_POSE":8,"TARGET_CONFIRM":8,"PRE_PLACE_MONITOR":9,"PLACE":9,
@@ -425,7 +426,7 @@ class MainWindow(QMainWindow):
             self.lab_right_panel.setVisible(lab)
         if hasattr(self, "debug_btn"):
             self.debug_btn.setVisible(not lab)
-        title = "实验室装载测试 · 四步流程（插孔∥雷达 / 相机精定位 / 俯拍校验）" if lab else "具身智能装载数字孪生 · 单机械臂携货 / 挂载相机角点识别"
+        title = "实验室装载测试 · B列循环（B1 → B2 → B3）" if lab else "具身智能装载数字孪生 · 单机械臂携货 / 挂载相机角点识别"
         self.setWindowTitle(title)
         if lab and hasattr(self, "main_splitter"):
             self.main_splitter.setSizes([280, 780, 420])
@@ -913,7 +914,7 @@ class MainWindow(QMainWindow):
     def _refresh(self,s=None):
         s=s or self.controller.snapshot(); t=s["twin"]; self.bridge.update_state(t); self._refresh_flow_chain(s)
         lab = self._is_lab_ui()
-        mode_text = "实验室前两步" if lab else ("首轮建图" if s["first_round"] else "循环装载（跳过雷达/角点）")
+        mode_text = ("实验室首轮建图" if s["first_round"] else "实验室 B 列循环") if lab else ("首轮建图" if s["first_round"] else "循环装载（跳过雷达/角点）")
         self.phase.setText(f"第 {s['round']} 轮 · {mode_text} · {s['step_name']}"); self.progress.setText(f"{s['completed']} / {s['total']}")
         rd=s.get("round_data") or {}; cargo=t.get("cargo") or {}; p=cargo.get("pose") or {}; truck=t.get("truck") or {}; target=truck.get("current_target") or {}; tp=target.get("final_world_pose") or {}; fb=t.get("feedback_compensation_mm") or {}
         hole=((rd.get("pick_result") or {}).get("hole_result") or {})
@@ -927,7 +928,8 @@ class MainWindow(QMainWindow):
                 ("插孔识别", (rd.get("pick_result") or {}).get("message","等待第2步")),
                 ("雷达粗定位", (rd.get("radar_result") or {}).get("message","等待第2步")),
                 ("相机精定位", (rd.get("lab_corner_shell") or {}).get("message","等待第3步")),
-                ("俯拍校验", (rd.get("lab_place_verify") or {}).get("message","等待第4步（请先手动搬托盘到车板）")),
+                ("放货前监测", (rd.get("lab_pre_place_monitor") or {}).get("message","首件无需放前监测")),
+                ("放货后检测", (rd.get("lab_place_verify") or {}).get("message","请手动放到当前 B 区后执行检测")),
             ])
             self._refresh_lab_sense_panels(rd, hole, truck)
         else:
@@ -997,22 +999,27 @@ class MainWindow(QMainWindow):
     def _refresh_lab_sense_panels(self, rd: dict, hole: dict, truck: dict) -> None:
         """实验室右侧：相机图、插孔坐标、角点 WORLD（含来源）。"""
         place = rd.get("lab_place_verify") or {}
+        pre_monitor = rd.get("lab_pre_place_monitor") or {}
         pick = rd.get("pick_result") or {}
         corner = rd.get("lab_corner_shell") or {}
         image = str(place.get("image_path") or "")
         caption_default = "执行后显示相机照片（第2步插孔 / 第3步角点 / 第4步俯拍）"
         if image:
-            caption_default = "第4步：手动放货后俯拍"
+            caption_default = "当前 B 区：手动放货后检测"
         else:
-            image = str(corner.get("image_path") or "")
+            image = str(pre_monitor.get("image_path") or "")
             if image:
-                caption_default = "第3步：角点精定位拍照"
+                caption_default = "上一 B 区：下一件放货前监测"
             else:
-                image = str(pick.get("image_path") or "")
+                image = str(corner.get("image_path") or "")
                 if image:
-                    caption_default = "第2步：托盘插孔识别图"
+                    caption_default = "第3步：角点精定位拍照"
                 else:
-                    image = self._first_image(hole) or self._first_image(pick.get("capture")) or ""
+                    image = str(pick.get("image_path") or "")
+                    if image:
+                        caption_default = "第2步：托盘插孔识别图"
+                    else:
+                        image = self._first_image(hole) or self._first_image(pick.get("capture")) or ""
         if image and Path(image).is_file():
             pix = QPixmap(image)
             if not pix.isNull():

@@ -16,7 +16,17 @@ from core.geometry import Pose6D, parent_pose_for_child
 from devices.device_factory import create_device_adapters
 from services.algorithm_facade import AlgorithmFacade
 from services.lab_camera_visit_planner import LabCameraVisitPlanner, merge_lab_corner_points
-from services.lab_space_planner import build_lab_space_plan
+from services.lab_space_planner import (
+    build_lab_space_plan,
+    lab_b_region_for_round,
+    lab_b_regions,
+)
+from services.lab_cycle_policy import (
+    LAB_FIRST_STEPS as LAB_POLICY_FIRST_STEPS,
+    LAB_REPEAT_STEPS as LAB_POLICY_REPEAT_STEPS,
+    lab_steps_for_round,
+)
+from services.lab_dynamic_box_monitor_service import LabDynamicBoxMonitorService
 from services.sensor_calibration_service import SensorCalibrationService
 from services.camera_corner_world_service import CameraCornerWorldService
 from services.camera_board_geometry_service import CameraBoardGeometryService
@@ -84,18 +94,9 @@ class FlowController:
         ("FEEDBACK", "11. 偏差回PLC / 修正下一托盘 / 更新空间"),
         ("RETURN", "12. 机械臂返回 / 下一轮"),
     ]
-    # 实验室模式：设备检查 → 插孔∥雷达 → 相机精定位 → 手动放货后俯拍校验（可多轮）
-    LAB_FIRST_STEPS = [
-        ("DEVICE_CHECK", "1. 外接设备连接检查（PLC / 雷达 / 相机）"),
-        ("LAB_SENSE", "2. 相机插孔识别 ∥ 雷达底板四角粗定位"),
-        ("LAB_CORNER_SHELL", "3. 相机精定位（到位拍照 + YOLO WORLD）"),
-        ("LAB_PLACE_VERIFY", "4. 手动放货后俯拍位置校验"),
-    ]
-    LAB_REPEAT_STEPS = [
-        ("LAB_SENSE", "2. 相机插孔识别（复用首轮雷达车板）"),
-        ("LAB_CORNER_SHELL", "3. 相机精定位（到位拍照 + YOLO WORLD）"),
-        ("LAB_PLACE_VERIFY", "4. 手动放货后俯拍位置校验"),
-    ]
+    # 实验室：首轮建图；后续按 B1→B2→B3 做返回/插孔/放前监测/放后检测。
+    LAB_FIRST_STEPS = list(LAB_POLICY_FIRST_STEPS)
+    LAB_REPEAT_STEPS = list(LAB_POLICY_REPEAT_STEPS)
 
     @staticmethod
     def is_lab_profile() -> bool:
@@ -128,6 +129,7 @@ class FlowController:
             self.camera.set_demo_enabled(self.allow_demo)
         self.algorithms = algorithms or AlgorithmFacade()
         self.calibration = SensorCalibrationService()
+        self.lab_box_monitor = LabDynamicBoxMonitorService(calibration=self.calibration)
         c_cfg = self.system_config.get("camera_corner_world") or {}
         self.corner_world = CameraCornerWorldService(self.calibration, depth_window=int(c_cfg.get("depth_sample_window", 5)))
         g_cfg = self.system_config.get("camera_board_geometry") or {}
@@ -369,7 +371,7 @@ class FlowController:
     @property
     def steps(self):
         if self.is_lab_profile():
-            return self.LAB_FIRST_STEPS if self.is_first_round else self.LAB_REPEAT_STEPS
+            return list(lab_steps_for_round(self.round_index))
         return self.FIRST_STEPS if self.is_first_round else self.REPEAT_STEPS
     @property
     def current_step(self):
@@ -455,7 +457,7 @@ class FlowController:
 
     def _live_camera_force_tags(self) -> tuple[str, ...]:
         # 实验室 / 真实：这些步骤必须实拍，不允许调试预填示例图短路。
-        return ("pallet_hole", "pre_pick_offset", "lab_place_verify")
+        return ("pallet_hole", "pre_pick_offset", "lab_pre_place_monitor", "lab_place_verify")
 
     def _apply_live_camera_policy(self):
         """真机：第2步等偏移检测丢掉调试预填 JPG，强制走相机实拍。"""
@@ -933,27 +935,8 @@ class FlowController:
         if self.round_data.get("pick_result", {}).get("success"):
             return self.round_data["pick_result"]
         self.twin.set_parallel("pick", "RUNNING", "实验室：插孔拍照识别中")
-        pick_cfg = ((self.device_config.get("robots") or {}).get("PICK_ARM") or {})
-        cargo_mount = pick_cfg.get("cargo_mount_pose") or {
-            "x_mm": 0.0, "y_mm": 1100.0, "z_mm": -350.0,
-            "roll_deg": 0.0, "pitch_deg": 0.0, "yaw_deg": 0.0,
-        }
-        staged_pose = Pose6D.from_any((self.twin.snapshot().get("cargo") or {}).get("pose"))
-        pickup_tool = parent_pose_for_child(staged_pose, Pose6D.from_any(cargo_mount)).to_dict()
-        approach = deepcopy(pickup_tool)
-        approach["z_mm"] += 700.0
-
-        # 接近位只更新孪生，不弹 PLC；识别出的插孔坐标再弹窗供用户改后下发。
-        emitter = getattr(self.robot, "command_emitter", None)
-        try:
-            if hasattr(self.robot, "command_emitter"):
-                self.robot.command_emitter = None
-            self.robot.move_tool_world("PICK_ARM", approach, "MOVE_TO_TAIL_STAGED_CARGO")
-            self.robot.move_tool_world("PICK_ARM", pickup_tool, "FIND_PALLET_HOLE")
-        finally:
-            if hasattr(self.robot, "command_emitter"):
-                self.robot.command_emitter = emitter
-
+        # 首轮使用启动前已调好的实际位置；后续轮先执行 LAB_RETURN_ORIGIN。
+        # 这里只实拍、识别、发送坐标消息，不生成机械臂运动或插取命令。
         cam = self._camera_for_role("pallet_hole", "CAM_PICK")
         cap = self.camera.capture_rgbd(cam, tag="pallet_hole")
         if cap.get("success"):
@@ -972,11 +955,11 @@ class FlowController:
                     "message": f"传统插孔算法识别失败：{exc}",
                 }
             self._evidence(
-                "PALLET_HOLE_YOLO",
+                "LAB_PALLET_HOLE_TRADITIONAL",
                 {"rgb_path": cap["rgb_path"], "depth_path": cap["depth_path"]},
                 hole,
                 started,
-                model_invoked=True,
+                model_invoked=False,
                 note="实验室传统 OpenCV：实时 RGB-D 输出左右插孔相机坐标，再转 WORLD",
                 status="SUCCESS" if hole.get("success") else "FAILED",
             )
@@ -991,7 +974,7 @@ class FlowController:
             }
             started = perf_counter()
             self._evidence(
-                "PALLET_HOLE_YOLO",
+                "LAB_PALLET_HOLE_TRADITIONAL",
                 {"rgb_path": "", "depth_path": ""},
                 hole,
                 started,
@@ -1017,31 +1000,33 @@ class FlowController:
                 hole["world_transform_warning"] = str(exc)
 
         if hole.get("success"):
-            # 把左右插孔 WORLD 坐标作为可编辑下发目标（不做 fork）
-            yaw = float(pickup_tool.get("yaw_deg", -90.0) or -90.0)
-            for side, key, task in (
-                ("left", "left_world_xyz_mm", "PALLET_HOLE_LEFT"),
-                ("right", "right_world_xyz_mm", "PALLET_HOLE_RIGHT"),
-            ):
-                xyz = hole.get(key)
-                if not xyz:
-                    continue
-                pose = {
-                    "x_mm": float(xyz[0]),
-                    "y_mm": float(xyz[1]),
-                    "z_mm": float(xyz[2]),
-                    "roll_deg": 0.0,
-                    "pitch_deg": 0.0,
-                    "yaw_deg": yaw,
-                }
-                self.robot.move_tool_world("PICK_ARM", pose, task)
+            targets = {
+                side: deepcopy(hole.get(f"{side}_world_xyz_mm"))
+                for side in ("left", "right")
+                if hole.get(f"{side}_world_xyz_mm") is not None
+            }
+            coordinate_message = self.plc.send_message(
+                "PALLET_HOLE_COORDINATES",
+                "SUCCESS",
+                "实验室插孔 WORLD 坐标已下发，仅供 PLC/界面使用，不执行运动或插取",
+                {
+                    "coordinate_frame": "world",
+                    "coordinate_unit": "mm",
+                    "targets": targets,
+                    "execute_motion": False,
+                    "execute_fork": False,
+                },
+            )
 
             result = {
                 "success": True,
                 "lab_mode": True,
                 "fork_skipped": True,
-                "message": "插孔识别完成（实验室：仅下发坐标，不执行物理插取）",
+                "motion_skipped": True,
+                "message": "插孔识别完成（实验室：仅下发 WORLD 坐标，不执行运动或物理插取）",
                 "hole_result": hole,
+                "hole_world_targets": targets,
+                "coordinate_message": coordinate_message,
                 "capture": deepcopy(cap) if isinstance(cap, Mapping) else cap,
                 "image_path": str(
                     hole.get("result_image_path")
@@ -1377,6 +1362,8 @@ class FlowController:
                 "board_mode": (lab_space_plan.get("geometry") or {}).get("board_mode"),
                 "region_count": len((lab_space_plan.get("space") or {}).get("regions") or []),
                 "available_count": len((lab_space_plan.get("space") or {}).get("available") or []),
+                "loading_column": lab_space_plan.get("loading_column"),
+                "loading_order": deepcopy(lab_space_plan.get("loading_order") or []),
                 "ui_display": False,
                 "message": lab_space_plan.get("message"),
             },
@@ -1388,6 +1375,7 @@ class FlowController:
         self.round_data["camera_world_corners"] = deepcopy(camera_points)
         self.round_data["final_world_corners"] = deepcopy(final_points)
         self.round_data["lab_corner_shell"] = result
+        space_snapshot = lab_space_plan.get("space") or {}
         self.twin.update_truck(
             corners=deepcopy(final_points),
             board_mode="LAB_CAMERA_FINAL",
@@ -1395,6 +1383,14 @@ class FlowController:
                 "decision_source": "lab_camera_world_priority",
                 "corner_sources": {pid: point.get("source") for pid, point in final_points.items()},
                 "capture_groups": captured_groups,
+                "loading_column": lab_space_plan.get("loading_column"),
+                "loading_order": deepcopy(lab_space_plan.get("loading_order") or []),
+            },
+            regions=deepcopy(space_snapshot.get("regions") or []),
+            occupied=deepcopy(space_snapshot.get("occupied") or []),
+            available=deepcopy(space_snapshot.get("available") or []),
+            remaining_space={
+                "available_b_regions": deepcopy(lab_space_plan.get("loading_order") or []),
             },
         )
         self.twin.add_message(
@@ -1411,90 +1407,169 @@ class FlowController:
         self.twin.set_phase(result["message"], self.round_index + 1)
         return result
 
-    def _lab_overhead_pose(self) -> dict:
-        """估一个车板/货物上方的俯拍位姿（仅更新孪生，默认不写 PLC）。"""
-        truck = self.twin.snapshot().get("truck") or {}
-        corners = truck.get("corners") or {}
-        if len(corners) >= 2:
-            xs = [float(p.get("x", 0)) for p in corners.values()]
-            ys = [float(p.get("y", 0)) for p in corners.values()]
-            zs = [float(p.get("z", 0)) for p in corners.values()]
-            return {
-                "x_mm": sum(xs) / len(xs),
-                "y_mm": sum(ys) / len(ys),
-                "z_mm": max(zs) + 1800.0,
-                "roll_deg": 0.0,
-                "pitch_deg": 0.0,
-                "yaw_deg": -90.0,
-            }
-        cargo = (self.twin.snapshot().get("cargo") or {}).get("pose") or {}
+    def _lab_region_camera_move(self, region: Mapping[str, Any], task: str) -> dict[str, Any]:
+        """把相机光轴移到区域几何中心；仅 XYZ 变化，R 使用启动锁定值。"""
+        center = list(region.get("center_world_xyz_mm") or [])
+        if len(center) != 3:
+            raise RuntimeError(f"区域 {region.get('region_id')} 缺少几何中心")
+        held_r = self._lab_held_r_deg()
+        planner = LabCameraVisitPlanner(self.algorithms.lab_camera_transform())
+        target = planner.build_world_target(
+            center,
+            {"x": 0.0, "y": 0.0, "z": 380.0, "r": held_r},
+            task=task,
+        )
+        mapping = getattr(self.robot, "world_to_gantry", None)
+        if not mapping:
+            from config.external_devices_config import GANTRY
+
+            mapping = GANTRY.get("world_to_gantry") or {}
+        world_pose = planner.plc_to_world_pose(target["plc_command"], mapping)
+        moved = self.robot.move_tool_world("PICK_ARM", world_pose, task)
+        if not moved.get("success"):
+            raise RuntimeError(moved.get("message") or f"无法移动到 {region.get('region_id')} 几何中心")
         return {
-            "x_mm": float(cargo.get("x_mm", 0) or 0),
-            "y_mm": float(cargo.get("y_mm", 0) or 0),
-            "z_mm": float(cargo.get("z_mm", 0) or 0) + 1800.0,
-            "roll_deg": 0.0,
-            "pitch_deg": 0.0,
-            "yaw_deg": float(cargo.get("yaw_deg", -90) or -90),
+            "success": True,
+            "region_id": region.get("region_id"),
+            "region_center_world_xyz_mm": center,
+            "held_r_deg": held_r,
+            "planner_target": target,
+            "target_world_pose": world_pose,
+            "motion": moved,
         }
+
+    def _lab_dynamic_region_check(
+        self,
+        region: Mapping[str, Any],
+        *,
+        phase: str,
+        task: str,
+        capture_tag: str,
+    ) -> dict[str, Any]:
+        movement = self._lab_region_camera_move(region, task)
+        camera_id = self._camera_for_role("observe", "CAM_PICK") or self._camera_for_role("pallet_hole", "CAM_PICK")
+        capture = self._capture_rgbd(camera_id, capture_tag)
+        started = perf_counter()
+        result = self.lab_box_monitor.analyze_capture(
+            capture,
+            region,
+            phase=phase,
+            result_tag=str(region.get("region_id") or "B"),
+        )
+        result["movement"] = movement
+        result["capture"] = deepcopy(capture)
+        result["image_path"] = str(result.get("result_image_path") or capture.get("rgb_path") or "")
+        module_id = "LAB_DYNAMIC_PRE_PLACE" if phase == "pre_place" else "LAB_DYNAMIC_POST_PLACE"
+        self._evidence(
+            module_id,
+            {
+                "rgb_path": capture.get("rgb_path"),
+                "depth_path": capture.get("depth_path"),
+                "camera_world_pose": capture.get("camera_world_pose"),
+                "planned_region": deepcopy(region),
+            },
+            result,
+            started,
+            model_invoked=False,
+            note="实验室 dynamic_monitor_lab：传统 OpenCV 纸箱角点 + D435i 深度转 WORLD 后判区",
+            status="SUCCESS" if result.get("success") else "FAILED",
+        )
+        status = "SUCCESS" if result.get("success") else "FAILED"
+        self.plc.send_message(module_id, status, result.get("message", "实验室动态监测完成"), result)
+        return result
+
+    def _lab_return_origin(self) -> dict[str, Any]:
+        """返回配置的 PLC 工作原点，R 仍保持软件启动时的物理角度。"""
+        from config.external_devices_config import GANTRY
+
+        mapping = getattr(self.robot, "world_to_gantry", None) or GANTRY.get("world_to_gantry") or {}
+        origin = dict(GANTRY.get("work_origin") or {"X": 0.0, "Y": 0.0, "Z": 0.0, "R": 0.0})
+        held_r = self._lab_held_r_deg()
+        command = {
+            "X": float(origin.get("X", 0.0)),
+            "Y": float(origin.get("Y", 0.0)),
+            "Z": float(origin.get("Z", 0.0)),
+            "R": held_r,
+        }
+        world_pose = LabCameraVisitPlanner.plc_to_world_pose(command, mapping)
+        moved = self.robot.move_tool_world("PICK_ARM", world_pose, "LAB_RETURN_ORIGIN")
+        return {
+            "success": bool(moved.get("success")),
+            "plc_work_origin_xyzr": command,
+            "held_r_deg": held_r,
+            "target_world_pose": world_pose,
+            "motion": moved,
+            "message": "已返回实验室原点，R 轴保持启动角度" if moved.get("success") else moved.get("message"),
+        }
+
+    def _lab_pre_place_monitor(self) -> dict[str, Any]:
+        """下一件货物放置前，复查上一件货物所在 B 区。"""
+        previous_region = lab_b_region_for_round(self.space.snapshot(), self.round_index - 1)
+        result = self._lab_dynamic_region_check(
+            previous_region,
+            phase="pre_place",
+            task=f"LAB_PRE_PLACE_{previous_region['region_id']}",
+            capture_tag="lab_pre_place_monitor",
+        )
+        self.round_data["lab_pre_place_monitor"] = result
+        return result
 
     def _lab_place_verify(self):
-        """实验室第4步：人工搬货到车板后，臂上相机俯拍确认位置（算法暂留空）。"""
-        overhead = self._lab_overhead_pose()
-        emitter = getattr(self.robot, "command_emitter", None)
-        try:
-            if hasattr(self.robot, "command_emitter"):
-                self.robot.command_emitter = None
-            self.robot.move_tool_world("PICK_ARM", overhead, "LAB_PLACE_OVERHEAD")
-        finally:
-            if hasattr(self.robot, "command_emitter"):
-                self.robot.command_emitter = emitter
-
-        cam = self._camera_for_role("observe", "CAM_PICK")
-        if not cam:
-            cam = self._camera_for_role("pallet_hole", "CAM_PICK")
-        cap = self._capture_rgb(cam, "lab_place_verify", required=False)
-        image_path = str((cap or {}).get("image_path") or (cap or {}).get("rgb_path") or "")
-
-        # 算法未就绪：只落盘拍照结果，占位字段留给后续接入「托盘相对车板」检测。
-        algo = {
-            "success": False,
-            "pending_algorithm": True,
-            "message": "俯拍位置校验算法尚未接入（仓内无「托盘相对车板俯拍确认」专用模块），仅保留照片",
-        }
-        result = {
-            "success": bool((cap or {}).get("success") and image_path),
-            "continue_anyway": True,
-            "lab_mode": True,
-            "manual_place": True,
-            "capture": deepcopy(cap) if isinstance(cap, Mapping) else cap,
-            "image_path": image_path,
-            "overhead_pose": overhead,
-            "algorithm": algo,
-            "message": (
-                f"已俯拍：{image_path}（算法待接入，请人工确认托盘落点）"
-                if image_path
-                else f"俯拍失败：{(cap or {}).get('message') or '无图像'}（已记录，可继续下一托）"
-            ),
-        }
-        if result["success"]:
-            # 实验室：标记本托已“放置”（人工搬上），便于下一轮切换货物
+        """人工放货后，到本轮 B 区中心实拍 RGB-D 并做 WORLD 四角判定。"""
+        region = lab_b_region_for_round(self.space.snapshot(), self.round_index)
+        result = self._lab_dynamic_region_check(
+            region,
+            phase="post_place",
+            task=f"LAB_POST_PLACE_{region['region_id']}",
+            capture_tag="lab_place_verify",
+        )
+        result["lab_mode"] = True
+        result["manual_place"] = True
+        result["target_region"] = deepcopy(region)
+        occupied = self.space.occupy_region_if_passed(
+            str(region.get("region_id")),
+            str((self.current_cargo or {}).get("instance_id") or f"LAB-CARGO-{self.round_index + 1}"),
+            result,
+        )
+        result["occupied_region"] = occupied
+        if occupied:
             cargo = deepcopy(self.twin.snapshot().get("cargo") or {})
             if cargo:
                 cargo["status"] = "PLACED_MANUAL_LAB"
                 cargo["attached_to"] = None
+                cargo["planned_region_id"] = region.get("region_id")
                 self.twin.set_cargo(cargo)
+            snapshot = self.space.snapshot()
+            self.twin.update_truck(
+                current_target={
+                    "region_id": region.get("region_id"),
+                    "blind_code": region.get("blind_code"),
+                    "nominal_world_pose": {
+                        "x_mm": float(region["center_world_xyz_mm"][0]),
+                        "y_mm": float(region["center_world_xyz_mm"][1]),
+                        "z_mm": float(region["center_world_xyz_mm"][2]),
+                    },
+                },
+                regions=snapshot["regions"],
+                occupied=snapshot["occupied"],
+                available=snapshot["available"],
+                remaining_space={
+                    "available_b_regions": [item["region_id"] for item in lab_b_regions(snapshot) if item.get("status") == "AVAILABLE"],
+                },
+            )
         self.round_data["lab_place_verify"] = result
-        status = "SUCCESS" if result.get("success") else "WARNING"
+        status = "SUCCESS" if result.get("success") else "FAILED"
         self.twin.add_message("LAB_PLACE_VERIFY", status, result["message"], result)
         self.plc.send_message("LAB_PLACE_VERIFY", status, result["message"], result)
         return result
 
     def _advance_lab_round(self):
-        """实验室一轮结束：进入下一托；雷达和首轮相机车板结果带到下一轮。"""
+        """本轮 B 区检测通过后进入下一件；车板几何永久复用，不再重复扫描。"""
         self.completed.append(deepcopy(self.round_data))
         preserved_radar = None
         preserved_camera = None
         preserved_final = None
+        preserved_corner_shell = None
         for item in reversed(self.completed):
             radar = item.get("radar_result")
             if isinstance(radar, Mapping) and radar.get("success") and radar.get("world_points"):
@@ -1504,6 +1579,7 @@ class FlowController:
             if camera and final:
                 preserved_camera = deepcopy(camera)
                 preserved_final = deepcopy(final)
+                preserved_corner_shell = deepcopy(item.get("lab_corner_shell") or {})
             if preserved_radar and preserved_camera and preserved_final:
                 break
         self.round_index += 1
@@ -1514,16 +1590,31 @@ class FlowController:
         if preserved_camera and preserved_final:
             self.round_data["camera_world_corners"] = preserved_camera
             self.round_data["final_world_corners"] = preserved_final
-        if self.round_index >= len(self.queue):
+            self.round_data["lab_corner_shell"] = {
+                **preserved_corner_shell,
+                "success": True,
+                "reused": True,
+                "camera_world_corners": deepcopy(preserved_camera),
+                "final_world_corners": deepcopy(preserved_final),
+                "message": "复用首轮相机最终角点与 B 列规划，不重复雷达/角点扫描",
+            }
+        b_regions = lab_b_regions(self.space.snapshot())
+        if self.round_index >= len(self.queue) or self.round_index >= len(b_regions):
             self.finished = True
             self.running = False
-            self.twin.set_phase("实验室全部托盘流程完成", self.round_index)
+            reason = "实验室 B 列装货检测完成" if self.round_index >= len(b_regions) else "实验室全部货物流程完成"
+            self.twin.set_phase(reason, self.round_index)
             if self.loading_session_id:
                 self.vehicle_db.finish_session(self.loading_session_id, "COMPLETED")
-            return {"finished": True}
+            return {"finished": True, "message": reason}
         self._load_cargo_to_twin()
         self.twin.set_phase(self.current_step[1], self.round_index + 1)
-        return {"finished": False, "next_round": self.round_index + 1}
+        return {
+            "finished": False,
+            "next_round": self.round_index + 1,
+            "next_region_id": b_regions[self.round_index].get("region_id"),
+            "previous_region_id": b_regions[self.round_index - 1].get("region_id"),
+        }
 
     def _parallel_locate(self):
         need_pick=not self.round_data.get("pick_result",{}).get("success")
@@ -2032,15 +2123,24 @@ class FlowController:
         code,name=self.current_step; self.twin.set_phase(name,self.round_index+1)
         try:
             if code=="DEVICE_CHECK": data=self._device_check()
+            elif code=="LAB_RETURN_ORIGIN":
+                data=self._lab_return_origin()
+                if not data.get("success"):
+                    raise RuntimeError(data.get("message") or "实验室返回原点失败")
             elif code=="LAB_SENSE": data=self._lab_sense()
             elif code=="LAB_CORNER_SHELL": data=self._lab_corner_shell()
+            elif code=="LAB_PRE_PLACE_MONITOR":
+                data=self._lab_pre_place_monitor()
+                if not data.get("success"):
+                    raise RuntimeError(data.get("message") or "上一 B 区放货前监测未通过")
             elif code=="LAB_PLACE_VERIFY":
                 data=self._lab_place_verify()
-                soft_ok=bool((data or {}).get("success"))
+                if not data.get("success"):
+                    raise RuntimeError(data.get("message") or "当前 B 区放货后检测未通过")
                 self._record(
                     code,
                     name,
-                    "success" if soft_ok else "warning",
+                    "success",
                     str((data or {}).get("message") or name),
                     data,
                 )
@@ -2116,6 +2216,24 @@ class FlowController:
             "forced_continue": True,
             "reason": str(reason or "用户选择失败后继续"),
         }
+        if self.is_lab_profile() and code in {
+            "LAB_RETURN_ORIGIN",
+            "LAB_PRE_PLACE_MONITOR",
+            "LAB_PLACE_VERIFY",
+        }:
+            detail["forced_continue"] = False
+            detail["retry_required"] = True
+            self._record(
+                code,
+                name,
+                "warning",
+                f"实验室安全步骤未通过，保留当前步骤等待重试：{detail['reason']}",
+                detail,
+            )
+            self.twin.set_alarm(None)
+            self.twin.set_phase(name, self.round_index + 1)
+            self._save()
+            return self.snapshot()
         self._record(
             code,
             name,

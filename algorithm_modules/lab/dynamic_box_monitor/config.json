@@ -1,0 +1,19 @@
+{
+  "lab_lower": [100, 115, 136],
+  "lab_upper": [190, 138, 160],
+  "roi_norm": [0.22, 0.0, 0.78, 1.0],
+  "close_kernel": 11,
+  "close_iterations": 2,
+  "open_kernel": 5,
+  "open_iterations": 1,
+  "min_area_ratio": 0.015,
+  "max_area_ratio": 0.14,
+  "min_width_ratio": 0.12,
+  "max_width_ratio": 0.35,
+  "min_height_ratio": 0.08,
+  "max_height_ratio": 0.32,
+  "min_aspect_ratio": 1.15,
+  "max_aspect_ratio": 2.7,
+  "min_fill_ratio": 0.6,
+  "planned_region_uv": null
+}

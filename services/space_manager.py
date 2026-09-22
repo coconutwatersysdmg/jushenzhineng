@@ -91,6 +91,23 @@ class SpaceManager:
                 r["status"]="OCCUPIED"; r["cargo_id"]=str(cargo_id); return deepcopy(r)
         raise KeyError(rid)
 
+    def occupy_region_if_passed(
+        self,
+        region_id: str,
+        cargo_id: str,
+        monitor_result: Mapping[str, Any],
+    ) -> Dict[str, Any] | None:
+        """实验室手动放货：只有四角 WORLD 判定通过才占用该区域。"""
+        if not bool((monitor_result or {}).get("inside_planned_region")):
+            return None
+        target = str(region_id)
+        for region in self.regions:
+            if str(region.get("region_id")) == target:
+                region["status"] = "OCCUPIED"
+                region["cargo_id"] = str(cargo_id)
+                return deepcopy(region)
+        raise KeyError(target)
+
     def snapshot(self) -> Dict[str, Any]:
         return {
             "board_mode":self.board_geometry.get("board_mode","unknown"),
