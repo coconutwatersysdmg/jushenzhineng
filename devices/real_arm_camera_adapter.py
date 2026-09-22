@@ -169,6 +169,18 @@ class RealArmCameraAdapter(ArmCameraAdapter):
                 "extrinsic_file": str(self.extrinsic_file),
                 "message": f"D435i 实拍完成：{rgb_path.name}",
             }
+            try:
+                intr = color.profile.as_video_stream_profile().intrinsics
+                out["intrinsics"] = {
+                    "fx": float(intr.fx),
+                    "fy": float(intr.fy),
+                    "cx": float(intr.ppx),
+                    "cy": float(intr.ppy),
+                    "ppx": float(intr.ppx),
+                    "ppy": float(intr.ppy),
+                }
+            except Exception:
+                pass
             if need_depth and depth is not None:
                 depth_img = np.asanyarray(depth.get_data())
                 depth_path = self.capture_dir / f"{camera_id}_{safe_tag}_{stamp}_depth.png"
@@ -177,7 +189,10 @@ class RealArmCameraAdapter(ArmCameraAdapter):
                 out["depth_path"] = str(depth_path.resolve())
                 out["depth_scale_mm"] = self._depth_scale_mm
 
-            self.twin.update_camera(camera_id, task=f"REALSENSE:{tag}", status="CAPTURE")
+            twin_kwargs = {"task": f"REALSENSE:{tag}", "status": "CAPTURE"}
+            if out.get("intrinsics"):
+                twin_kwargs["intrinsics"] = dict(out["intrinsics"])
+            self.twin.update_camera(camera_id, **twin_kwargs)
             return out
         except Exception as exc:
             self._last_error = str(exc)

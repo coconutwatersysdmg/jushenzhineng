@@ -9,6 +9,7 @@ from services.point_cloud_processing_service import PointCloudProcessingService
 from services.corner_recognition_service import CornerRecognitionService
 from services.lab_lidar_adapter import process_lab_lidar_pcd
 from services.lab_camera_adapter import LabCameraCornerService
+from services.traditional_fork_hole_service import TraditionalForkHoleService
 
 
 class AlgorithmFacade:
@@ -25,11 +26,17 @@ class AlgorithmFacade:
         self.point_cloud = PointCloudProcessingService()
         self.corner = CornerRecognitionService()
         self._lab_camera: LabCameraCornerService | None = None
+        self._traditional_fork_hole: TraditionalForkHoleService | None = None
 
     def _lab_camera_service(self) -> LabCameraCornerService:
         if self._lab_camera is None:
             self._lab_camera = LabCameraCornerService()
         return self._lab_camera
+
+    def _traditional_fork_hole_service(self) -> TraditionalForkHoleService:
+        if self._traditional_fork_hole is None:
+            self._traditional_fork_hole = TraditionalForkHoleService()
+        return self._traditional_fork_hole
 
     def pre_pick_offset(self, image_path: str, cargo: dict):
         return self.offset.detect(image_path, phase="pre_pick", cargo=cargo, result_tag=cargo.get("instance_id", "cargo"))
@@ -82,14 +89,13 @@ class AlgorithmFacade:
             group_captures=group_captures,
         )
 
+    def lab_pallet_hole_recognize(self, capture: dict, cargo: dict):
+        """实验室插孔：传统 OpenCV 算法，输出相机坐标系 XYZ(mm)。"""
+        return self._traditional_fork_hole_service().recognize_capture(capture)
+
     def lab_pallet_hole_world_recognize(self, capture: dict, plc_pose: dict, cargo: dict):
-        """实验室插孔：复用 cam_yolo_lab 双目标检测，直接输出 WORLD。"""
-        return self._lab_camera_service().locate_pallet_holes(
-            capture["rgb_path"],
-            capture["depth_path"],
-            plc_pose,
-            depth_scale_mm=float(capture.get("depth_scale_mm", 1.0) or 1.0),
-        )
+        """兼容旧接口：实验室插孔已改为传统算法，世界坐标由流程侧转换。"""
+        return self.lab_pallet_hole_recognize(capture, cargo)
 
     def lab_camera_transform(self):
         """Return the lab-only camera/PLC/WORLD transform used by visit planning."""

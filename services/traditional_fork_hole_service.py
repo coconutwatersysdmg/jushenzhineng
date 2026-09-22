@@ -31,16 +31,28 @@ class TraditionalForkHoleService:
 
     @classmethod
     def _intrinsics(cls, capture: Mapping[str, Any]) -> dict[str, float]:
-        raw = capture.get("intrinsics") or {}
+        raw = capture.get("intrinsics")
         if isinstance(raw, Mapping):
             try:
+                cx = raw.get("cx", raw.get("ppx"))
+                cy = raw.get("cy", raw.get("ppy"))
                 return {
                     "fx": float(raw["fx"]),
                     "fy": float(raw["fy"]),
-                    "cx": float(raw.get("cx", raw["ppx"])),
-                    "cy": float(raw.get("cy", raw["ppy"])),
+                    "cx": float(cx),
+                    "cy": float(cy),
                 }
             except (KeyError, TypeError, ValueError):
+                pass
+        if isinstance(raw, (list, tuple)) and len(raw) >= 4:
+            try:
+                return {
+                    "fx": float(raw[0]),
+                    "fy": float(raw[1]),
+                    "cx": float(raw[2]),
+                    "cy": float(raw[3]),
+                }
+            except (TypeError, ValueError):
                 pass
         return cls._fallback_intrinsics()
 

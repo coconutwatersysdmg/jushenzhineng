@@ -33,7 +33,7 @@ class TraditionalForkHoleAlgorithmTests(unittest.TestCase):
             self.fail("传统插孔识别服务尚未集成")
 
         with TemporaryDirectory() as folder:
-            rgb_path = Path(folder) / "rgb.jpg"
+            rgb_path = Path(folder) / "rgb.png"
             depth_path = Path(folder) / "depth.png"
             image = np.full((720, 1280, 3), 210, dtype=np.uint8)
             image[350:450, 330:470] = 10

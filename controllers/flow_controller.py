@@ -944,12 +944,11 @@ class FlowController:
 
         # 接近位只更新孪生，不弹 PLC；识别出的插孔坐标再弹窗供用户改后下发。
         emitter = getattr(self.robot, "command_emitter", None)
-        pickup_move = None
         try:
             if hasattr(self.robot, "command_emitter"):
                 self.robot.command_emitter = None
             self.robot.move_tool_world("PICK_ARM", approach, "MOVE_TO_TAIL_STAGED_CARGO")
-            pickup_move = self.robot.move_tool_world("PICK_ARM", pickup_tool, "FIND_PALLET_HOLE")
+            self.robot.move_tool_world("PICK_ARM", pickup_tool, "FIND_PALLET_HOLE")
         finally:
             if hasattr(self.robot, "command_emitter"):
                 self.robot.command_emitter = emitter
@@ -959,19 +958,17 @@ class FlowController:
         if cap.get("success"):
             started = perf_counter()
             try:
-                plc_pose = self._plc_pose_for_lab_camera(pickup_move, pickup_tool)
-                hole = self.algorithms.lab_pallet_hole_world_recognize(
+                hole = self.algorithms.lab_pallet_hole_recognize(
                     cap,
-                    plc_pose,
                     self.current_cargo,
                 )
             except Exception as exc:
                 hole = {
                     "success": False,
-                    "algorithm": "cam_yolo_lab",
-                    "recognition_source": "cam_yolo_lab_pallet_holes",
+                    "algorithm": "traditional_opencv_fork_hole",
+                    "recognition_source": "traditional_fork_hole_rgbd",
                     "result_image_path": str(cap.get("rgb_path") or ""),
-                    "message": f"cam_yolo_lab 插孔识别失败：{exc}",
+                    "message": f"传统插孔算法识别失败：{exc}",
                 }
             self._evidence(
                 "PALLET_HOLE_YOLO",
@@ -979,7 +976,7 @@ class FlowController:
                 hole,
                 started,
                 model_invoked=True,
-                note="实验室 cam_yolo_lab：实时 RGB-D + PLC XYZR 直接输出左右插孔 WORLD",
+                note="实验室传统 OpenCV：实时 RGB-D 输出左右插孔相机坐标，再转 WORLD",
                 status="SUCCESS" if hole.get("success") else "FAILED",
             )
         elif self.allow_demo:

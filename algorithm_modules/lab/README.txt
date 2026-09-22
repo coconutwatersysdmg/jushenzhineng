@@ -2,8 +2,9 @@
 
 目录
 ----
-lidar_lab/     实验室雷达点云几何算法 + lidar_extrinsic.json
-cam_yolo_lab/  实验室 YOLO 角点 + camera_extrinsic.json + weights/best.pt
+lidar_lab/      实验室雷达点云几何算法 + lidar_extrinsic.json
+cam_yolo_lab/   实验室 YOLO 角点 + camera_extrinsic.json + weights/best.pt
+fork_hole_lab/  实验室托盘插孔传统 OpenCV 算法（替代插孔 YOLO）
 
 开关
 ----
