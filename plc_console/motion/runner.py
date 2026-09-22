@@ -21,6 +21,7 @@ class PlcMotionRunner:
         self.soft_limits = dict(gantry.get("soft_limits") or {})
         self.world_to_gantry = dict(gantry.get("world_to_gantry") or {})
         self.hold_r_axis = bool(gantry.get("hold_r_axis", True))
+        self.locked_r_deg: float | None = None
         self._motion = GantryModbusMotion(self.host, self.port)
 
     @property
@@ -53,9 +54,11 @@ class PlcMotionRunner:
     def execute_command(self, cmd: Mapping[str, Any]) -> dict[str, Any]:
         targets = self.resolve_xyzr(cmd)
         if self.hold_r_axis:
-            # 真机写轴时强制保持当前 R，避免指令里的 yaw/R 带动旋转
-            current = self.read_positions()
-            targets["R"] = float(current["R"])
+            # 首次执行时读取启动前人工调好的 R，后续指令沿用该锁定值。
+            if self.locked_r_deg is None:
+                current = self.read_positions()
+                self.locked_r_deg = float(current["R"])
+            targets["R"] = float(self.locked_r_deg)
         speed = float(cmd.get("speed") or self.default_speed)
         result = self._motion.move_absolute(
             targets,
@@ -68,4 +71,5 @@ class PlcMotionRunner:
         out["task"] = cmd.get("task")
         out["targets"] = targets
         out["r_axis_held"] = bool(self.hold_r_axis)
+        out["locked_r_deg"] = self.locked_r_deg
         return out

@@ -50,7 +50,13 @@ class RealGantryRobotAdapter(RobotAdapter):
 
     def _with_held_r(self, robot_id: str, pose: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, float] | None, str | None]:
         current = self._current_pose(robot_id)
-        current_gantry, _ = self._resolve_gantry(current) if current else (None, None)
+        current_gantry = None
+        try:
+            physical = self.plc.read_positions()
+            if isinstance(physical, Mapping) and physical.get("R") is not None:
+                current_gantry = {key: float(physical[key]) for key in ("X", "Y", "Z", "R") if physical.get(key) is not None}
+        except Exception:
+            current_gantry, _ = self._resolve_gantry(current) if current else (None, None)
         self.r_hold.capture_from_pose(current or pose, current_gantry)
         held_pose = self.r_hold.apply_to_pose(pose)
         gantry_xyzr, transform_error = self._resolve_gantry(held_pose)

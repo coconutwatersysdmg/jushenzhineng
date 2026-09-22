@@ -35,6 +35,9 @@ class RealPlcAdapter(PLCAdapter):
         self.commands: dict[str, dict] = {}
         self._client = None
         self._motion: GantryModbusMotion | None = None
+        # 运动前以 PLC 实际当前位置为准，避免软件目标位姿中的 R 带动旋转。
+        self.hold_r_axis = bool(self.config.get("hold_r_axis", True))
+        self.locked_r_deg: float | None = None
 
     def connect(self):
         # TODO: 与PLC交互 — 按配置 IP/端口连现场 PLC（Modbus TCP），失败则整机真机流程起不来
@@ -131,6 +134,14 @@ class RealPlcAdapter(PLCAdapter):
         self.twin.update_device("PLC", task="ACK")
         return {"success": True, "command_id": command_id, "ack": True, "timeout_ms": timeout_ms}
 
+    def read_positions(self) -> dict[str, float]:
+        if not self.connected or self._motion is None:
+            linked = self.connect()
+            if not linked.get("success"):
+                raise RuntimeError(str(linked.get("message") or "PLC 未连接"))
+        assert self._motion is not None
+        return self._motion.read_positions()
+
     def move_absolute_xyzr(
         self,
         targets: Mapping[str, float],
@@ -145,19 +156,42 @@ class RealPlcAdapter(PLCAdapter):
                 return linked
         assert self._motion is not None
         try:
+            actual_targets = {key: float(value) for key, value in dict(targets).items()}
+            if self.hold_r_axis:
+                # 软件启动后的首次运动读取 PLC 实际 R，作为本次软件会话的锁定基准。
+                if self.locked_r_deg is None:
+                    current = self._motion.read_positions()
+                    if not isinstance(current, Mapping) or current.get("R") is None:
+                        raise RuntimeError("无法读取 PLC 当前 R 轴位置，已拒绝运动")
+                    self.locked_r_deg = float(current["R"])
+                if self.locked_r_deg is None:
+                    raise RuntimeError("无法读取 PLC 当前 R 轴位置，已拒绝运动")
+                actual_targets["R"] = float(self.locked_r_deg)
             result = self._motion.move_absolute(
-                targets,
+                actual_targets,
                 speed=speed,
                 timeout_s=timeout_s,
                 soft_limits=soft_limits,
             )
+            result = {
+                **result,
+                "targets": actual_targets,
+                "r_axis_held": self.hold_r_axis,
+                "locked_r_deg": self.locked_r_deg,
+            }
             self.twin.update_device("PLC", task="ABS_MOVE_DONE")
             self.twin.add_message("PLC", "SUCCESS", result.get("message", "绝对定位完成"), result)
             return result
         except Exception as exc:
             self.twin.update_device("PLC", status="FAILED", task="ABS_MOVE_FAILED")
             self.twin.add_message("PLC", "FAILED", str(exc), {"targets": dict(targets)})
-            return {"success": False, "message": str(exc), "targets": dict(targets)}
+            return {
+                "success": False,
+                "message": str(exc),
+                "targets": dict(targets),
+                "r_axis_held": self.hold_r_axis,
+                "locked_r_deg": self.locked_r_deg,
+            }
 
     def send_message(self, module: str, status: str, message: str, data: dict | None = None) -> dict:
         self.twin.add_message(module, status, message, data)
