@@ -454,18 +454,31 @@ class FlowController:
 
     def _live_camera_force_tags(self) -> tuple[str, ...]:
         # 实验室 / 真实：这些步骤必须实拍，不允许调试预填示例图短路。
-        return ("pre_pick_offset", "lab_place_verify")
+        return ("pallet_hole", "pre_pick_offset", "lab_place_verify")
 
     def _apply_live_camera_policy(self):
         """真机：第2步等偏移检测丢掉调试预填 JPG，强制走相机实拍。"""
         if str(getattr(self, "device_mode", "mock")).lower() != "real":
             return
         images = self.debug_inputs.setdefault("images", {})
+        depths = self.debug_inputs.setdefault("depths", {})
         cleared = []
         for tag in self._live_camera_force_tags():
-            path = str(images.get(tag) or "").strip()
-            if path:
+            had_offline_input = False
+            if str(images.get(tag) or "").strip():
                 images[tag] = ""
+                had_offline_input = True
+            if str(depths.get(tag) or "").strip():
+                depths[tag] = ""
+                had_offline_input = True
+            if tag == "pallet_hole":
+                if str(self.debug_inputs.get("pallet_rgb") or "").strip():
+                    self.debug_inputs["pallet_rgb"] = ""
+                    had_offline_input = True
+                if str(self.debug_inputs.get("pallet_depth") or "").strip():
+                    self.debug_inputs["pallet_depth"] = ""
+                    had_offline_input = True
+            if had_offline_input:
                 cleared.append(tag)
         if cleared:
             self.twin.add_message(
@@ -478,10 +491,11 @@ class FlowController:
     def _reapply_cleared_live_camera_tags(self):
         if str(getattr(self, "device_mode", "mock")).lower() != "real":
             return
-        images = self.debug_inputs.get("images") or {}
         for tag in self._live_camera_force_tags():
             if hasattr(self.camera, "set_tagged_image"):
-                self.camera.set_tagged_image(tag, str(images.get(tag) or ""))
+                self.camera.set_tagged_image(tag, "")
+            if hasattr(self.camera, "set_tagged_depth"):
+                self.camera.set_tagged_depth(tag, "")
 
     def default_debug_inputs(self):
         return self.module_evidence.example_debug_inputs()
