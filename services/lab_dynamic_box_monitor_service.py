@@ -32,36 +32,36 @@ def _xyz(value: Any) -> np.ndarray:
     return point
 
 
+def _xy(value: Any) -> np.ndarray:
+    """取 WORLD 平面坐标；纸箱是否落入区域不由高度决定。"""
+    if isinstance(value, Mapping):
+        data = (
+            value.get("x", value.get("x_mm")),
+            value.get("y", value.get("y_mm")),
+        )
+    else:
+        data = tuple(value[:2])
+    if len(data) != 2 or any(item is None for item in data):
+        raise ValueError(f"无效平面点：{value!r}")
+    point = np.asarray(data, dtype=np.float64)
+    if not np.all(np.isfinite(point)):
+        raise ValueError(f"无效平面点：{value!r}")
+    return point
+
+
 def _project_region_and_points(
     region_corners: Sequence[Any],
     points: Sequence[Any],
 ) -> tuple[np.ndarray, np.ndarray]:
     if len(region_corners) != 4:
         raise ValueError("规划区域必须包含四个 WORLD 角点")
-    region = np.stack([_xyz(point) for point in region_corners])
-    origin = region[0]
-    axis_u = region[1] - origin
-    axis_v_hint = region[2] - origin
-    u_norm = float(np.linalg.norm(axis_u))
-    if u_norm <= 1e-9:
+    region = np.stack([_xy(point) for point in region_corners])
+    if float(np.linalg.norm(region[1] - region[0])) <= 1e-9:
         raise ValueError("规划区域横向边长度为 0")
-    axis_u = axis_u / u_norm
-    normal = np.cross(axis_u, axis_v_hint)
-    n_norm = float(np.linalg.norm(normal))
-    if n_norm <= 1e-9:
-        raise ValueError("规划区域四角退化，无法建立平面")
-    normal = normal / n_norm
-    axis_v = np.cross(normal, axis_u)
-    if float(np.dot(axis_v, axis_v_hint)) < 0:
-        axis_v = -axis_v
-
-    def project(point: np.ndarray) -> list[float]:
-        delta = point - origin
-        return [float(np.dot(delta, axis_u)), float(np.dot(delta, axis_v))]
-
-    # 区域存储顺序为起点左/右、终点左/右；转成环绕多边形顺序。
-    polygon = np.asarray([project(region[index]) for index in (0, 1, 3, 2)], dtype=np.float64)
-    projected = np.asarray([project(_xyz(point)) for point in points], dtype=np.float64)
+    # 区域存储顺序为起点左/右、终点左/右；转为环绕多边形。
+    # 特意不投影 Z：用户要求纸箱只按 WORLD X/Y 判区。
+    polygon = np.asarray([region[index] for index in (0, 1, 3, 2)], dtype=np.float64)
+    projected = np.asarray([_xy(point) for point in points], dtype=np.float64)
     return polygon, projected
 
 
@@ -72,7 +72,11 @@ def _inside_convex_polygon(point: np.ndarray, polygon: np.ndarray, tolerance_mm:
         end = polygon[(index + 1) % len(polygon)]
         edge = end - start
         rel = point - start
-        signs.append(float(edge[0] * rel[1] - edge[1] * rel[0]))
+        length = float(np.linalg.norm(edge))
+        if length <= 1e-9:
+            raise ValueError("规划区域存在退化边")
+        # 叉积除以边长后才是 mm，容差才可按毫米配置。
+        signs.append(float(edge[0] * rel[1] - edge[1] * rel[0]) / length)
     tolerance = abs(float(tolerance_mm))
     return all(value >= -tolerance for value in signs) or all(value <= tolerance for value in signs)
 
@@ -143,7 +147,7 @@ class LabDynamicBoxMonitorService:
         result_root: str | Path | None = None,
         config_path: str | Path | None = None,
         depth_window: int = 5,
-        boundary_tolerance_mm: float = 0.0,
+        boundary_tolerance_mm: float = 30.0,
     ) -> None:
         self.calibration = calibration or SensorCalibrationService()
         self.depth_window = int(depth_window)
@@ -157,6 +161,29 @@ class LabDynamicBoxMonitorService:
             PROJECT_ROOT / "algorithm_modules" / "lab" / "dynamic_box_monitor" / "config.json"
         )
         self._config: dict[str, Any] | None = None
+        self.lab_world_transform: Any | None = None
+
+    def _sample_depth_stable(self, depth_path: str, u: float, v: float) -> tuple[float, int]:
+        """优先小邻域，零深度时逐级扩大，避免 D435i 角点孔洞中断整轮。"""
+        windows = tuple(dict.fromkeys(max(1, int(value)) for value in (self.depth_window, 11, 21, 31)))
+        last_error: Exception | None = None
+        for window in windows:
+            try:
+                value = float(self._depth_sampler(depth_path, u, v, window))
+            except (RuntimeError, ValueError) as exc:
+                last_error = exc
+                continue
+            if np.isfinite(value) and value > 0:
+                return value, window
+        reason = str(last_error) if last_error else "未读到正深度"
+        raise RuntimeError(f"纸箱角点 ({u:.1f},{v:.1f}) 在 {windows} 像素邻域均无有效深度：{reason}")
+
+    def _lab_camera_transform(self):
+        if self.lab_world_transform is None:
+            from algorithm_modules.lab.cam_yolo_lab.camera_world_module import CameraWorldTransform
+
+            self.lab_world_transform = CameraWorldTransform.from_json(PROJECT_ROOT / "config" / "camera_extrinsic.json")
+        return self.lab_world_transform
 
     @staticmethod
     def _read_image(path: str):
@@ -207,7 +234,7 @@ class LabDynamicBoxMonitorService:
 
     def _pixel_to_world(self, capture: Mapping[str, Any], u: float, v: float) -> dict[str, Any]:
         depth_path = str(capture.get("depth_path") or "")
-        raw_depth = float(self._depth_sampler(depth_path, u, v, self.depth_window))
+        raw_depth, depth_window_used = self._sample_depth_stable(depth_path, u, v)
         depth_mm = raw_depth * float(capture.get("depth_scale_mm", 1.0) or 1.0)
         if depth_mm <= 0:
             raise RuntimeError(f"纸箱角点 ({u:.1f},{v:.1f}) 深度无效")
@@ -219,14 +246,23 @@ class LabDynamicBoxMonitorService:
             (float(v) - intr["cy"]) / intr["fy"] * depth_mm,
             depth_mm,
         ], dtype=np.float64)
-        world_matrix = self.calibration.dynamic_camera_world_matrix(capture.get("camera_world_pose") or {})
-        world = self.calibration.transform_point(world_matrix, camera)
+        plc_pose = capture.get("plc_pose") or {}
+        if isinstance(plc_pose, Mapping) and all(key in plc_pose for key in ("x", "y", "z", "r")):
+            world = self._lab_camera_transform().camera_to_world(camera, plc_pose)
+            transform_name = "lab_camera_plc_extrinsic"
+        else:
+            # 保留非实验室调用的兼容路径；实验室流程必定传入 plc_pose。
+            world_matrix = self.calibration.dynamic_camera_world_matrix(capture.get("camera_world_pose") or {})
+            world = self.calibration.transform_point(world_matrix, camera)
+            transform_name = "legacy_dynamic_camera_pose"
         return {
             "pixel_uv": [float(u), float(v)],
             "depth_value": raw_depth,
             "depth_mm": depth_mm,
+            "depth_window_used": depth_window_used,
             "camera_xyz_mm": [float(value) for value in camera],
             "world_xyz_mm": [float(value) for value in world],
+            "world_transform": transform_name,
         }
 
     def _save_artifacts(self, annotated: Any, mask: Any, phase: str, result_tag: str) -> tuple[str, str]:
@@ -280,12 +316,22 @@ class LabDynamicBoxMonitorService:
                 "plan_check_status": "NO_BOX",
                 "message": f"{base['planned_region_id']} 未检测到纸箱",
             }
-        evaluated = evaluate_selected_box_world(
-            selected,
-            region,
-            lambda u, v: self._pixel_to_world(capture, u, v),
-            tolerance_mm=self.boundary_tolerance_mm,
-        )
+        try:
+            evaluated = evaluate_selected_box_world(
+                selected,
+                region,
+                lambda u, v: self._pixel_to_world(capture, u, v),
+                tolerance_mm=self.boundary_tolerance_mm,
+            )
+        except RuntimeError as exc:
+            return {
+                **base,
+                **deepcopy(dict(selected)),
+                "status": "DEPTH_INVALID",
+                "plan_check_status": "DEPTH_INVALID",
+                "inside_planned_region": False,
+                "message": str(exc),
+            }
         passed = bool(evaluated.get("inside_planned_region"))
         return {
             **base,

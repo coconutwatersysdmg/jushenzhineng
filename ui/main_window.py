@@ -53,11 +53,11 @@ class MainWindow(QMainWindow):
         (1, "设备连接检查"),
         (2, "相机插孔识别 ∥ 雷达四角粗定位"),
         (3, "相机精定位（拍照+YOLO）"),
-        (4, "到 B 区中心拍照判区（纸箱四角）"),
+        (4, "B 区循环：监测 → 人工确认 → 拍照判区"),
     ]
     STEP_STAGE = {
         "DEVICE_CHECK":1,"LAB_SENSE":2,"LAB_CORNER_SHELL":3,
-        "LAB_RETURN_ORIGIN":4,"LAB_PRE_PLACE_MONITOR":4,"LAB_PLACE_VERIFY":4,
+        "LAB_RETURN_ORIGIN":4,"LAB_PRE_PLACE_MONITOR":4,"LAB_WAIT_MANUAL_PLACE":4,"LAB_PLACE_VERIFY":4,
         "PRE_PICK_OFFSET":2,"PARALLEL_LOCATE":3,"PICK_ONLY":3,"RADAR_TO_CAMERA":4,
         "CAPTURE_CORNERS":5,"CORNER_RECOGNITION":6,"CAMERA_TO_WORLD":7,
         "INITIAL_SPACE_PLAN":8,"NEIGHBOR_POSE":8,"TARGET_CONFIRM":8,"PRE_PLACE_MONITOR":9,"PLACE":9,
@@ -68,6 +68,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.controller=FlowController(); self.bridge=TwinBridge(); self.debug_inputs=self.controller.default_debug_inputs()
         self._step_busy=False
+        self._lab_auto_waiting_for_manual_place=False
         self._running_stage=0  # 正在执行的流程格编号；与 step_code（可能已前进到下一步）区分
         self._profile_changing=False
         self._latest_plc_cmd=None
@@ -638,34 +639,61 @@ class MainWindow(QMainWindow):
             "跳过本步后后续结果可能不可靠；现场优先停止并重试本步。",
         )
 
-    def _ask_continue_after_failure(self, exc: Exception) -> bool:
-        """阻塞性失败弹窗：继续=跳过本步前进；停止=停在本步可重试。"""
-        code = ""
-        name = ""
-        try:
-            code, name = self.controller.current_step
-        except Exception:
-            pass
+    def _ask_continue_after_failure(
+        self,
+        exc: Exception,
+        *,
+        code: str = "",
+        name: str = "",
+    ) -> str:
+        """统一失败决策：重试当前动作、跳过或停止。"""
+        if not code or not name:
+            try:
+                current_code, current_name = self.controller.current_step
+                code = code or current_code
+                name = name or current_name
+            except Exception:
+                pass
         advice = self._continue_advice_for(code)
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Critical)
-        box.setWindowTitle("步骤失败 — 是否继续？")
+        box.setWindowTitle("步骤失败 — 请选择处理方式")
         box.setText(f"步骤失败：{name or code or '未知步骤'}")
         box.setInformativeText(
             f"{exc}\n\n"
             f"{advice}\n\n"
-            "「继续」= 跳过本步进入下一步（不重跑失败逻辑）。\n"
-            "「停止」= 停在本步，可稍后重试；自动运行会暂停。"
+            "「重新尝试」= 立即重跑当前失败步骤。\n"
+            "「继续跳过」= 跳过本步进入下一步（不重跑失败逻辑）。\n"
+            "「停止」= 停在本步；自动运行会暂停。"
         )
-        cont = box.addButton("继续", QMessageBox.ButtonRole.AcceptRole)
+        retry = box.addButton("重新尝试", QMessageBox.ButtonRole.ActionRole)
+        cont = box.addButton("继续跳过", QMessageBox.ButtonRole.AcceptRole)
         stop = box.addButton("停止", QMessageBox.ButtonRole.RejectRole)
-        box.setDefaultButton(stop)
+        box.setDefaultButton(retry)
         box.exec()
-        return box.clickedButton() is cont
+        if box.clickedButton() is retry:
+            return "retry"
+        if box.clickedButton() is cont:
+            return "continue"
+        return "stop"
+
+    def _retry_current_step(self) -> None:
+        """在当前异常处理栈退出后重跑同一个流程格。"""
+        if self._step_busy:
+            QTimer.singleShot(50, self._retry_current_step)
+            return
+        if self.timer.isActive():
+            self._auto_tick()
+        else:
+            self._next()
 
     def _handle_step_failure(self, exc: Exception, *, from_auto: bool = False) -> None:
         self._refresh()
-        if self._ask_continue_after_failure(exc):
+        action = self._ask_continue_after_failure(exc)
+        if action == "retry":
+            QTimer.singleShot(0, self._retry_current_step)
+            return
+        if action == "continue":
             try:
                 self.controller.continue_after_step_failure(str(exc))
             except Exception as cont_exc:
@@ -688,6 +716,11 @@ class MainWindow(QMainWindow):
             self._show_plc_dialog()
             return
         if self._step_busy: return
+        resume_lab_auto = bool(
+            self._lab_auto_waiting_for_manual_place
+            and self._is_lab_ui()
+            and self.controller.current_step[0] == "LAB_WAIT_MANUAL_PLACE"
+        )
         self._begin_step_run()
         try:
             self.controller.set_debug_inputs(self.debug_inputs)
@@ -704,6 +737,11 @@ class MainWindow(QMainWindow):
             self._handle_step_failure(e, from_auto=False)
         finally:
             self._end_step_run()
+        if resume_lab_auto and not self.controller.finished:
+            self._lab_auto_waiting_for_manual_place=False
+            self.timer.start()
+            self.auto_btn.setText("暂停")
+            self._sync_auto_push_policy()
 
     def _auto(self):
         if self.timer.isActive():
@@ -725,6 +763,13 @@ class MainWindow(QMainWindow):
             self._update_step_controls()
             return
         if self._step_busy: return
+        if self._is_lab_ui() and self.controller.running and self.controller.current_step[0] == "LAB_WAIT_MANUAL_PLACE":
+            self._lab_auto_waiting_for_manual_place=True
+            self.timer.stop()
+            self.auto_btn.setText("自动运行")
+            self._sync_auto_push_policy()
+            self._refresh()
+            return
         self._begin_step_run()
         try:
             if not self.controller.running:
@@ -779,6 +824,8 @@ class MainWindow(QMainWindow):
             )
 
     def _plc_blocks_flow(self) -> bool:
+        if self._is_lab_ui():
+            return False
         dlg = self.plc_dialog
         return bool(dlg is not None and dlg.is_blocking())
 
@@ -818,9 +865,6 @@ class MainWindow(QMainWindow):
         self._update_step_controls()
 
     def _present_next_plc_command(self):
-        dlg = self._ensure_plc_dialog()
-        if dlg.is_blocking():
-            return
         if not self._plc_cmd_queue:
             return
         step = self._plc_cmd_queue[0].get("step")
@@ -829,6 +873,21 @@ class MainWindow(QMainWindow):
             batch.append(self._plc_cmd_queue.pop(0))
         self._latest_plc_batch = batch
         self._latest_plc_cmd = batch[0]
+        if self._is_lab_ui():
+            push = self._push_plc_batch(batch)
+            status = "SUCCESS" if push.get("success") else "FAILED"
+            self.controller.twin.add_message(
+                "PLC_PUSH", status, push.get("message", ""), {"count": len(batch), **(push or {})}
+            )
+            if not push.get("success"):
+                self._handle_plc_push_failure(batch, push)
+            self._update_step_controls()
+            return
+
+        dlg = self._ensure_plc_dialog()
+        if dlg.is_blocking():
+            self._plc_cmd_queue = batch + self._plc_cmd_queue
+            return
         auto = bool(self.auto_push_cb.isChecked() and self.timer.isActive())
         push = None
         if auto:
@@ -843,6 +902,27 @@ class MainWindow(QMainWindow):
                 self._sync_auto_push_policy()
         dlg.apply_batch(batch, auto_pushed=auto, push_result=push)
         self._update_step_controls()
+
+    def _handle_plc_push_failure(self, batch: list, push: dict) -> None:
+        """实验室自动下发失败时复用统一的三选项失败弹窗。"""
+        action = self._ask_continue_after_failure(
+            RuntimeError(str(push.get("message") or "PLC 运动下发失败")),
+            code="PLC_PUSH",
+            name="PLC 运动执行",
+        )
+        if action == "retry":
+            self._plc_cmd_queue = [dict(item) for item in batch] + self._plc_cmd_queue
+            QTimer.singleShot(0, self._present_next_plc_command)
+            return
+        if action == "continue":
+            self.controller.twin.add_message(
+                "PLC_PUSH", "WARNING", "用户选择跳过失败的 PLC 运动", {"count": len(batch)}
+            )
+            return
+        if self.timer.isActive():
+            self.timer.stop()
+            self.auto_btn.setText("自动运行")
+            self._sync_auto_push_policy()
 
     def _push_plc_batch(self, batch: list) -> dict:
         total = len(batch or [])
@@ -928,6 +1008,10 @@ class MainWindow(QMainWindow):
         busy = bool(self._step_busy or self._plc_blocks_flow() or self.controller.finished)
         if hasattr(self, "next_btn"):
             self.next_btn.setEnabled(not busy)
+            if self._is_lab_ui() and self.controller.current_step[0] == "LAB_WAIT_MANUAL_PLACE":
+                self.next_btn.setText("确认已放好，开始拍照检测")
+            else:
+                self.next_btn.setText("执行下一步")
         if hasattr(self, "auto_btn") and not self.timer.isActive():
             # 自动运行进行中仍可点「暂停」；未在自动跑时若步骤忙则禁止启动自动
             self.auto_btn.setEnabled(not self._step_busy and not self.controller.finished)

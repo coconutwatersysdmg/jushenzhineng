@@ -40,6 +40,15 @@ def test_lab_flow_keeps_hole_recognition_non_forking():
     assert "self.robot.move_tool_world" not in lab_method
 
 
+def test_lab_sense_failure_stops_at_step_two_for_retry_instead_of_reaching_corner_capture():
+    source = Path("controllers/flow_controller.py").read_text(encoding="utf-8")
+    sense = source[source.index("def _lab_sense"):source.index("def _lab_held_r_deg")]
+    dispatch = source[source.index('elif code=="LAB_SENSE":'):source.index('elif code=="LAB_CORNER_SHELL":')]
+
+    assert '"continue_anyway": False' in sense
+    assert 'raise RuntimeError(data.get("message") or "实验室插孔识别或雷达四角失败")' in dispatch
+
+
 def test_lab_hole_recognition_is_registered_as_traditional_not_yolo():
     rows = {row["module_id"]: row for row in ModuleEvidenceService().snapshot()}
     source = Path("controllers/flow_controller.py").read_text(encoding="utf-8")
@@ -49,6 +58,50 @@ def test_lab_hole_recognition_is_registered_as_traditional_not_yolo():
     assert "传统" in rows["LAB_PALLET_HOLE_TRADITIONAL"]["category"]
     assert '"LAB_PALLET_HOLE_TRADITIONAL"' in lab_method
     assert '"PALLET_HOLE_YOLO"' not in lab_method
+
+
+def test_lab_hole_world_coordinates_reuse_the_lab_camera_plc_calibration():
+    source = Path("controllers/flow_controller.py").read_text(encoding="utf-8")
+    lab_method = source[source.index("def _lab_pick_recognize"):source.index("def _lab_sense")]
+
+    assert "self.algorithms.lab_camera_transform()" in lab_method
+    assert ".camera_to_world(" in lab_method
+    assert "dynamic_camera_world_matrix" not in lab_method
+
+
+def test_lab_ui_text_describes_xy_only_motion():
+    policy = Path("services/lab_cycle_policy.py").read_text(encoding="utf-8")
+    controller = Path("controllers/flow_controller.py").read_text(encoding="utf-8")
+
+    assert "仅 XYZ" not in policy
+    assert "仅下发 XYZ" not in controller
+
+
+def test_lab_profile_disables_corner_review_and_plc_confirmation_dialog():
+    lab = feature_switches.get_run_profile("lab")
+    window = Path("ui/main_window.py").read_text(encoding="utf-8")
+    presenter = window[window.index("def _present_next_plc_command"):window.index("def _push_plc_batch")]
+
+    assert lab["switches"]["CORNER_REVIEW_ENABLED"] is False
+    assert "if self._is_lab_ui():" in presenter
+    assert "self._push_plc_batch(batch)" in presenter
+    assert "dlg.apply_batch(batch" not in presenter.split("if self._is_lab_ui():", 1)[1].split("auto =", 1)[0]
+
+
+def test_step_failure_dialog_offers_retry_skip_and_stop_for_every_lab_step():
+    window = Path("ui/main_window.py").read_text(encoding="utf-8")
+    controller = Path("controllers/flow_controller.py").read_text(encoding="utf-8")
+    dialog = window[window.index("def _ask_continue_after_failure"):window.index("def _handle_step_failure")]
+    handler = window[window.index("def _handle_step_failure"):window.index("def _next")]
+    continue_method = controller[
+        controller.index("def continue_after_step_failure"):controller.index("def reset")
+    ]
+
+    assert 'box.addButton("重新尝试"' in dialog
+    assert 'box.addButton("继续跳过"' in dialog
+    assert 'box.addButton("停止"' in dialog
+    assert "QTimer.singleShot(0, self._retry_current_step)" in handler
+    assert '"retry_required"' not in continue_method
 
 
 def test_lab_corner_shell_is_real_camera_flow_and_round_reuse_is_present():
@@ -138,8 +191,35 @@ def test_lab_repeat_flow_monitors_previous_b_region_before_post_place_check():
         "LAB_RETURN_ORIGIN",
         "LAB_SENSE",
         "LAB_PRE_PLACE_MONITOR",
+        "LAB_WAIT_MANUAL_PLACE",
         "LAB_PLACE_VERIFY",
     ]
+
+
+def test_lab_manual_place_confirmation_directly_starts_current_region_check():
+    assert [code for code, _name in lab_steps_for_round(0)] == [
+        "DEVICE_CHECK",
+        "LAB_SENSE",
+        "LAB_CORNER_SHELL",
+        "LAB_WAIT_MANUAL_PLACE",
+        "LAB_PLACE_VERIFY",
+    ]
+    controller = Path("controllers/flow_controller.py").read_text(encoding="utf-8")
+    window = Path("ui/main_window.py").read_text(encoding="utf-8")
+    wait_branch = controller[
+        controller.index('elif code=="LAB_WAIT_MANUAL_PLACE":'):
+        controller.index('elif code=="LAB_PLACE_VERIFY":')
+    ]
+
+    assert "_lab_manual_place_confirmed" in wait_branch
+    assert "return self.execute_next()" in wait_branch
+    assert 'self.next_btn.setText("确认已放好，开始拍照检测")' in window
+    assert 'self.controller.current_step[0] == "LAB_WAIT_MANUAL_PLACE"' in window
+    continue_method = controller[
+        controller.index("def continue_after_step_failure"):controller.index("def _save")
+    ]
+    assert "if self.is_lab_profile() and code == \"LAB_PLACE_VERIFY\":" in continue_method
+    assert "self._advance_lab_round()" in continue_method
 
 
 def test_lab_post_place_verdict_records_warning_and_starts_next_manual_cycle():

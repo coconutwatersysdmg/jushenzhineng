@@ -15,7 +15,7 @@ from core.digital_twin_state import DigitalTwinState
 from core.geometry import Pose6D, parent_pose_for_child
 from devices.device_factory import create_device_adapters
 from services.algorithm_facade import AlgorithmFacade
-from services.lab_camera_visit_planner import LabCameraVisitPlanner, merge_lab_corner_points
+from services.lab_camera_visit_planner import LAB_CAMERA_Z_MM, LabCameraVisitPlanner, merge_lab_corner_points
 from services.lab_space_planner import (
     build_lab_space_plan,
     lab_b_region_for_round,
@@ -245,9 +245,12 @@ class FlowController:
         speed = float(cmd.get("speed") or (GANTRY or {}).get("default_speed") or 30.0)
         timeout_s = float((GANTRY or {}).get("move_timeout_s") or 60.0)
         soft_limits = dict((GANTRY or {}).get("soft_limits") or {})
-        # hold_r_axis 现表示「R 不参与运动」：只写/触发/等待 XYZ。
-        # 若现场未来确实需要软件旋转 R，将 GANTRY.hold_r_axis 设为 False 即可恢复四轴。
-        axes = ("X", "Y", "Z") if bool(getattr(plc, "hold_r_axis", (GANTRY or {}).get("hold_r_axis", False))) else ("X", "Y", "Z", "R")
+        # 实验室所有自动运动只允许 X/Y；Z 与 R 由现场在启动前手动设定后保持不动。
+        # 现场模式仍按原有 hold_r_axis 规则运行。
+        if self.is_lab_profile():
+            axes = ("X", "Y")
+        else:
+            axes = ("X", "Y", "Z") if bool(getattr(plc, "hold_r_axis", (GANTRY or {}).get("hold_r_axis", False))) else ("X", "Y", "Z", "R")
         targets = {axis: float(targets[axis]) for axis in axes}
 
         if hasattr(plc, "move_absolute_xyzr"):
@@ -1023,17 +1026,26 @@ class FlowController:
 
         if hole.get("success") and hole.get("world_coordinate_frame") != "world":
             try:
-                T = self.calibration.dynamic_camera_world_matrix(
-                    cap.get("camera_world_pose") or self.twin.camera_world_pose(cam)
-                )
+                # 实验室唯一坐标链：实时 PLC XYZR + cam_yolo_lab 外参。
+                # Z/R 只读取当前物理值用于转换，绝不作为运动命令下发。
+                physical = self.plc.read_positions()
+                if not isinstance(physical, Mapping) or any(physical.get(axis) is None for axis in ("X", "Y", "Z", "R")):
+                    raise RuntimeError("无法读取 PLC 当前 XYZR，拒绝生成不可信的插孔 WORLD 坐标")
+                plc_pose = {axis.lower(): float(physical[axis]) for axis in ("X", "Y", "Z", "R")}
+                cap["plc_pose"] = deepcopy(plc_pose)
+                transform = self.algorithms.lab_camera_transform()
                 for side in ("left", "right"):
                     xyz = hole.get(f"{side}_xyz_mm")
                     if xyz is not None:
-                        q = self.calibration.transform_point(T, xyz)
+                        q = transform.camera_to_world(xyz, plc_pose)
                         hole[f"{side}_world_xyz_mm"] = [float(x) for x in q]
                 hole["world_coordinate_frame"] = "world"
+                hole["world_transform"] = "lab_camera_plc_extrinsic"
+                hole["plc_pose"] = deepcopy(plc_pose)
             except Exception as exc:
+                hole["success"] = False
                 hole["world_transform_warning"] = str(exc)
+                hole["message"] = f"插孔已识别，但实验室 WORLD 坐标转换失败：{exc}"
 
         if hole.get("success"):
             targets = {
@@ -1104,7 +1116,7 @@ class FlowController:
         return result
 
     def _lab_sense(self):
-        """实验室第2步：相机插孔识别 ∥ 雷达底板四角；软失败，结果都展示。
+        """实验室第2步：相机插孔识别 ∥ 雷达底板四角；任一失败即等待重试。
 
         后续轮次：只重跑插孔识别，复用首轮雷达车板（round_data 里预置的 radar_result / twin.corners）。
         """
@@ -1136,7 +1148,7 @@ class FlowController:
         radar_ok = bool(radar.get("success"))
         summary = {
             "success": pick_ok and radar_ok,
-            "continue_anyway": True,
+            "continue_anyway": False,
             "lab_mode": True,
             "pick": "SUCCESS" if pick_ok else "FAILED",
             "radar": "SUCCESS" if radar_ok else "FAILED",
@@ -1205,12 +1217,12 @@ class FlowController:
         plc_command: Mapping[str, Any] | None = None,
         held_r_deg: float | None = None,
     ) -> dict[str, Any]:
-        """实验室相机移动：仅写 X/Y/Z，PLC 确认到位后才允许拍照。
+        """实验室相机移动：仅写 X/Y，PLC 确认到位后才允许拍照。
 
-        R 仅参与相机外参的几何计算；绝不出现在 PLC 目标、触发或等待轴集合中。
+        Z 固定由现场保持在 380 mm，R 仅参与相机外参的几何计算；二者绝不写入 PLC。
         """
         command = dict(plc_command or {})
-        if not all(axis in command for axis in ("X", "Y", "Z")):
+        if not all(axis in command for axis in ("X", "Y")):
             try:
                 from devices.world_to_gantry import transform_world_to_gantry
 
@@ -1221,11 +1233,11 @@ class FlowController:
                     mapping = dict((GANTRY or {}).get("world_to_gantry") or {})
                 command = transform_world_to_gantry(target_world_pose, mapping)
             except Exception as exc:
-                return {"success": False, "message": f"实验室 XYZ 换算失败：{exc}"}
+                return {"success": False, "message": f"实验室 XY 换算失败：{exc}"}
         try:
-            xyz_targets = {axis: float(command[axis]) for axis in ("X", "Y", "Z")}
+            xy_targets = {axis: float(command[axis]) for axis in ("X", "Y")}
         except (KeyError, TypeError, ValueError) as exc:
-            return {"success": False, "message": f"实验室 XYZ 目标无效：{exc}"}
+            return {"success": False, "message": f"实验室 XY 目标无效：{exc}"}
         if not getattr(self.plc, "connected", False):
             return {"success": False, "message": "PLC 未连接，拒绝相机拍照前移动"}
         try:
@@ -1234,19 +1246,20 @@ class FlowController:
             GANTRY = {}
         try:
             completion = self.plc.move_absolute_xyzr(
-                xyz_targets,
+                xy_targets,
                 speed=float((GANTRY or {}).get("default_speed") or 30.0),
                 timeout_s=float((GANTRY or {}).get("move_timeout_s") or 60.0),
                 soft_limits=dict((GANTRY or {}).get("soft_limits") or {}) or None,
-                axes=("X", "Y", "Z"),
+                axes=("X", "Y"),
             )
         except Exception as exc:
             completion = {"success": False, "message": str(exc)}
         if not completion.get("success"):
             return {
                 "success": False,
-                "message": str(completion.get("message") or "PLC XYZ 绝对定位失败"),
-                "plc_xyz": xyz_targets,
+                "message": str(completion.get("message") or "PLC XY 绝对定位失败"),
+                "plc_xy": xy_targets,
+                "z_axis_untouched": True,
                 "r_axis_untouched": True,
                 "motion_completion": completion,
             }
@@ -1263,11 +1276,12 @@ class FlowController:
             "robot_id": "PICK_ARM",
             "pose": target,
             "task": str(task),
-            "plc_xyz": xyz_targets,
-            "plc_pose": {"x": xyz_targets["X"], "y": xyz_targets["Y"], "z": xyz_targets["Z"], "r": float(held_r_deg if held_r_deg is not None else target.get("yaw_deg", 0.0))},
+            "plc_xy": xy_targets,
+            "plc_pose": {"x": xy_targets["X"], "y": xy_targets["Y"], "z": LAB_CAMERA_Z_MM, "r": float(held_r_deg if held_r_deg is not None else target.get("yaw_deg", 0.0))},
+            "z_axis_untouched": True,
             "r_axis_untouched": True,
             "motion_completion": completion,
-            "message": "PLC XYZ 已到位，R 未下发",
+            "message": "PLC XY 已到位，Z/R 未下发",
         }
 
     def _lab_corner_shell(self):
@@ -1328,8 +1342,8 @@ class FlowController:
         self.twin.add_message(
             "LAB_CORNER_SHELL",
             "INFO",
-            f"开始相机精定位：{len(targets)} 组到位，R 仅读取现场值 {held_r:.2f}°，仅下发 XYZ",
-            {"planning_r_deg": held_r, "plc_axes": ["X", "Y", "Z"], "groups": ["".join(item["pair"]) for item in targets]},
+            f"开始相机精定位：{len(targets)} 组到位，Z/R 保持现场值，仅下发 XY",
+            {"planning_r_deg": held_r, "plc_axes": ["X", "Y"], "groups": ["".join(item["pair"]) for item in targets]},
         )
 
         camera_id = self._camera_for_role("corner", "CAM_PICK")
@@ -1348,14 +1362,14 @@ class FlowController:
                 held_r_deg=held_r,
             )
             if not moved.get("success"):
-                raise RuntimeError(moved.get("message") or f"组 {group} PLC XYZ 到位失败")
+                raise RuntimeError(moved.get("message") or f"组 {group} PLC XY 到位失败")
             plc_pose = self._plc_pose_for_lab_camera(moved, target_world_pose)
             self.twin.add_message(
                 "LAB_CORNER_SHELL",
                 "INFO",
                 (
                     f"组 {group} 已到位（目标点 {pair[0]}/{pair[1]}），"
-                    f"PLC XYZ={moved.get('plc_xyz')}；R 未下发"
+                    f"PLC XY={moved.get('plc_xy')}；Z/R 未下发"
                 ),
                 {"group": group, "moved": deepcopy(moved), "plc_pose": deepcopy(plc_pose)},
             )
@@ -1371,7 +1385,8 @@ class FlowController:
                     "rgb_path": cap.get("rgb_path"),
                     "depth_path": cap.get("depth_path"),
                     "message": cap.get("message"),
-                    "plc_xyz": deepcopy(moved.get("plc_xyz")),
+                    "plc_xy": deepcopy(moved.get("plc_xy")),
+                    "z_axis_untouched": True,
                     "r_axis_untouched": True,
                 }
             )
@@ -1631,7 +1646,7 @@ class FlowController:
         return entry
 
     def _lab_region_camera_move(self, region: Mapping[str, Any], task: str) -> dict[str, Any]:
-        """把相机光轴移到区域几何中心；只写 XYZ，R 保持现场物理位置。"""
+        """把相机光轴移到区域几何中心；只写 XY，Z/R 保持现场物理位置。"""
         center = list(region.get("center_world_xyz_mm") or [])
         if len(center) != 3:
             raise RuntimeError(f"区域 {region.get('region_id')} 缺少几何中心")
@@ -1670,7 +1685,7 @@ class FlowController:
             "LAB_REGION",
             "SUCCESS",
             f"已到达 {region.get('region_id')} 几何中心，准备拍照",
-            {"plc_xyz": moved.get("plc_xyz"), "r_axis_untouched": True},
+            {"plc_xy": moved.get("plc_xy"), "z_axis_untouched": True, "r_axis_untouched": True},
         )
         return {
             "success": True,
@@ -1694,6 +1709,10 @@ class FlowController:
         movement = self._lab_region_camera_move(region, task)
         camera_id = self._camera_for_role("observe", "CAM_PICK") or self._camera_for_role("pallet_hole", "CAM_PICK")
         capture = self._capture_rgbd(camera_id, capture_tag)
+        capture["plc_pose"] = self._plc_pose_for_lab_camera(
+            (movement.get("motion") or {}),
+            movement.get("target_world_pose") or {},
+        )
         shot_ok = bool(capture.get("success"))
         self.twin.add_message(
             "LAB_REGION",
@@ -1754,6 +1773,7 @@ class FlowController:
                 "rgb_path": capture.get("rgb_path"),
                 "depth_path": capture.get("depth_path"),
                 "camera_world_pose": capture.get("camera_world_pose"),
+                "plc_pose": capture.get("plc_pose"),
                 "planned_region": deepcopy(region),
             },
             result,
@@ -1767,7 +1787,7 @@ class FlowController:
         return result
 
     def _lab_return_origin(self) -> dict[str, Any]:
-        """返回配置的 PLC 工作原点；仅移动 XYZ，R 姿态由现场人工保持。"""
+        """返回配置的 PLC 工作原点；仅移动 XY，Z/R 由现场人工保持。"""
         from config.external_devices_config import GANTRY
 
         mapping = getattr(self.robot, "world_to_gantry", None) or GANTRY.get("world_to_gantry") or {}
@@ -1776,7 +1796,7 @@ class FlowController:
         command = {
             "X": float(origin.get("X", 0.0)),
             "Y": float(origin.get("Y", 0.0)),
-            "Z": float(origin.get("Z", 0.0)),
+            "Z": LAB_CAMERA_Z_MM,
             "R": held_r,
         }
         world_pose = LabCameraVisitPlanner.plc_to_world_pose(command, mapping)
@@ -1788,11 +1808,11 @@ class FlowController:
         )
         return {
             "success": bool(moved.get("success")),
-            "plc_work_origin_xyz": {axis: command[axis] for axis in ("X", "Y", "Z")},
+            "plc_work_origin_xy": {axis: command[axis] for axis in ("X", "Y")},
             "planning_r_deg": held_r,
             "target_world_pose": world_pose,
             "motion": moved,
-            "message": "已返回实验室原点，仅移动 XYZ，R 未下发" if moved.get("success") else moved.get("message"),
+            "message": "已返回实验室原点，仅移动 XY，Z/R 未下发" if moved.get("success") else moved.get("message"),
         }
 
     def _lab_pre_place_monitor(self) -> dict[str, Any]:
@@ -1854,6 +1874,19 @@ class FlowController:
         status = "SUCCESS" if result.get("success") else "FAILED"
         self.twin.add_message("LAB_PLACE_VERIFY", status, result["message"], result)
         self.plc.send_message("LAB_PLACE_VERIFY", status, result["message"], result)
+        return result
+
+    def _lab_manual_place_confirmed(self) -> dict[str, Any]:
+        """记录人工已放好当前 B 区货物；下一子步骤立即执行相机判区。"""
+        region = lab_b_region_for_round(self.space.snapshot(), self.round_index)
+        result = {
+            "success": True,
+            "manual_place": True,
+            "region_id": str(region.get("region_id") or "B"),
+            "message": f"已确认人工放置 {region.get('region_id')}，开始相机拍照检测",
+        }
+        self.round_data["lab_manual_place_confirmed"] = deepcopy(result)
+        self.twin.add_message("LAB_WAIT_MANUAL_PLACE", "SUCCESS", result["message"], result)
         return result
 
     def _advance_lab_round(self):
@@ -2424,7 +2457,10 @@ class FlowController:
                 data=self._lab_return_origin()
                 if not data.get("success"):
                     raise RuntimeError(data.get("message") or "实验室返回原点失败")
-            elif code=="LAB_SENSE": data=self._lab_sense()
+            elif code=="LAB_SENSE":
+                data=self._lab_sense()
+                if not data.get("success"):
+                    raise RuntimeError(data.get("message") or "实验室插孔识别或雷达四角失败")
             elif code=="LAB_CORNER_SHELL":
                 data=self._lab_corner_shell()
                 if not data.get("success"):
@@ -2433,6 +2469,14 @@ class FlowController:
                 data=self._lab_pre_place_monitor()
                 if not data.get("success"):
                     raise RuntimeError(data.get("message") or "上一 B 区放货前监测未通过")
+            elif code=="LAB_WAIT_MANUAL_PLACE":
+                data=self._lab_manual_place_confirmed()
+                self._record(code,name,"success",str(data.get("message") or name),data)
+                self.step_index+=1
+                self.twin.set_alarm(None)
+                self.twin.set_phase(self.current_step[1],self.round_index+1)
+                self._save()
+                return self.execute_next()
             elif code=="LAB_PLACE_VERIFY":
                 data=self._lab_place_verify()
                 self._record(
@@ -2516,25 +2560,11 @@ class FlowController:
             "forced_continue": True,
             "reason": str(reason or "用户选择失败后继续"),
         }
-        if self.is_lab_profile() and code in {
-            "DEVICE_CHECK",
-            "LAB_RETURN_ORIGIN",
-            "LAB_SENSE",
-            "LAB_CORNER_SHELL",
-            "LAB_PRE_PLACE_MONITOR",
-            "LAB_PLACE_VERIFY",
-        }:
-            detail["forced_continue"] = False
-            detail["retry_required"] = True
-            self._record(
-                code,
-                name,
-                "warning",
-                f"实验室安全步骤未通过，保留当前步骤等待重试：{detail['reason']}",
-                detail,
-            )
+        if self.is_lab_profile() and code == "LAB_PLACE_VERIFY":
+            self._record(code, name, "warning", f"失败后继续：{detail['reason']}", detail)
             self.twin.set_alarm(None)
-            self.twin.set_phase(name, self.round_index + 1)
+            advance = self._advance_lab_round()
+            self._persist_database_snapshot()
             self._save()
             return self.snapshot()
         self._record(
