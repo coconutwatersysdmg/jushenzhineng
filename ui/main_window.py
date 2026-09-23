@@ -18,7 +18,7 @@ from controllers.flow_controller import FlowController
 from ui.twin_bridge import TwinBridge
 from ui.debug_dialog import DebugInputDialog
 from ui.corner_review_dialog import run_corner_review
-from ui.plc_motion_dialog import PlcMotionDialog
+from ui.plc_motion_dialog import PlcMotionDialog, open_plc_manual_console
 from config.feature_switches import (
     apply_run_profile,
     get_run_profile,
@@ -216,13 +216,16 @@ class MainWindow(QMainWindow):
         self.next_btn=QPushButton("执行下一步"); self.next_btn.setObjectName("primary"); self.next_btn.clicked.connect(self._next)
         self.auto_btn=QPushButton("自动运行"); self.auto_btn.clicked.connect(self._auto)
         self.debug_btn=QPushButton("调试输入"); self.debug_btn.clicked.connect(self._debug); reset=QPushButton("重置"); reset.clicked.connect(self._reset)
-        self.plc_panel_btn=QPushButton("PLC 运动…")
-        self.plc_panel_btn.setToolTip("打开弹出窗口：查看输出坐标、确认下发、启动 PLC 控制台")
+        self.plc_panel_btn=QPushButton("PLC 自动坐标…")
+        self.plc_panel_btn.setToolTip("查看自动流程的 XYZ 坐标并确认下发；R 轴不会自动下发")
         self.plc_panel_btn.clicked.connect(self._show_plc_dialog)
+        self.plc_manual_btn=QPushButton("打开 PLC 手动控制")
+        self.plc_manual_btn.setToolTip("打开独立 PLC 控制界面，可手动移动机械臂；不会暂停或改变自动流程")
+        self.plc_manual_btn.clicked.connect(self._open_plc_manual_control)
         self.auto_push_cb=QCheckBox("自动运行时自动下发到 PLC")
         self.auto_push_cb.setToolTip("勾选且处于自动运行时，算出坐标后经已连接的 PLC 直接写轴。逐步执行请在弹窗里确认下发。")
         self.auto_push_cb.toggled.connect(lambda _=False: self._sync_auto_push_policy())
-        for b in (self.next_btn,self.auto_btn,self.debug_btn,reset,self.plc_panel_btn): controls.addWidget(b)
+        for b in (self.next_btn,self.auto_btn,self.debug_btn,reset,self.plc_panel_btn,self.plc_manual_btn): controls.addWidget(b)
         controls.addWidget(self.auto_push_cb)
         controls.addStretch(1); cl.addLayout(controls)
 
@@ -764,6 +767,16 @@ class MainWindow(QMainWindow):
         dlg.show()
         dlg.raise_()
         dlg.activateWindow()
+
+    def _open_plc_manual_control(self):
+        """独立打开 PLC 手动界面，不改变自动流程的暂停/下发状态。"""
+        if open_plc_manual_console(self):
+            self.controller.twin.add_message(
+                "PLC_MANUAL",
+                "INFO",
+                "已打开 PLC 手动控制界面；自动流程仍按当前状态运行",
+                {"automatic_flow_unchanged": True},
+            )
 
     def _plc_blocks_flow(self) -> bool:
         dlg = self.plc_dialog

@@ -11,7 +11,7 @@ LAB_FIRST_STEPS = (
 )
 
 LAB_REPEAT_STEPS = (
-    ("LAB_RETURN_ORIGIN", "1. 返回原点（R 保持启动角度）"),
+    ("LAB_RETURN_ORIGIN", "1. 返回原点（仅 XYZ，R 现场保持）"),
     ("LAB_SENSE", "2. 实拍识别插孔并下发坐标（不插取）"),
     ("LAB_PRE_PLACE_MONITOR", "3. 回上一 B 区中心拍照监测"),
     ("LAB_PLACE_VERIFY", "4. 手动放置下一 B 区后：到区中心拍照并判区"),

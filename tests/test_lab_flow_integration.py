@@ -138,6 +138,23 @@ def test_lab_repeat_flow_monitors_previous_b_region_before_post_place_check():
     ]
 
 
+def test_lab_post_place_verdict_records_warning_and_starts_next_manual_cycle():
+    source = Path("controllers/flow_controller.py").read_text(encoding="utf-8")
+    block = source[source.index('elif code=="LAB_PLACE_VERIFY":'):source.index('elif code=="PRE_PICK_OFFSET":')]
+
+    assert 'raise RuntimeError(data.get("message") or "当前 B 区放货后检测未通过")' not in block
+    assert "advance=self._advance_lab_round()" in block
+
+
+def test_lab_automatic_motion_uses_xyz_only_and_dialog_does_not_show_r_target():
+    controller = Path("controllers/flow_controller.py").read_text(encoding="utf-8")
+    dialog = Path("ui/plc_motion_dialog.py").read_text(encoding="utf-8")
+
+    assert 'axes=("X", "Y", "Z")' in controller
+    assert 'self.xyzr_table.setHorizontalHeaderLabels(["段/任务", "X", "Y", "Z"])' in dialog
+    assert '"R": float(self.xyzr_table.item(row, 4).text())' not in dialog
+
+
 def test_only_passed_post_place_check_occupies_current_b_region():
     final_points = {
         "P1": {"x": 0.0, "y": 0.0, "z": 0.0, "source": "camera_yolo"},

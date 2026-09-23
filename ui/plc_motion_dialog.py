@@ -27,12 +27,28 @@ from PySide6.QtWidgets import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
+
+def open_plc_manual_console(parent=None) -> bool:
+    """启动独立 PLC 手动控制界面；它不阻塞或改变主流程。"""
+    python = PROJECT_ROOT / "runtime" / "python.exe"
+    exe = str(python if python.is_file() else sys.executable)
+    try:
+        subprocess.Popen(
+            [exe, "-m", "plc_console"],
+            cwd=str(PROJECT_ROOT),
+            env={**os.environ, "PYTHONUTF8": "1"},
+        )
+        return True
+    except Exception as exc:
+        QMessageBox.warning(parent, "启动 PLC 手动控制失败", str(exc))
+        return False
+
 # 流程步骤代码 → 界面文案（与 FlowController 一致）
 STEP_TITLES = {
     "DEVICE_CHECK": "1. 外接设备连接检查",
     "LAB_SENSE": "2. 相机插孔识别 ∥ 雷达四角",
     "LAB_CORNER_SHELL": "3. 相机精定位（拍照+YOLO）",
-    "LAB_RETURN_ORIGIN": "返回实验室原点（R保持）",
+    "LAB_RETURN_ORIGIN": "返回实验室原点（仅 XYZ，R 现场保持）",
     "LAB_PRE_PLACE_MONITOR": "上一 B 区放货前监测",
     "LAB_PLACE_VERIFY": "当前 B 区手动放货后检测",
     "PRE_PICK_OFFSET": "2. 货物-托盘偏差分析",
@@ -56,7 +72,7 @@ STEP_TITLES = {
 
 # 运动 task → 中文目的（前缀匹配，长的在前）
 _TASK_PURPOSE = (
-    ("LAB_RETURN_ORIGIN", "返回实验室原点，R轴保持启动角度"),
+    ("LAB_RETURN_ORIGIN", "返回实验室原点，仅移动 XYZ；R 现场保持"),
     ("LAB_PRE_PLACE_", "到上一 B 区几何中心做放货前监测"),
     ("LAB_POST_PLACE_", "到当前 B 区几何中心做放货后检测"),
     ("PALLET_HOLE_LEFT", "左插孔目标坐标（可改后下发）"),
@@ -98,8 +114,8 @@ def format_waypoint_line(index: int, total: int, cmd: Mapping[str, Any]) -> str:
     world = cmd.get("world_pose") or {}
     if isinstance(xyzr, Mapping):
         pose = (
-            f"XYZR=({float(xyzr.get('X' ,0)):.1f}, {float(xyzr.get('Y', 0)):.1f}, "
-            f"{float(xyzr.get('Z', 0)):.1f}, {float(xyzr.get('R', 0)):.1f})"
+            f"XYZ=({float(xyzr.get('X' ,0)):.1f}, {float(xyzr.get('Y', 0)):.1f}, "
+            f"{float(xyzr.get('Z', 0)):.1f})，R=现场保持"
         )
     else:
         pose = (
@@ -258,20 +274,20 @@ class PlcMotionDialog(QDialog):
 
         self.cmd_view = QTextEdit()
         self.cmd_view.setReadOnly(True)
-        self.cmd_view.setPlaceholderText("WORLD / XYZR JSON 将显示在这里")
+        self.cmd_view.setPlaceholderText("本次自动流程的 XYZ 下发坐标将显示在这里；R 轴不下发")
         self.cmd_view.setFont(QFont("Consolas", 12))
         self.cmd_view.setMaximumHeight(140)
         layout.addWidget(self.cmd_view, 1)
 
-        edit_box = QGroupBox("可编辑下发坐标 XYZR（修改后点确认生效）")
+        edit_box = QGroupBox("可编辑下发坐标 XYZ（R 轴由现场手动保持）")
         edit_layout = QVBoxLayout(edit_box)
-        tip = QLabel("每段一行；确认下发前可直接改表中数值。")
+        tip = QLabel("每段一行；确认下发前可直接改 X/Y/Z。自动流程不会写入、触发或等待 R 轴。")
         tip.setStyleSheet("color:#aaaaaa;")
         edit_layout.addWidget(tip)
-        self.xyzr_table = QTableWidget(0, 5)
-        self.xyzr_table.setHorizontalHeaderLabels(["段/任务", "X", "Y", "Z", "R"])
+        self.xyzr_table = QTableWidget(0, 4)
+        self.xyzr_table.setHorizontalHeaderLabels(["段/任务", "X", "Y", "Z"])
         self.xyzr_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for col in (1, 2, 3, 4):
+        for col in (1, 2, 3):
             self.xyzr_table.horizontalHeader().setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         self.xyzr_table.setMinimumHeight(110)
         edit_layout.addWidget(self.xyzr_table)
@@ -314,7 +330,7 @@ class PlcMotionDialog(QDialog):
     def apply_command(self, cmd: dict, *, auto_pushed: bool = False, push_result: dict | None = None) -> None:
         self.apply_batch([cmd], auto_pushed=auto_pushed, push_result=push_result)
 
-    def _fill_xyzr_table(self, batch: list) -> None:
+    def _fill_xyz_table(self, batch: list) -> None:
         self.xyzr_table.setRowCount(0)
         for i, cmd in enumerate(batch, 1):
             _, purpose = describe_motion(cmd)
@@ -324,19 +340,18 @@ class PlcMotionDialog(QDialog):
                 "X": float(xyzr.get("X", world.get("x_mm", 0.0)) or 0.0),
                 "Y": float(xyzr.get("Y", world.get("y_mm", 0.0)) or 0.0),
                 "Z": float(xyzr.get("Z", world.get("z_mm", 0.0)) or 0.0),
-                "R": float(xyzr.get("R", world.get("yaw_deg", 0.0)) or 0.0),
             }
             row = self.xyzr_table.rowCount()
             self.xyzr_table.insertRow(row)
             label = QTableWidgetItem(f"{i}/{len(batch)} {purpose}")
             label.setFlags(label.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.xyzr_table.setItem(row, 0, label)
-            for col, axis in enumerate(("X", "Y", "Z", "R"), 1):
+            for col, axis in enumerate(("X", "Y", "Z"), 1):
                 item = QTableWidgetItem(f"{values[axis]:.3f}")
                 self.xyzr_table.setItem(row, col, item)
 
-    def _read_xyzr_edits(self) -> list[dict]:
-        """把表中编辑写回 _latest_cmds 的 gantry_xyzr，并返回副本。"""
+    def _read_xyz_edits(self) -> list[dict]:
+        """把表中编辑写回仅含 XYZ 的 PLC 目标；自动流程不保留 R 目标。"""
         out = []
         for row, cmd in enumerate(self._latest_cmds):
             data = dict(cmd or {})
@@ -344,26 +359,45 @@ class PlcMotionDialog(QDialog):
                 out.append(data)
                 continue
             try:
-                xyzr = {
+                xyz = {
                     "X": float(self.xyzr_table.item(row, 1).text()),
                     "Y": float(self.xyzr_table.item(row, 2).text()),
                     "Z": float(self.xyzr_table.item(row, 3).text()),
-                    "R": float(self.xyzr_table.item(row, 4).text()),
                 }
             except Exception:
-                xyzr = dict(data.get("gantry_xyzr") or {})
-            data["gantry_xyzr"] = xyzr
+                raw = dict(data.get("gantry_xyzr") or {})
+                xyz = {axis: float(raw.get(axis, 0.0) or 0.0) for axis in ("X", "Y", "Z")}
+            data["gantry_xyzr"] = xyz
             # 同步粗略回写 world，避免只改了表但 JSON 仍显示旧值
             world = dict(data.get("world_pose") or {})
-            world["x_mm"] = float(xyzr.get("X", 0.0))
-            world["y_mm"] = float(xyzr.get("Y", 0.0))
-            world["z_mm"] = float(xyzr.get("Z", 0.0))
-            world["yaw_deg"] = float(xyzr.get("R", 0.0))
+            world["x_mm"] = float(xyz.get("X", 0.0))
+            world["y_mm"] = float(xyz.get("Y", 0.0))
+            world["z_mm"] = float(xyz.get("Z", 0.0))
             data["world_pose"] = world
             out.append(data)
         self._latest_cmds = out
         self._latest_cmd = out[0] if out else None
         return out
+
+    @staticmethod
+    def _display_xyz_only(batch: list[dict]) -> list[dict]:
+        """弹窗只展示可下发的 XYZ，避免现场 R 被误认为自动目标。"""
+        visible = []
+        for item in batch:
+            data = dict(item or {})
+            raw = data.get("gantry_xyzr")
+            if isinstance(raw, Mapping):
+                data["gantry_xyzr"] = {
+                    axis: raw[axis]
+                    for axis in ("X", "Y", "Z")
+                    if axis in raw
+                }
+            world = dict(data.get("world_pose") or {})
+            world.pop("yaw_deg", None)
+            world.pop("yaw", None)
+            data["world_pose"] = world
+            visible.append(data)
+        return visible
 
     def apply_batch(self, cmds: list, *, auto_pushed: bool = False, push_result: dict | None = None) -> None:
         batch = [dict(item or {}) for item in (cmds or []) if item]
@@ -375,10 +409,11 @@ class PlcMotionDialog(QDialog):
         total = len(batch)
         lines = [format_waypoint_line(i, total, cmd) for i, cmd in enumerate(batch, 1)]
         self.step_label.setText(f"流程步骤：{step_title}")
-        self.purpose_label.setText(f"本步共 {total} 段，按顺序执行（可先改 XYZR）：")
+        self.purpose_label.setText(f"本步共 {total} 段，按顺序执行（可先改 XYZ；R 现场保持）：")
         self.summary.setText("\n\n".join(lines))
-        self.cmd_view.setPlainText(json.dumps(batch if total > 1 else batch[0], ensure_ascii=False, indent=2))
-        self._fill_xyzr_table(batch)
+        visible = self._display_xyz_only(batch)
+        self.cmd_view.setPlainText(json.dumps(visible if total > 1 else visible[0], ensure_ascii=False, indent=2))
+        self._fill_xyz_table(batch)
         self.confirm_btn.setEnabled(True)
         self.confirm_btn.setText("确认下发到 PLC" if total == 1 else f"确认按顺序下发全部 {total} 段")
 
@@ -436,8 +471,9 @@ class PlcMotionDialog(QDialog):
             return
         if not callable(self._on_confirm_push):
             return
-        edited = self._read_xyzr_edits()
-        self.cmd_view.setPlainText(json.dumps(edited if len(edited) > 1 else edited[0], ensure_ascii=False, indent=2))
+        edited = self._read_xyz_edits()
+        visible = self._display_xyz_only(edited)
+        self.cmd_view.setPlainText(json.dumps(visible if len(visible) > 1 else visible[0], ensure_ascii=False, indent=2))
         result = self._on_confirm_push() or {}
         if result.get("success"):
             self.push_status.setText(f"下发状态：已确认推送 · {result.get('message', 'OK')}")
@@ -447,17 +483,8 @@ class PlcMotionDialog(QDialog):
             QMessageBox.warning(self, "下发失败", result.get("message") or "PLC 未连接或写轴失败")
 
     def _open_console(self) -> None:
-        python = PROJECT_ROOT / "runtime" / "python.exe"
-        exe = str(python if python.is_file() else sys.executable)
-        try:
-            subprocess.Popen(
-                [exe, "-m", "plc_console"],
-                cwd=str(PROJECT_ROOT),
-                env={**os.environ, "PYTHONUTF8": "1"},
-            )
+        if open_plc_manual_console(self):
             self.push_status.setText("下发状态：已尝试启动备用控制台（主系统 PLC 已连时可直接点确认下发）")
-        except Exception as exc:
-            QMessageBox.warning(self, "启动失败", str(exc))
 
     def closeEvent(self, event):
         # 必须 accept，否则第一次关会被 Qt 留住，要点第二次才消失

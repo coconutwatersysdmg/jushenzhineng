@@ -168,7 +168,7 @@ class FlowController:
         self.debug_inputs: Dict[str, Any] = {}
         self.lab_camera_gallery: List[Dict[str, Any]] = []
         # PLC 到位后只留极短稳定时间；采集不再与机械臂运动并发。
-        self.lab_camera_settle_seconds = 0.20
+        self.lab_camera_settle_seconds = 0.50
         self.state_listener = None
         self.truck_initialized = False
         self.corner_review_callback = None
@@ -207,8 +207,9 @@ class FlowController:
 
     def _resolve_motion_xyzr(self, cmd: Mapping[str, Any]) -> dict[str, float]:
         raw = cmd.get("gantry_xyzr")
-        if isinstance(raw, Mapping) and all(k in raw for k in ("X", "Y", "Z", "R")):
-            return {k: float(raw[k]) for k in ("X", "Y", "Z", "R")}
+        if isinstance(raw, Mapping) and all(k in raw for k in ("X", "Y", "Z")):
+            # 自动流程只执行 XYZ；即使上游保留 R 供标定，也不把它作为 PLC 目标。
+            return {k: float(raw[k]) for k in ("X", "Y", "Z")}
         from devices.world_to_gantry import WorldToGantryError, transform_world_to_gantry
 
         mapping = dict(getattr(self.robot, "world_to_gantry", None) or {})
@@ -1766,7 +1767,7 @@ class FlowController:
         return result
 
     def _lab_return_origin(self) -> dict[str, Any]:
-        """返回配置的 PLC 工作原点，R 仍保持软件启动时的物理角度。"""
+        """返回配置的 PLC 工作原点；仅移动 XYZ，R 姿态由现场人工保持。"""
         from config.external_devices_config import GANTRY
 
         mapping = getattr(self.robot, "world_to_gantry", None) or GANTRY.get("world_to_gantry") or {}
@@ -1856,7 +1857,7 @@ class FlowController:
         return result
 
     def _advance_lab_round(self):
-        """本轮 B 区检测通过后进入下一件；车板几何永久复用，不再重复扫描。"""
+        """本轮 B 区检测结束即进入下一件；车板几何永久复用，不再重复扫描。"""
         self.completed.append(deepcopy(self.round_data))
         preserved_radar = None
         preserved_camera = None
@@ -2434,15 +2435,15 @@ class FlowController:
                     raise RuntimeError(data.get("message") or "上一 B 区放货前监测未通过")
             elif code=="LAB_PLACE_VERIFY":
                 data=self._lab_place_verify()
-                if not data.get("success"):
-                    raise RuntimeError(data.get("message") or "当前 B 区放货后检测未通过")
                 self._record(
                     code,
                     name,
-                    "success",
+                    "success" if data.get("success") else "warning",
                     str((data or {}).get("message") or name),
                     data,
                 )
+                # 放货后检测只记录「在区 / 越界」结论；无论结论如何，都进入下一件循环。
+                # 下一件放货前监测仍是门槛，发现偏移时不允许继续人工放下一件。
                 advance=self._advance_lab_round()
                 self._persist_database_snapshot()
                 self.twin.set_alarm(None)

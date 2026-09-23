@@ -39,11 +39,11 @@ PLC = {
 # TODO PLC---- 龙门架 / 真机运动 ---- 对应 gantry_settings.json
 GANTRY = {
     "allow_real_motion": bool(ALLOW_REAL_MOTION),
-    "default_speed": 30.0,
+    "default_speed": 60.0,
     "move_timeout_s": 60.0,
     "axis_default_speeds": {
-        "X": 30.0,
-        "Y": 50.0,
+        "X": 60.0,
+        "Y": 60.0,
         "Z": 30.0,
         "R": 30.0,
     },
