@@ -297,5 +297,5 @@ class LabLivePalletHoleCaptureTests(unittest.TestCase):
 
         self.assertTrue(result["success"])
         self.assertTrue(result["motion_completion"]["success"])
-        self.assertEqual(controller.plc.calls[0]["targets"], {"X": 120.0, "Y": 340.0, "Z": 380.0})
-        self.assertEqual(controller.plc.calls[0]["axes"], ("X", "Y", "Z"))
+        self.assertEqual(controller.plc.calls[0]["targets"], {"X": 120.0, "Y": 340.0})
+        self.assertEqual(controller.plc.calls[0]["axes"], ("X", "Y"))

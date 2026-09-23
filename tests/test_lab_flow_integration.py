@@ -9,6 +9,10 @@ from services.lab_space_planner import (
 )
 from services.lab_camera_visit_planner import merge_lab_corner_points
 from services.lab_cycle_policy import lab_steps_for_round
+from services.lab_dynamic_box_monitor_service import (
+    LabDynamicBoxMonitorService,
+    judge_box_world_region,
+)
 from services.module_evidence_service import ModuleEvidenceService
 from services.space_manager import SpaceManager
 
@@ -146,13 +150,109 @@ def test_lab_post_place_verdict_records_warning_and_starts_next_manual_cycle():
     assert "advance=self._advance_lab_round()" in block
 
 
-def test_lab_automatic_motion_uses_xyz_only_and_dialog_does_not_show_r_target():
+def test_lab_automatic_motion_uses_xy_only_and_dialog_does_not_show_r_target():
     controller = Path("controllers/flow_controller.py").read_text(encoding="utf-8")
     dialog = Path("ui/plc_motion_dialog.py").read_text(encoding="utf-8")
 
-    assert 'axes=("X", "Y", "Z")' in controller
+    assert 'axes=("X", "Y")' in controller
+    assert '"z_axis_untouched": True' in controller
     assert 'self.xyzr_table.setHorizontalHeaderLabels(["段/任务", "X", "Y", "Z"])' in dialog
     assert '"R": float(self.xyzr_table.item(row, 4).text())' not in dialog
+
+
+def test_lab_box_region_decision_uses_xy_even_when_board_is_sloped():
+    region = {
+        "region_id": "B1",
+        "corners_world_xyz_mm": [
+            [0.0, 0.0, 0.0],
+            [100.0, 0.0, 40.0],
+            [0.0, 100.0, 80.0],
+            [100.0, 100.0, 120.0],
+        ],
+    }
+    # Z 故意远离底板；只要 X/Y 在 B1 内，纸箱仍应通过。
+    box = [[20.0, 20.0, 5000.0], [80.0, 20.0, 6000.0], [80.0, 80.0, 7000.0], [20.0, 80.0, 8000.0]]
+
+    result = judge_box_world_region(box, region)
+
+    assert result["inside_planned_region"] is True
+    assert result["corner_inside"] == [True, True, True, True]
+
+
+def test_lab_box_depth_sampling_expands_after_a_zero_depth_corner():
+    calls = []
+
+    class _Calibration:
+        @staticmethod
+        def dynamic_camera_world_matrix(_pose):
+            import numpy as np
+            return np.eye(4)
+
+        @staticmethod
+        def transform_point(_matrix, point):
+            return point
+
+    def sample_depth(_path, _u, _v, window):
+        calls.append(window)
+        return 0.0 if window == 5 else 1000.0
+
+    service = LabDynamicBoxMonitorService(
+        calibration=_Calibration(),
+        depth_sampler=sample_depth,
+    )
+    result = None
+    try:
+        result = service._pixel_to_world(
+            {
+                "depth_path": "depth.png",
+                "depth_scale_mm": 1.0,
+                "intrinsics": {"fx": 1000.0, "fy": 1000.0, "cx": 0.0, "cy": 0.0},
+            },
+            10.0,
+            20.0,
+        )
+    except RuntimeError:
+        pass
+
+    assert calls == [5, 11]
+    assert result["depth_value"] == 1000.0
+
+
+def test_lab_box_world_conversion_reuses_lab_camera_plc_transform():
+    class _Calibration:
+        @staticmethod
+        def dynamic_camera_world_matrix(_pose):
+            raise AssertionError("实验室动态监测不应改用数字孪生相机外参")
+
+    class _LabTransform:
+        def __init__(self):
+            self.calls = []
+
+        def camera_to_world(self, point, plc_pose):
+            self.calls.append((tuple(point), dict(plc_pose)))
+            return (111.0, 222.0, 333.0)
+
+    transform = _LabTransform()
+    service = LabDynamicBoxMonitorService(
+        calibration=_Calibration(),
+        depth_sampler=lambda *_args: 1000.0,
+    )
+    service.lab_world_transform = transform
+
+    result = service._pixel_to_world(
+        {
+            "depth_path": "depth.png",
+            "depth_scale_mm": 1.0,
+            "intrinsics": {"fx": 1000.0, "fy": 1000.0, "cx": 0.0, "cy": 0.0},
+            "plc_pose": {"x": 10.0, "y": 20.0, "z": 380.0, "r": -90.0},
+        },
+        10.0,
+        20.0,
+    )
+
+    assert transform.calls
+    assert result["world_xyz_mm"] == [111.0, 222.0, 333.0]
+    assert result["world_transform"] == "lab_camera_plc_extrinsic"
 
 
 def test_only_passed_post_place_check_occupies_current_b_region():
