@@ -261,3 +261,39 @@ class LabLivePalletHoleCaptureTests(unittest.TestCase):
             self.assertEqual(controller.step_index, 2)
         finally:
             feature_switches.apply_run_profile(previous, persist=False)
+
+    def test_lab_camera_motion_waits_for_real_plc_completion_before_capture(self):
+        class _Robot:
+            @staticmethod
+            def move_tool_world(_robot_id, pose, task):
+                return {
+                    "success": True,
+                    "pose": pose,
+                    "task": task,
+                    "gantry_xyzr": {"X": 120.0, "Y": 340.0, "Z": 380.0, "R": -90.0},
+                }
+
+        class _Plc:
+            connected = True
+
+            def __init__(self):
+                self.calls = []
+
+            def move_absolute_xyzr(self, targets, speed, timeout_s, soft_limits=None):
+                self.calls.append({"targets": dict(targets), "speed": speed, "timeout_s": timeout_s})
+                return {"success": True, "message": "四轴绝对定位完成", "positions": dict(targets)}
+
+        controller = FlowController.__new__(FlowController)
+        controller.device_mode = "real"
+        controller.robot = _Robot()
+        controller.plc = _Plc()
+        controller.lab_camera_settle_seconds = 0.0
+
+        result = controller._lab_move_tool_world_and_wait(
+            {"x_mm": -3000.0, "y_mm": 500.0, "z_mm": 1800.0},
+            "LAB_POST_PLACE_B1",
+        )
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["motion_completion"]["success"])
+        self.assertEqual(controller.plc.calls[0]["targets"], {"X": 120.0, "Y": 340.0, "Z": 380.0, "R": -90.0})
