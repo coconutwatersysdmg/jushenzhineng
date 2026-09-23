@@ -148,16 +148,20 @@ class RealPlcAdapter(PLCAdapter):
         speed: float = 30.0,
         timeout_s: float = 60.0,
         soft_limits: Mapping[str, Any] | None = None,
+        axes: tuple[str, ...] = ("X", "Y", "Z", "R"),
     ) -> dict:
-        """TODO: 与PLC交互 — 按 finished_app 时序写 XYZR 目标并等轴到位。"""
+        """按 finished_app 时序写指定轴目标并等待到位。"""
         if not self.connected or self._motion is None:
             linked = self.connect()
             if not linked.get("success"):
                 return linked
         assert self._motion is not None
         try:
-            actual_targets = {key: float(value) for key, value in dict(targets).items()}
-            if self.hold_r_axis:
+            selected_axes = tuple(str(axis).upper() for axis in axes)
+            if not selected_axes or any(axis not in {"X", "Y", "Z", "R"} for axis in selected_axes):
+                raise RuntimeError(f"无效 PLC 运动轴：{selected_axes}")
+            actual_targets = {key: float(value) for key, value in dict(targets).items() if key in selected_axes}
+            if "R" in selected_axes and self.hold_r_axis:
                 # 软件启动后的首次运动读取 PLC 实际 R，作为本次软件会话的锁定基准。
                 if self.locked_r_deg is None:
                     current = self._motion.read_positions()
@@ -172,11 +176,14 @@ class RealPlcAdapter(PLCAdapter):
                 speed=speed,
                 timeout_s=timeout_s,
                 soft_limits=soft_limits,
+                axes=selected_axes,
             )
             result = {
                 **result,
                 "targets": actual_targets,
+                "axes": list(selected_axes),
                 "r_axis_held": self.hold_r_axis,
+                "r_axis_untouched": "R" not in selected_axes,
                 "locked_r_deg": self.locked_r_deg,
             }
             self.twin.update_device("PLC", task="ABS_MOVE_DONE")
@@ -189,7 +196,9 @@ class RealPlcAdapter(PLCAdapter):
                 "success": False,
                 "message": str(exc),
                 "targets": dict(targets),
+                "axes": list(axes),
                 "r_axis_held": self.hold_r_axis,
+                "r_axis_untouched": "R" not in axes,
                 "locked_r_deg": self.locked_r_deg,
             }
 

@@ -291,7 +291,7 @@ class MainWindow(QMainWindow):
         # 实验室右侧：相机照片 + 插孔坐标 + 雷达四角
         self.lab_right_panel=QWidget()
         lab_rl=QVBoxLayout(self.lab_right_panel); lab_rl.setContentsMargins(0,0,0,0); lab_rl.setSpacing(8)
-        cam_card,cam_l,_=self._collapsible_card("相机照片 / 识别结果",expanded=True)
+        cam_card,cam_l,_=self._collapsible_card("相机实拍 / 标注结果 / 托盘插孔 WORLD",expanded=True)
         self.lab_camera_preview=QLabel("执行后显示：插孔 / 角点 / B区纸箱检测图")
         self.lab_camera_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lab_camera_preview.setMinimumHeight(220)
@@ -301,6 +301,10 @@ class MainWindow(QMainWindow):
         self.lab_camera_caption.setWordWrap(True)
         self.lab_camera_caption.setStyleSheet("color:#9ec8dc")
         cam_l.addWidget(self.lab_camera_caption,0)
+        self.lab_camera_history=QComboBox()
+        self.lab_camera_history.setToolTip("选择本轮任一次实拍及对应识别标注图")
+        self.lab_camera_history.currentIndexChanged.connect(self._on_lab_camera_history_changed)
+        cam_l.addWidget(self.lab_camera_history,0)
         self.lab_hole_table=QTableWidget(0,4)
         self.lab_hole_table.setHorizontalHeaderLabels(["点位","X(mm)","Y(mm)","Z(mm)"])
         self.lab_hole_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -1000,39 +1004,11 @@ class MainWindow(QMainWindow):
         msgs=t.get("messages") or []
         alarm=t.get("alarm"); self.logs.setPlainText(("ALARM: "+str(alarm)+"\n\n" if alarm else "")+"\n".join(f"[{m.get('time')}] {m.get('source')} {m.get('status')} {m.get('message')}" for m in msgs))
 
-    def _refresh_lab_sense_panels(self, s: dict, rd: dict, hole: dict, truck: dict) -> None:
-        """实验室右侧：最新照片+标注图、当前识别点、底板角点。"""
-        latest = s.get("lab_latest_camera_view") or rd.get("lab_latest_camera_view") or {}
-        place = rd.get("lab_place_verify") or {}
-        pre_monitor = rd.get("lab_pre_place_monitor") or {}
-        pick = rd.get("pick_result") or {}
-        corner = rd.get("lab_corner_shell") or {}
-
-        image = str(latest.get("image_path") or "")
-        caption = str(latest.get("title") or "")
-        status = str(latest.get("status") or "")
-        message = str(latest.get("message") or "")
-        if not image:
-            if place.get("image_path"):
-                image = str(place.get("image_path"))
-                caption = f"{(place.get('planned_region_id') or place.get('target_region', {}).get('region_id') or 'B')} 放货后检测"
-                status = str(place.get("status") or "")
-                message = str(place.get("message") or "")
-            elif pre_monitor.get("image_path"):
-                image = str(pre_monitor.get("image_path"))
-                caption = f"{pre_monitor.get('planned_region_id') or 'B'} 放货前监测"
-                status = str(pre_monitor.get("status") or "")
-                message = str(pre_monitor.get("message") or "")
-            elif corner.get("image_path"):
-                image = str(corner.get("image_path"))
-                caption = "第3步：角点精定位拍照"
-            elif pick.get("image_path"):
-                image = str(pick.get("image_path"))
-                caption = "第2步：托盘插孔识别图"
-            else:
-                image = self._first_image(hole) or self._first_image(pick.get("capture")) or ""
-                caption = "等待拍照"
-
+    def _render_lab_camera_entry(self, entry: dict, gallery_n: int) -> None:
+        image = str(entry.get("image_path") or entry.get("result_image_path") or "")
+        caption = str(entry.get("title") or "相机视图")
+        status = str(entry.get("status") or "")
+        message = str(entry.get("message") or "")
         if image and Path(image).is_file():
             pix = QPixmap(image)
             if not pix.isNull():
@@ -1043,65 +1019,95 @@ class MainWindow(QMainWindow):
                     Qt.TransformationMode.SmoothTransformation,
                 )
                 self.lab_camera_preview.setPixmap(scaled)
+                self.lab_camera_preview.setText("")
                 self.lab_camera_preview.setToolTip(f"{caption}\n{image}")
             else:
+                self.lab_camera_preview.setPixmap(QPixmap())
                 self.lab_camera_preview.setText(f"无法加载图片：\n{image}")
         else:
             self.lab_camera_preview.setPixmap(QPixmap())
             self.lab_camera_preview.setText(caption or "等待拍照")
-
-        gallery_n = len(s.get("lab_camera_gallery") or rd.get("lab_camera_gallery") or [])
-        caption_bits = [caption or "相机视图"]
+        bits = [caption]
         if status:
-            caption_bits.append(f"状态={status}")
+            bits.append(f"状态={status}")
         if message:
-            caption_bits.append(message)
+            bits.append(message)
         if gallery_n:
-            caption_bits.append(f"已拍 {gallery_n} 张")
-        if hasattr(self, "lab_camera_caption"):
-            self.lab_camera_caption.setText("｜".join(caption_bits))
+            bits.append(f"本轮已拍 {gallery_n} 次")
+        self.lab_camera_caption.setText("｜".join(bits))
 
-        # 点位表：优先纸箱四角，其次插孔
+    def _on_lab_camera_history_changed(self, index: int) -> None:
+        entries = getattr(self, "_lab_camera_entries", [])
+        if 0 <= int(index) < len(entries):
+            self._render_lab_camera_entry(entries[int(index)], len(entries))
+
+    def _refresh_lab_sense_panels(self, s: dict, rd: dict, hole: dict, truck: dict) -> None:
+        """实验室右侧：最新照片+标注图、当前识别点、底板角点。"""
+        latest = s.get("lab_latest_camera_view") or rd.get("lab_latest_camera_view") or {}
+        place = rd.get("lab_place_verify") or {}
+        pre_monitor = rd.get("lab_pre_place_monitor") or {}
+        pick = rd.get("pick_result") or {}
+        corner = rd.get("lab_corner_shell") or {}
+
+        image = str(latest.get("image_path") or "")
+        fallback = dict(latest)
+        if not image:
+            if place.get("image_path"):
+                fallback = {
+                    "image_path": str(place.get("image_path")),
+                    "title": f"{(place.get('planned_region_id') or place.get('target_region', {}).get('region_id') or 'B')} 放货后检测",
+                    "status": str(place.get("status") or ""),
+                    "message": str(place.get("message") or ""),
+                }
+            elif pre_monitor.get("image_path"):
+                fallback = {
+                    "image_path": str(pre_monitor.get("image_path")),
+                    "title": f"{pre_monitor.get('planned_region_id') or 'B'} 放货前监测",
+                    "status": str(pre_monitor.get("status") or ""),
+                    "message": str(pre_monitor.get("message") or ""),
+                }
+            elif corner.get("image_path"):
+                fallback = {"image_path": str(corner.get("image_path")), "title": "第3步：角点精定位拍照"}
+            elif pick.get("image_path"):
+                fallback = {"image_path": str(pick.get("image_path")), "title": "第2步：托盘插孔识别图"}
+            else:
+                fallback = {
+                    "image_path": self._first_image(hole) or self._first_image(pick.get("capture")) or "",
+                    "title": "等待拍照",
+                }
+
+        gallery = list(s.get("lab_camera_gallery") or rd.get("lab_camera_gallery") or [])
+        entries = [dict(item) for item in gallery if isinstance(item, dict)]
+        signature = tuple((str(item.get("time") or ""), str(item.get("image_path") or ""), str(item.get("title") or "")) for item in entries)
+        if signature != getattr(self, "_lab_camera_gallery_signature", ()):
+            self._lab_camera_gallery_signature = signature
+            self._lab_camera_entries = entries
+            self.lab_camera_history.blockSignals(True)
+            self.lab_camera_history.clear()
+            for index, item in enumerate(entries, start=1):
+                self.lab_camera_history.addItem(f"{index}. {item.get('title') or item.get('step') or '相机拍照'}")
+            self.lab_camera_history.setCurrentIndex(len(entries) - 1)
+            self.lab_camera_history.blockSignals(False)
+        selected = fallback
+        index = self.lab_camera_history.currentIndex() if entries else -1
+        if 0 <= index < len(entries):
+            selected = entries[index]
+        self._render_lab_camera_entry(selected, len(entries))
+
+        # 此表固定只显示传统算法输出的两个托盘插孔 WORLD 坐标；纸箱坐标不在界面输出。
         self.lab_hole_table.setRowCount(0)
-        box_corners = (
-            latest.get("corners_world_xyz_mm")
-            or place.get("corners_world_xyz_mm")
-            or pre_monitor.get("corners_world_xyz_mm")
-            or []
-        )
-        if box_corners:
-            for index, xyz in enumerate(box_corners):
-                if not isinstance(xyz, (list, tuple)) or len(xyz) < 3:
-                    continue
-                r = self.lab_hole_table.rowCount()
-                self.lab_hole_table.insertRow(r)
-                vals = [f"纸箱P{index + 1}", f"{float(xyz[0]):.1f}", f"{float(xyz[1]):.1f}", f"{float(xyz[2]):.1f}"]
-                for c, val in enumerate(vals):
-                    self.lab_hole_table.setItem(r, c, QTableWidgetItem(str(val)))
-            region_flag = place.get("inside_planned_region")
-            if region_flag is None:
-                region_flag = pre_monitor.get("inside_planned_region")
-            if region_flag is None:
-                region_flag = (latest.get("extra") or {}).get("inside_planned_region")
-            if region_flag is not None:
-                r = self.lab_hole_table.rowCount()
-                self.lab_hole_table.insertRow(r)
-                judge = "全部在区内" if region_flag else "有角点越界"
-                for c, val in enumerate(["判区", judge, "", ""]):
-                    self.lab_hole_table.setItem(r, c, QTableWidgetItem(str(val)))
-        else:
-            for side, label in (("left", "左插孔"), ("right", "右插孔")):
-                world = hole.get(f"{side}_world_xyz_mm")
-                cam = hole.get(f"{side}_xyz_mm")
-                xyz = world if world is not None else cam
-                if xyz is None:
-                    continue
-                frame = "WORLD" if world is not None else "相机"
-                r = self.lab_hole_table.rowCount()
-                self.lab_hole_table.insertRow(r)
-                vals = [f"{label}({frame})", f"{float(xyz[0]):.1f}", f"{float(xyz[1]):.1f}", f"{float(xyz[2]):.1f}"]
-                for c, val in enumerate(vals):
-                    self.lab_hole_table.setItem(r, c, QTableWidgetItem(str(val)))
+        for side, label in (("left", "左插孔"), ("right", "右插孔")):
+            world = hole.get(f"{side}_world_xyz_mm")
+            cam = hole.get(f"{side}_xyz_mm")
+            xyz = world if world is not None else cam
+            if xyz is None:
+                continue
+            frame = "WORLD" if world is not None else "相机"
+            r = self.lab_hole_table.rowCount()
+            self.lab_hole_table.insertRow(r)
+            vals = [f"{label}({frame})", f"{float(xyz[0]):.1f}", f"{float(xyz[1]):.1f}", f"{float(xyz[2]):.1f}"]
+            for c, val in enumerate(vals):
+                self.lab_hole_table.setItem(r, c, QTableWidgetItem(str(val)))
 
         final_corners = corner.get("final_world_corners") or {}
         camera_corners = corner.get("camera_world_corners") or {}

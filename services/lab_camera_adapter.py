@@ -131,6 +131,26 @@ class LabCameraCornerService:
         """Expose the validated lab camera transform without leaking _ensure()."""
         return self._ensure().transform
 
+    @staticmethod
+    def _save_annotated_corners(rgb_path: str | Path, image_points: Mapping[str, Any]) -> str:
+        """将 YOLO 的 P1～P4 像素中心画到真实拍摄图上，供实验室右侧窗口展示。"""
+        import cv2
+        from utils.cv_io import read_image, write_image
+
+        source = Path(rgb_path).expanduser().resolve()
+        image = read_image(source, cv2.IMREAD_COLOR)
+        if image is None:
+            return str(source)
+        annotated = image.copy()
+        for name, pixel in image_points.items():
+            if not isinstance(pixel, (list, tuple)) or len(pixel) < 2:
+                continue
+            x, y = int(round(float(pixel[0]))), int(round(float(pixel[1])))
+            cv2.drawMarker(annotated, (x, y), (0, 220, 255), cv2.MARKER_CROSS, 26, 3)
+            cv2.putText(annotated, str(name), (x + 12, y - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 220, 255), 2)
+        output = source.with_name(f"{source.stem}_corner_yolo_result.png")
+        return str(output) if write_image(output, annotated) else str(source)
+
     def locate_from_capture_meta(
         self,
         corner_ids: Sequence[str],
@@ -155,6 +175,7 @@ class LabCameraCornerService:
 
         world: Dict[str, Dict[str, float]] = {}
         details: Dict[str, Any] = {}
+        annotated_paths: Dict[str, str] = {}
         for group, pids in groups.items():
             sample_meta = capture_meta.get(pids[0]) or {}
             rgb = sample_meta.get("rgb_path")
@@ -176,13 +197,17 @@ class LabCameraCornerService:
             frame = build_frame_from_paths(rgb, depth, depth_scale_mm=scale)
             pair = _pair_names_for_ids(pids)
             pair_result = localizer.detect_pair(frame, plc_pose, pair)
+            image_points = deepcopy(localizer.last_image_points)
             for name, xyz in pair_result.items():
                 world[name] = {"x": float(xyz[0]), "y": float(xyz[1]), "z": float(xyz[2])}
+            annotated_paths[group] = self._save_annotated_corners(rgb, image_points)
             details[group] = {
                 "pair_names": list(pair),
                 "plc_pose": deepcopy(plc_pose),
                 "rgb_path": str(rgb),
                 "depth_path": str(depth),
+                "image_points": image_points,
+                "annotated_image_path": annotated_paths[group],
             }
 
         missing = [pid for pid in ids if pid not in world]
@@ -206,8 +231,8 @@ class LabCameraCornerService:
             "world_points": world,
             "image_points": {
                 pid: {
-                    "x": 0.0,
-                    "y": 0.0,
+                    "x": float(next((details[g].get("image_points", {}).get(pid, [0.0, 0.0])[0] for g in details if pid in (details[g].get("image_points") or {})), 0.0)),
+                    "y": float(next((details[g].get("image_points", {}).get(pid, [0.0, 0.0])[1] for g in details if pid in (details[g].get("image_points") or {})), 0.0)),
                     "point_name": pid,
                     "status": "lab_world_direct",
                     "source": "lab_yolo_d435i_world",
@@ -216,6 +241,8 @@ class LabCameraCornerService:
                 for pid in ids
             },
             "details": details,
+            "annotated_image_paths": annotated_paths,
+            "result_image_path": next(iter(annotated_paths.values()), ""),
             "model_path": str(self.model_path),
             "extrinsic_path": str(self.extrinsic_path),
             "message": "实验室 YOLO+深度+外参 已直接输出 P1-P4 WORLD",

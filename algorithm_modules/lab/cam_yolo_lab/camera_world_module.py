@@ -175,6 +175,7 @@ class YoloD435iWorldLocalizer:
         self.imgsz = int(imgsz)
         self._model = model
         self.transform = transform or CameraWorldTransform.from_json(self.extrinsic_path)
+        self.last_image_points: dict[str, list[float]] = {}
 
     def load_model(self):
         if self._model is not None:
@@ -260,9 +261,13 @@ class YoloD435iWorldLocalizer:
         for u, v, _ in candidates:
             camera_xyz = self._depth_to_camera(frame, u, v)
             world_xyz = self.transform.camera_to_world(camera_xyz, plc_pose)
-            points.append((u, [float(x) for x in world_xyz]))
+            points.append((u, v, [float(x) for x in world_xyz]))
         points.sort(key=lambda item: item[0])
-        return {pair_names[0]: points[0][1], pair_names[1]: points[1][1]}
+        self.last_image_points = {
+            str(pair_names[0]): [float(points[0][0]), float(points[0][1])],
+            str(pair_names[1]): [float(points[1][0]), float(points[1][1])],
+        }
+        return {pair_names[0]: points[0][2], pair_names[1]: points[1][2]}
 
     def locate_four_corners(
         self,

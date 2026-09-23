@@ -82,6 +82,27 @@ class TraditionalForkHoleService:
         left = raw.get("left_hole_xyz_mm")
         right = raw.get("right_hole_xyz_mm")
         success = left is not None and right is not None
+        annotated_path = rgb_path
+        try:
+            annotated = rgb.copy()
+            for side, color in (("left", (0, 220, 0)), ("right", (0, 180, 255))):
+                box = raw.get(f"{side}_hole_box")
+                pixel = raw.get(f"{side}_hole_pixel")
+                if isinstance(box, (list, tuple)) and len(box) >= 4:
+                    x, y, w, h = (int(round(float(value))) for value in box[:4])
+                    cv2.rectangle(annotated, (x, y), (x + w, y + h), color, 3)
+                if isinstance(pixel, (list, tuple)) and len(pixel) >= 2:
+                    u, v = (int(round(float(value))) for value in pixel[:2])
+                    cv2.drawMarker(annotated, (u, v), color, cv2.MARKER_CROSS, 24, 3)
+                    cv2.putText(annotated, f"{side.upper()} HOLE", (u + 12, v - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            from utils.cv_io import write_image
+
+            output = rgb_path.with_name(f"{rgb_path.stem}_fork_hole_result.png")
+            if write_image(output, annotated):
+                annotated_path = output.resolve()
+        except Exception:
+            # 标注图失败不能影响实际插孔坐标识别与下发。
+            pass
         return {
             "success": success,
             "algorithm": "traditional_opencv_fork_hole",
@@ -93,9 +114,11 @@ class TraditionalForkHoleService:
             "right_xyz_mm": right,
             "left_hole_xyz_mm": left,
             "right_hole_xyz_mm": right,
-            "result_image_path": str(rgb_path),
+            "result_image_path": str(annotated_path),
             "rgb_path": str(rgb_path),
             "depth_path": str(depth_path),
+            "left_hole_pixel": raw.get("left_hole_pixel"),
+            "right_hole_pixel": raw.get("right_hole_pixel"),
             "camera_intrinsics": self._intrinsics(capture),
             "dark_threshold": self.dark_threshold,
             "message": (

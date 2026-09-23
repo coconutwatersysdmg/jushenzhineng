@@ -49,8 +49,9 @@ class MockPLCAdapter(PLCAdapter):
         speed: float = 30.0,
         timeout_s: float = 60.0,
         soft_limits=None,
+        axes=("X", "Y", "Z", "R"),
     ) -> dict:
-        payload = {"targets": dict(targets or {}), "speed": float(speed), "timeout_s": float(timeout_s)}
+        payload = {"targets": dict(targets or {}), "speed": float(speed), "timeout_s": float(timeout_s), "axes": list(axes)}
         self.twin.update_device("PLC", task="ABS_MOVE_MOCK")
         self.twin.add_message("PLC", "SUCCESS", f"模拟绝对定位 {payload['targets']}", payload)
         return {"success": True, "message": f"模拟绝对定位完成：{payload['targets']}", **payload}
