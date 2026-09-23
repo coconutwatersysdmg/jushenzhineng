@@ -143,11 +143,8 @@ class RealLivoxRadarAdapter(RadarAdapter):
     def locate_truck(self, cargo: dict) -> dict:
         self.twin.update_device("RADAR", status="ONLINE", task="LIVOX_CAPTURE")
         override = Path(str((cargo or {}).get("point_cloud_path") or self.pcd_path or ""))
-        # 真采模式下忽略 examples 联调 PCD，避免“没改雷达也 SUCCESS”
-        override_text = str(override).replace("\\", "/")
-        allow_override = override.is_file() and not (
-            self.use_live_capture and ("/examples/" in f"/{override_text}" or "example" in override_text.lower())
-        )
+        # 真采模式禁止任何指定 PCD；只有显式关闭实采时才允许离线文件。
+        allow_override = (not self.use_live_capture) and override.is_file()
         if allow_override:
             path = str(override.resolve())
             self.twin.update_device("RADAR", task="PCD_READY")

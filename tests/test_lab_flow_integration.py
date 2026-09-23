@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from config import feature_switches
 from services.lab_space_planner import (
     build_lab_space_plan,
@@ -73,37 +75,58 @@ def test_non_lab_profile_does_not_load_lab_corner_visit():
 
 def test_lab_backend_grid_plan_uses_final_world_corners_without_ui_grid_payload():
     final_points = {
-        "P1": {"x": 0.0, "y": 0.0, "z": 0.0},
-        "P2": {"x": 1000.0, "y": 0.0, "z": 0.0},
-        "P3": {"x": 0.0, "y": 2400.0, "z": 0.0},
-        "P4": {"x": 1000.0, "y": 2400.0, "z": 0.0},
+        "P1": {"x": 0.0, "y": 0.0, "z": 0.0, "source": "camera_yolo"},
+        "P2": {"x": 1000.0, "y": 0.0, "z": 0.0, "source": "camera_yolo"},
+        "P3": {"x": 0.0, "y": 2400.0, "z": 0.0, "source": "camera_yolo"},
+        "P4": {"x": 1000.0, "y": 2400.0, "z": 0.0, "source": "camera_yolo"},
     }
 
     result = build_lab_space_plan(final_points, ["P1", "P2", "P3", "P4"])
 
     assert result["success"] is True
     assert result["geometry"]["decision_source"] == "camera_world_corners"
-    assert len(result["space"]["regions"]) == 4
+    assert len(result["space"]["regions"]) == 12
+    assert result["geometry"]["lab_equal_row_count"] == 6
     assert result["ui_display"] is False
 
 
-def test_lab_grid_numbers_from_p1_p2_end_and_only_loads_b_column():
+def test_lab_grid_uses_world_corners_to_make_two_columns_and_six_equal_rows():
     final_points = {
-        "P1": {"x": 0.0, "y": 0.0, "z": 0.0},
-        "P2": {"x": 1000.0, "y": 0.0, "z": 0.0},
-        "P3": {"x": 0.0, "y": 3600.0, "z": 0.0},
-        "P4": {"x": 1000.0, "y": 3600.0, "z": 0.0},
+        "P1": {"x": 100.0, "y": 200.0, "z": 1000.0, "source": "camera_yolo"},
+        "P2": {"x": 1300.0, "y": 400.0, "z": 1020.0, "source": "camera_yolo"},
+        "P3": {"x": 700.0, "y": 6200.0, "z": 1300.0, "source": "camera_yolo"},
+        "P4": {"x": 1900.0, "y": 6400.0, "z": 1320.0, "source": "camera_yolo"},
     }
 
     result = build_lab_space_plan(final_points, ["P1", "P2", "P3", "P4"])
 
     assert [r["region_id"] for r in result["space"]["regions"]] == [
         "A1", "B1", "A2", "B2", "A3", "B3",
+        "A4", "B4", "A5", "B5", "A6", "B6",
     ]
-    assert result["loading_order"] == ["B1", "B2", "B3"]
+    assert result["loading_order"] == ["B1", "B2", "B3", "B4", "B5", "B6"]
+    regions = {region["region_id"]: region for region in result["space"]["regions"]}
+    assert regions["A1"]["corners_world_xyz_mm"] == [
+        [100.0, 200.0, 1000.0],
+        [700.0, 300.0, 1010.0],
+        [200.0, 1200.0, 1050.0],
+        [800.0, 1300.0, 1060.0],
+    ]
+    assert regions["B6"]["corners_world_xyz_mm"][3] == [1900.0, 6400.0, 1320.0]
     assert lab_b_region_for_round(result["space"], 0)["region_id"] == "B1"
-    assert lab_b_region_for_round(result["space"], 1)["region_id"] == "B2"
-    assert lab_b_region_for_round(result["space"], 2)["region_id"] == "B3"
+    assert lab_b_region_for_round(result["space"], 5)["region_id"] == "B6"
+
+
+def test_lab_grid_rejects_lidar_fallback_corner():
+    final_points = {
+        "P1": {"x": 0.0, "y": 0.0, "z": 0.0, "source": "camera_yolo"},
+        "P2": {"x": 1000.0, "y": 0.0, "z": 0.0, "source": "camera_yolo"},
+        "P3": {"x": 0.0, "y": 6000.0, "z": 0.0, "source": "lidar_fallback"},
+        "P4": {"x": 1000.0, "y": 6000.0, "z": 0.0, "source": "camera_yolo"},
+    }
+
+    with pytest.raises(RuntimeError, match="相机.*WORLD.*完整"):
+        build_lab_space_plan(final_points, ["P1", "P2", "P3", "P4"])
 
 
 def test_lab_repeat_flow_monitors_previous_b_region_before_post_place_check():
@@ -117,10 +140,10 @@ def test_lab_repeat_flow_monitors_previous_b_region_before_post_place_check():
 
 def test_only_passed_post_place_check_occupies_current_b_region():
     final_points = {
-        "P1": {"x": 0.0, "y": 0.0, "z": 0.0},
-        "P2": {"x": 1000.0, "y": 0.0, "z": 0.0},
-        "P3": {"x": 0.0, "y": 2400.0, "z": 0.0},
-        "P4": {"x": 1000.0, "y": 2400.0, "z": 0.0},
+        "P1": {"x": 0.0, "y": 0.0, "z": 0.0, "source": "camera_yolo"},
+        "P2": {"x": 1000.0, "y": 0.0, "z": 0.0, "source": "camera_yolo"},
+        "P3": {"x": 0.0, "y": 2400.0, "z": 0.0, "source": "camera_yolo"},
+        "P4": {"x": 1000.0, "y": 2400.0, "z": 0.0, "source": "camera_yolo"},
     }
     manager = SpaceManager()
     plan = build_lab_space_plan(
@@ -137,4 +160,4 @@ def test_only_passed_post_place_check_occupies_current_b_region():
     snapshot = manager.snapshot()
     assert [r["region_id"] for r in snapshot["occupied"]] == ["B1"]
     assert "A1" in [r["region_id"] for r in snapshot["available"]]
-    assert plan["loading_order"] == ["B1", "B2"]
+    assert plan["loading_order"] == ["B1", "B2", "B3", "B4", "B5", "B6"]

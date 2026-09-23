@@ -3,7 +3,7 @@
 
 配置与采集参数迁自 Automatic loading system：
 config.ini [camera] + config/camera_extrinsic.json。
-优先实拍；调试输入中若已指定 RGB/Depth 文件则优先用文件。
+默认保留调试文件能力；实验室真机流程会将其关闭，强制 D435i 实拍。
 """
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ class RealArmCameraAdapter(ArmCameraAdapter):
         self.tagged_depths: dict[str, str] = {}
 
         self.backend = str(self.config.get("backend") or "realsense")
+        self.allow_file_inputs = bool(self.config.get("allow_file_inputs", True))
         self.serial = str(self.config.get("serial") or "").strip() or None
         self.color_width = int(self.config.get("color_width", 1280))
         self.color_height = int(self.config.get("color_height", 720))
@@ -205,12 +206,15 @@ class RealArmCameraAdapter(ArmCameraAdapter):
             }
 
     def _manual_or_live(self, camera_id: str, tag: str, need_depth: bool) -> dict:
-        rgb = self._file(self.tagged_images.get(str(tag), "")) or self._file(
-            self.inputs.get(camera_id, {}).get("rgb")
-        )
-        depth = self._file(self.tagged_depths.get(str(tag), "")) or self._file(
-            self.inputs.get(camera_id, {}).get("depth")
-        )
+        rgb = None
+        depth = None
+        if self.allow_file_inputs:
+            rgb = self._file(self.tagged_images.get(str(tag), "")) or self._file(
+                self.inputs.get(camera_id, {}).get("rgb")
+            )
+            depth = self._file(self.tagged_depths.get(str(tag), "")) or self._file(
+                self.inputs.get(camera_id, {}).get("depth")
+            )
         if rgb and (not need_depth or depth):
             self.twin.update_camera(camera_id, task=f"MANUAL:{tag}", status="CAPTURE")
             out = {

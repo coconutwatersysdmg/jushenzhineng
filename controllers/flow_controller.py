@@ -94,7 +94,7 @@ class FlowController:
         ("FEEDBACK", "11. 偏差回PLC / 修正下一托盘 / 更新空间"),
         ("RETURN", "12. 机械臂返回 / 下一轮"),
     ]
-    # 实验室：首轮建图；后续按 B1→B2→B3 做返回/插孔/放前监测/放后检测。
+    # 实验室：首轮建图；后续按 B1→B2→…→B6 做返回/插孔/放前监测/放后检测。
     LAB_FIRST_STEPS = list(LAB_POLICY_FIRST_STEPS)
     LAB_REPEAT_STEPS = list(LAB_POLICY_REPEAT_STEPS)
 
@@ -125,6 +125,9 @@ class FlowController:
         # Real hardware mode must not synthesize demo frames behind the scenes.
         if str(self.device_mode).lower() == "real":
             self.allow_demo = False
+        if self.is_lab_profile() and str(self.device_mode).lower() == "real" and hasattr(self.camera, "allow_file_inputs"):
+            # 只约束实验室真机流程；现场模式仍保留原有调试输入能力。
+            self.camera.allow_file_inputs = False
         if hasattr(self.camera, "set_demo_enabled"):
             self.camera.set_demo_enabled(self.allow_demo)
         self.algorithms = algorithms or AlgorithmFacade()
@@ -440,18 +443,15 @@ class FlowController:
         return bool(livox.get("use_live_capture", True))
 
     def _apply_live_radar_policy(self):
-        """真机 + use_live_capture：丢掉离线示例 PCD，强制走 Livox 实采。"""
+        """真机 + use_live_capture：丢掉所有离线 PCD，强制走 Livox 实采。"""
         if not self._use_live_radar():
             return
         self.debug_inputs["point_cloud_example_only"] = False
-        pcd = str(self.debug_inputs.get("point_cloud_path") or "").replace("\\", "/")
-        # 默认联调 PCD 在 examples/ 下；清掉后 RealLivox 才会 capture_once
-        if (not pcd) or ("/examples/" in f"/{pcd}") or ("example" in pcd.lower()):
-            self.debug_inputs["point_cloud_path"] = ""
+        self.debug_inputs["point_cloud_path"] = ""
         self.twin.add_message(
             "RADAR",
             "INFO",
-            "已切换真雷达实采：忽略离线示例 PCD，将调用 Livox Mid360 采集",
+            "已切换真雷达实采：忽略所有离线 PCD，将调用 Livox Mid360 采集",
             {"use_live_capture": True, "host_config": "config/external_devices_config.py → LIVOX.host_ip"},
         )
 
@@ -466,6 +466,18 @@ class FlowController:
         images = self.debug_inputs.setdefault("images", {})
         depths = self.debug_inputs.setdefault("depths", {})
         cleared = []
+        if self.is_lab_profile():
+            # 实验室真机测试不保留任何离线相机输入；全部步骤只能使用本轮 D435i 实拍。
+            for bucket_name in ("images", "depths", "corner_images", "corner_depths"):
+                bucket = self.debug_inputs.setdefault(bucket_name, {})
+                for key in list(bucket):
+                    if str(bucket.get(key) or "").strip():
+                        bucket[key] = ""
+                        cleared.append(f"{bucket_name}.{key}")
+            for key in ("pallet_rgb", "pallet_depth"):
+                if str(self.debug_inputs.get(key) or "").strip():
+                    self.debug_inputs[key] = ""
+                    cleared.append(key)
         for tag in self._live_camera_force_tags():
             had_offline_input = False
             if str(images.get(tag) or "").strip():
@@ -589,6 +601,11 @@ class FlowController:
     def _capture_rgbd(self, camera_id: str, tag: str):
         cap=self.camera.capture_rgbd(camera_id,tag=tag)
         if not cap.get("success"): raise RuntimeError(f"{camera_id} 未取得 {tag} 的 RGB + 对齐深度")
+        if self.is_lab_profile() and str(getattr(self, "device_mode", "mock")).lower() == "real":
+            if cap.get("demo") or str(cap.get("source") or "").lower() != "realsense_d435i":
+                raise RuntimeError(f"实验室 {tag} 必须由 D435i 实时实拍，已拒绝离线/调试输入")
+            if not cap.get("rgb_path") or not cap.get("depth_path"):
+                raise RuntimeError(f"实验室 {tag} 的 D435i 实拍缺少 RGB 或对齐深度")
         return cap
 
     def _probe_one_device(self, device_id: str, probe_fn, timeout_s: float = 8.0) -> dict:
@@ -938,7 +955,7 @@ class FlowController:
         # 首轮使用启动前已调好的实际位置；后续轮先执行 LAB_RETURN_ORIGIN。
         # 这里只实拍、识别、发送坐标消息，不生成机械臂运动或插取命令。
         cam = self._camera_for_role("pallet_hole", "CAM_PICK")
-        cap = self.camera.capture_rgbd(cam, tag="pallet_hole")
+        cap = self._capture_rgbd(cam, tag="pallet_hole")
         if cap.get("success"):
             started = perf_counter()
             try:
@@ -1337,7 +1354,7 @@ class FlowController:
             )
         coord_text = "；".join(coord_lines) if coord_lines else "无有效角点"
         result = {
-            "success": bool(final_points),
+            "success": bool(camera_result.get("success") and lab_space_plan.get("success")),
             "lab_mode": True,
             "held_r_deg": held_r,
             "camera_capture_groups": captured_groups,
@@ -2122,13 +2139,20 @@ class FlowController:
         if not self.running: self.start()
         code,name=self.current_step; self.twin.set_phase(name,self.round_index+1)
         try:
-            if code=="DEVICE_CHECK": data=self._device_check()
+            if code=="DEVICE_CHECK":
+                data=self._device_check()
+                if self.is_lab_profile() and not data.get("all_online"):
+                    detail = str(data.get("message") or "未知设备故障")
+                    raise RuntimeError(f"实验室设备未全部在线，已停止流程：{detail}")
             elif code=="LAB_RETURN_ORIGIN":
                 data=self._lab_return_origin()
                 if not data.get("success"):
                     raise RuntimeError(data.get("message") or "实验室返回原点失败")
             elif code=="LAB_SENSE": data=self._lab_sense()
-            elif code=="LAB_CORNER_SHELL": data=self._lab_corner_shell()
+            elif code=="LAB_CORNER_SHELL":
+                data=self._lab_corner_shell()
+                if not data.get("success"):
+                    raise RuntimeError(data.get("message") or "相机最终 WORLD 四角不完整，已停止划格")
             elif code=="LAB_PRE_PLACE_MONITOR":
                 data=self._lab_pre_place_monitor()
                 if not data.get("success"):
@@ -2217,7 +2241,10 @@ class FlowController:
             "reason": str(reason or "用户选择失败后继续"),
         }
         if self.is_lab_profile() and code in {
+            "DEVICE_CHECK",
             "LAB_RETURN_ORIGIN",
+            "LAB_SENSE",
+            "LAB_CORNER_SHELL",
             "LAB_PRE_PLACE_MONITOR",
             "LAB_PLACE_VERIFY",
         }:
