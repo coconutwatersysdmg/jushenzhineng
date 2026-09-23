@@ -166,6 +166,7 @@ class FlowController:
         self.round_data: Dict[str, Any] = {}
         self.results: List[Dict[str, Any]] = []
         self.debug_inputs: Dict[str, Any] = {}
+        self.lab_camera_gallery: List[Dict[str, Any]] = []
         self.state_listener = None
         self.truck_initialized = False
         self.corner_review_callback = None
@@ -535,6 +536,7 @@ class FlowController:
         q=deepcopy(self.queue) if keep_plan else []
         self.twin.reset(); self.queue=q; self.completed=[]; self.round_index=0; self.step_index=0
         self.running=False; self.finished=False; self.round_data={}; self.results=[]; self.truck_initialized=False
+        self.lab_camera_gallery = []
         self.space.reset()
         self.loading_session_id=""; self._db_message_cursor=0
         self.twin.set_cargo_inventory(self.queue)
@@ -1064,6 +1066,23 @@ class FlowController:
 
         self.round_data["pick_result"] = result
         status = "SUCCESS" if result.get("success") else "FAILED"
+        hole_corners = []
+        for side in ("left", "right"):
+            xyz = (hole or {}).get(f"{side}_world_xyz_mm") or (hole or {}).get(f"{side}_xyz_mm")
+            if isinstance(xyz, (list, tuple)) and len(xyz) >= 3:
+                hole_corners.append([float(xyz[0]), float(xyz[1]), float(xyz[2])])
+        self._lab_record_camera_view(
+            step="pick_hole",
+            title="第2步：托盘插孔识别",
+            image_path=str(result.get("image_path") or ""),
+            rgb_path=str((cap or {}).get("rgb_path") or ""),
+            depth_path=str((cap or {}).get("depth_path") or ""),
+            result_image_path=str((hole or {}).get("result_image_path") or result.get("image_path") or ""),
+            status=status,
+            message=str(result.get("message") or ""),
+            corners_world=hole_corners,
+            extra={"hole_world_targets": deepcopy(result.get("hole_world_targets") or {})},
+        )
         self.twin.set_parallel("pick", status, result.get("message", ""), result)
         self.plc.send_message("PALLET_PICK", status, result.get("message", ""), result)
         return result
@@ -1273,6 +1292,16 @@ class FlowController:
                     "source": cap.get("source"),
                 },
             )
+            self._lab_record_camera_view(
+                step="corner_capture",
+                title=f"角点组 {group} 拍照",
+                image_path=str(cap.get("rgb_path") or ""),
+                rgb_path=str(cap.get("rgb_path") or ""),
+                depth_path=str(cap.get("depth_path") or ""),
+                region_id=group,
+                status="SUCCESS" if shot_ok else "FAILED",
+                message=str(cap.get("message") or ""),
+            )
             camera_world_pose = deepcopy(cap.get("camera_world_pose") or self.twin.camera_world_pose(camera_id))
             for point_id in pair:
                 capture_meta[point_id] = {
@@ -1321,6 +1350,37 @@ class FlowController:
         )
 
         camera_points = camera_result.get("world_points") or {}
+        # 角点识别结果写入右上角图库（优先标注图）
+        corner_result_image = str(
+            camera_result.get("result_image_path")
+            or camera_result.get("annotated_image_path")
+            or next(
+                (
+                    str((group_captures.get(g) or {}).get("rgb_path") or "")
+                    for g in captured_groups
+                    if (group_captures.get(g) or {}).get("rgb_path")
+                ),
+                "",
+            )
+        )
+        corner_xyz = []
+        for pid in ("P1", "P2", "P3", "P4"):
+            point = camera_points.get(pid) or {}
+            if not point:
+                continue
+            corner_xyz.append(
+                [float(point.get("x", 0)), float(point.get("y", 0)), float(point.get("z", 0))]
+            )
+        self._lab_record_camera_view(
+            step="corner_recognize",
+            title="第3步：角点 YOLO 识别结果",
+            image_path=corner_result_image,
+            result_image_path=corner_result_image,
+            status="SUCCESS" if camera_result.get("success") else "FAILED",
+            message=str(camera_result.get("message") or ""),
+            corners_world=corner_xyz,
+            extra={"world_points": deepcopy(camera_points)},
+        )
         final_points = merge_lab_corner_points(radar_points, camera_points)
         final_corner_ids = [
             pid
@@ -1424,6 +1484,49 @@ class FlowController:
         self.twin.set_phase(result["message"], self.round_index + 1)
         return result
 
+    def _lab_record_camera_view(
+        self,
+        *,
+        step: str,
+        title: str,
+        image_path: str = "",
+        rgb_path: str = "",
+        depth_path: str = "",
+        result_image_path: str = "",
+        region_id: str = "",
+        status: str = "",
+        message: str = "",
+        corners_world: list | None = None,
+        extra: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """记录实验室每次拍照/识别，供右上角窗口按最新结果刷新。"""
+        display = str(result_image_path or image_path or rgb_path or "")
+        entry = {
+            "time": datetime.now().isoformat(timespec="seconds"),
+            "step": str(step),
+            "title": str(title),
+            "region_id": str(region_id or ""),
+            "status": str(status or ""),
+            "message": str(message or ""),
+            "image_path": display,
+            "rgb_path": str(rgb_path or ""),
+            "depth_path": str(depth_path or ""),
+            "result_image_path": str(result_image_path or ""),
+            "corners_world_xyz_mm": deepcopy(corners_world or []),
+            "extra": deepcopy(dict(extra or {})),
+        }
+        self.lab_camera_gallery.append(entry)
+        gallery = self.round_data.setdefault("lab_camera_gallery", [])
+        if isinstance(gallery, list):
+            gallery.append(deepcopy(entry))
+        self.round_data["lab_latest_camera_view"] = deepcopy(entry)
+        if self.state_listener:
+            try:
+                self.state_listener(self.snapshot(), {"lab_camera_view": deepcopy(entry)})
+            except Exception:
+                pass
+        return entry
+
     def _lab_region_camera_move(self, region: Mapping[str, Any], task: str) -> dict[str, Any]:
         """把相机光轴移到区域几何中心；仅 XYZ 变化，R 使用启动锁定值。"""
         center = list(region.get("center_world_xyz_mm") or [])
@@ -1442,9 +1545,25 @@ class FlowController:
 
             mapping = GANTRY.get("world_to_gantry") or {}
         world_pose = planner.plc_to_world_pose(target["plc_command"], mapping)
+        self.twin.add_message(
+            "LAB_REGION",
+            "INFO",
+            (
+                f"前往 {region.get('region_id')} 几何中心 "
+                f"({float(center[0]):.1f},{float(center[1]):.1f},{float(center[2]):.1f})，"
+                f"R锁定 {held_r:.2f}°"
+            ),
+            {"region_id": region.get("region_id"), "center": center, "held_r_deg": held_r},
+        )
         moved = self.robot.move_tool_world("PICK_ARM", world_pose, task)
         if not moved.get("success"):
             raise RuntimeError(moved.get("message") or f"无法移动到 {region.get('region_id')} 几何中心")
+        self.twin.add_message(
+            "LAB_REGION",
+            "SUCCESS",
+            f"已到达 {region.get('region_id')} 几何中心，准备拍照",
+            {"gantry_xyzr": moved.get("gantry_xyzr"), "locked_r_deg": moved.get("locked_r_deg", held_r)},
+        )
         return {
             "success": True,
             "region_id": region.get("region_id"),
@@ -1463,19 +1582,71 @@ class FlowController:
         task: str,
         capture_tag: str,
     ) -> dict[str, Any]:
+        region_id = str(region.get("region_id") or "B")
         movement = self._lab_region_camera_move(region, task)
         camera_id = self._camera_for_role("observe", "CAM_PICK") or self._camera_for_role("pallet_hole", "CAM_PICK")
         capture = self._capture_rgbd(camera_id, capture_tag)
+        shot_ok = bool(capture.get("success"))
+        self.twin.add_message(
+            "LAB_REGION",
+            "SUCCESS" if shot_ok else "FAILED",
+            (
+                f"{region_id} 已拍照 RGB-D"
+                if shot_ok
+                else f"{region_id} 拍照失败：{capture.get('message')}"
+            ),
+            {
+                "rgb_path": capture.get("rgb_path"),
+                "depth_path": capture.get("depth_path"),
+                "source": capture.get("source"),
+            },
+        )
         started = perf_counter()
         result = self.lab_box_monitor.analyze_capture(
             capture,
             region,
             phase=phase,
-            result_tag=str(region.get("region_id") or "B"),
+            result_tag=region_id,
         )
         result["movement"] = movement
         result["capture"] = deepcopy(capture)
         result["image_path"] = str(result.get("result_image_path") or capture.get("rgb_path") or "")
+        corners = list(result.get("corners_world_xyz_mm") or [])
+        coord_text = "；".join(
+            f"P{i + 1}=({float(p[0]):.1f},{float(p[1]):.1f},{float(p[2]):.1f})"
+            for i, p in enumerate(corners)
+            if isinstance(p, (list, tuple)) and len(p) >= 3
+        ) or "未识别到纸箱四角"
+        self.twin.add_message(
+            "LAB_REGION",
+            "SUCCESS" if result.get("success") else "FAILED",
+            (
+                f"{region_id} 纸箱识别：{result.get('message')}；坐标 {coord_text}"
+            ),
+            {
+                "inside_planned_region": result.get("inside_planned_region"),
+                "corners_world_xyz_mm": corners,
+                "result_image_path": result.get("result_image_path"),
+                "outside_corners": result.get("outside_corners"),
+            },
+        )
+        self._lab_record_camera_view(
+            step=str(phase),
+            title=f"{region_id} {'放货前监测' if phase == 'pre_place' else '放货后检测'}",
+            image_path=str(result.get("image_path") or ""),
+            rgb_path=str(capture.get("rgb_path") or ""),
+            depth_path=str(capture.get("depth_path") or ""),
+            result_image_path=str(result.get("result_image_path") or ""),
+            region_id=region_id,
+            status=str(result.get("status") or ("PASS" if result.get("success") else "FAILED")),
+            message=str(result.get("message") or ""),
+            corners_world=corners,
+            extra={
+                "inside_planned_region": result.get("inside_planned_region"),
+                "outside_corners": result.get("outside_corners"),
+                "box_count": result.get("box_count"),
+            },
+        )
         module_id = "LAB_DYNAMIC_PRE_PLACE" if phase == "pre_place" else "LAB_DYNAMIC_POST_PLACE"
         self._evidence(
             module_id,
@@ -2291,4 +2462,33 @@ class FlowController:
         RESULT_FILE.write_text(json.dumps({"results":self.results},ensure_ascii=False,indent=2,default=str),encoding="utf-8")
 
     def snapshot(self):
-        return {"running":self.running,"finished":self.finished,"round":self.round_index+1 if self.queue else 0,"total":len(self.queue),"completed":len(self.completed),"first_round":self.is_first_round,"step_code":self.current_step[0],"step_name":self.current_step[1],"current_cargo":deepcopy(self.current_cargo),"round_data":deepcopy(self.round_data),"twin":self.twin.snapshot(),"results":deepcopy(self.results),"calibration":self.calibration.diagnostic_summary(),"module_evidence":self.module_evidence.snapshot(),"device_mode":getattr(self,"device_mode","mock"),"run_profile":feature_switches.RUN_PROFILE,"allow_demo":bool(self.allow_demo),"database":{"backend":self.vehicle_db.backend,"location":self.vehicle_db.location,"path":self.vehicle_db.location,"session_id":self.loading_session_id}}
+        return {
+            "running": self.running,
+            "finished": self.finished,
+            "round": self.round_index + 1 if self.queue else 0,
+            "total": len(self.queue),
+            "completed": len(self.completed),
+            "first_round": self.is_first_round,
+            "step_code": self.current_step[0],
+            "step_name": self.current_step[1],
+            "current_cargo": deepcopy(self.current_cargo),
+            "round_data": deepcopy(self.round_data),
+            "lab_camera_gallery": deepcopy(self.lab_camera_gallery[-30:]),
+            "lab_latest_camera_view": deepcopy(
+                self.round_data.get("lab_latest_camera_view")
+                or (self.lab_camera_gallery[-1] if self.lab_camera_gallery else {})
+            ),
+            "twin": self.twin.snapshot(),
+            "results": deepcopy(self.results),
+            "calibration": self.calibration.diagnostic_summary(),
+            "module_evidence": self.module_evidence.snapshot(),
+            "device_mode": getattr(self, "device_mode", "mock"),
+            "run_profile": feature_switches.RUN_PROFILE,
+            "allow_demo": bool(self.allow_demo),
+            "database": {
+                "backend": self.vehicle_db.backend,
+                "location": self.vehicle_db.location,
+                "path": self.vehicle_db.location,
+                "session_id": self.loading_session_id,
+            },
+        }

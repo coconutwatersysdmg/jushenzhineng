@@ -53,7 +53,7 @@ class MainWindow(QMainWindow):
         (1, "设备连接检查"),
         (2, "相机插孔识别 ∥ 雷达四角粗定位"),
         (3, "相机精定位（拍照+YOLO）"),
-        (4, "B列循环：放前监测 / 手动放货 / 放后检测"),
+        (4, "到 B 区中心拍照判区（纸箱四角）"),
     ]
     STEP_STAGE = {
         "DEVICE_CHECK":1,"LAB_SENSE":2,"LAB_CORNER_SHELL":3,
@@ -291,16 +291,20 @@ class MainWindow(QMainWindow):
         # 实验室右侧：相机照片 + 插孔坐标 + 雷达四角
         self.lab_right_panel=QWidget()
         lab_rl=QVBoxLayout(self.lab_right_panel); lab_rl.setContentsMargins(0,0,0,0); lab_rl.setSpacing(8)
-        cam_card,cam_l,_=self._collapsible_card("相机照片 / 插孔坐标",expanded=True)
-        self.lab_camera_preview=QLabel("第 2 步执行后显示托盘/插孔识别图")
+        cam_card,cam_l,_=self._collapsible_card("相机照片 / 识别结果",expanded=True)
+        self.lab_camera_preview=QLabel("执行后显示：插孔 / 角点 / B区纸箱检测图")
         self.lab_camera_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lab_camera_preview.setMinimumHeight(220)
         self.lab_camera_preview.setStyleSheet("background:#06101d;border:1px solid #244b72;color:#6f8ca5")
         cam_l.addWidget(self.lab_camera_preview,3)
+        self.lab_camera_caption=QLabel("等待拍照")
+        self.lab_camera_caption.setWordWrap(True)
+        self.lab_camera_caption.setStyleSheet("color:#9ec8dc")
+        cam_l.addWidget(self.lab_camera_caption,0)
         self.lab_hole_table=QTableWidget(0,4)
-        self.lab_hole_table.setHorizontalHeaderLabels(["插孔","X(mm)","Y(mm)","Z(mm)"])
+        self.lab_hole_table.setHorizontalHeaderLabels(["点位","X(mm)","Y(mm)","Z(mm)"])
         self.lab_hole_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.lab_hole_table.setMaximumHeight(120)
+        self.lab_hole_table.setMaximumHeight(140)
         cam_l.addWidget(self.lab_hole_table,1)
         lab_rl.addWidget(cam_card,3)
 
@@ -931,7 +935,7 @@ class MainWindow(QMainWindow):
                 ("放货前监测", (rd.get("lab_pre_place_monitor") or {}).get("message","首件无需放前监测")),
                 ("放货后检测", (rd.get("lab_place_verify") or {}).get("message","请手动放到当前 B 区后执行检测")),
             ])
-            self._refresh_lab_sense_panels(rd, hole, truck)
+            self._refresh_lab_sense_panels(s, rd, hole, truck)
         else:
             self._fill_kv(self.cargo_table,[
                 ("货物编号",cargo.get("instance_id") or cargo.get("cargo_code","-")),("名称",cargo.get("cargo_name","-")),("状态",cargo.get("status","-")),
@@ -996,30 +1000,39 @@ class MainWindow(QMainWindow):
         msgs=t.get("messages") or []
         alarm=t.get("alarm"); self.logs.setPlainText(("ALARM: "+str(alarm)+"\n\n" if alarm else "")+"\n".join(f"[{m.get('time')}] {m.get('source')} {m.get('status')} {m.get('message')}" for m in msgs))
 
-    def _refresh_lab_sense_panels(self, rd: dict, hole: dict, truck: dict) -> None:
-        """实验室右侧：相机图、插孔坐标、角点 WORLD（含来源）。"""
+    def _refresh_lab_sense_panels(self, s: dict, rd: dict, hole: dict, truck: dict) -> None:
+        """实验室右侧：最新照片+标注图、当前识别点、底板角点。"""
+        latest = s.get("lab_latest_camera_view") or rd.get("lab_latest_camera_view") or {}
         place = rd.get("lab_place_verify") or {}
         pre_monitor = rd.get("lab_pre_place_monitor") or {}
         pick = rd.get("pick_result") or {}
         corner = rd.get("lab_corner_shell") or {}
-        image = str(place.get("image_path") or "")
-        caption_default = "执行后显示相机照片（第2步插孔 / 第3步角点 / 第4步俯拍）"
-        if image:
-            caption_default = "当前 B 区：手动放货后检测"
-        else:
-            image = str(pre_monitor.get("image_path") or "")
-            if image:
-                caption_default = "上一 B 区：下一件放货前监测"
+
+        image = str(latest.get("image_path") or "")
+        caption = str(latest.get("title") or "")
+        status = str(latest.get("status") or "")
+        message = str(latest.get("message") or "")
+        if not image:
+            if place.get("image_path"):
+                image = str(place.get("image_path"))
+                caption = f"{(place.get('planned_region_id') or place.get('target_region', {}).get('region_id') or 'B')} 放货后检测"
+                status = str(place.get("status") or "")
+                message = str(place.get("message") or "")
+            elif pre_monitor.get("image_path"):
+                image = str(pre_monitor.get("image_path"))
+                caption = f"{pre_monitor.get('planned_region_id') or 'B'} 放货前监测"
+                status = str(pre_monitor.get("status") or "")
+                message = str(pre_monitor.get("message") or "")
+            elif corner.get("image_path"):
+                image = str(corner.get("image_path"))
+                caption = "第3步：角点精定位拍照"
+            elif pick.get("image_path"):
+                image = str(pick.get("image_path"))
+                caption = "第2步：托盘插孔识别图"
             else:
-                image = str(corner.get("image_path") or "")
-                if image:
-                    caption_default = "第3步：角点精定位拍照"
-                else:
-                    image = str(pick.get("image_path") or "")
-                    if image:
-                        caption_default = "第2步：托盘插孔识别图"
-                    else:
-                        image = self._first_image(hole) or self._first_image(pick.get("capture")) or ""
+                image = self._first_image(hole) or self._first_image(pick.get("capture")) or ""
+                caption = "等待拍照"
+
         if image and Path(image).is_file():
             pix = QPixmap(image)
             if not pix.isNull():
@@ -1030,26 +1043,65 @@ class MainWindow(QMainWindow):
                     Qt.TransformationMode.SmoothTransformation,
                 )
                 self.lab_camera_preview.setPixmap(scaled)
-                self.lab_camera_preview.setToolTip(f"{caption_default}\n{image}")
+                self.lab_camera_preview.setToolTip(f"{caption}\n{image}")
             else:
                 self.lab_camera_preview.setText(f"无法加载图片：\n{image}")
         else:
             self.lab_camera_preview.setPixmap(QPixmap())
-            self.lab_camera_preview.setText(caption_default)
+            self.lab_camera_preview.setText(caption or "等待拍照")
 
+        gallery_n = len(s.get("lab_camera_gallery") or rd.get("lab_camera_gallery") or [])
+        caption_bits = [caption or "相机视图"]
+        if status:
+            caption_bits.append(f"状态={status}")
+        if message:
+            caption_bits.append(message)
+        if gallery_n:
+            caption_bits.append(f"已拍 {gallery_n} 张")
+        if hasattr(self, "lab_camera_caption"):
+            self.lab_camera_caption.setText("｜".join(caption_bits))
+
+        # 点位表：优先纸箱四角，其次插孔
         self.lab_hole_table.setRowCount(0)
-        for side, label in (("left", "左插孔"), ("right", "右插孔")):
-            world = hole.get(f"{side}_world_xyz_mm")
-            cam = hole.get(f"{side}_xyz_mm")
-            xyz = world if world is not None else cam
-            if xyz is None:
-                continue
-            frame = "WORLD" if world is not None else "相机"
-            r = self.lab_hole_table.rowCount()
-            self.lab_hole_table.insertRow(r)
-            vals = [f"{label}({frame})", f"{float(xyz[0]):.1f}", f"{float(xyz[1]):.1f}", f"{float(xyz[2]):.1f}"]
-            for c, val in enumerate(vals):
-                self.lab_hole_table.setItem(r, c, QTableWidgetItem(str(val)))
+        box_corners = (
+            latest.get("corners_world_xyz_mm")
+            or place.get("corners_world_xyz_mm")
+            or pre_monitor.get("corners_world_xyz_mm")
+            or []
+        )
+        if box_corners:
+            for index, xyz in enumerate(box_corners):
+                if not isinstance(xyz, (list, tuple)) or len(xyz) < 3:
+                    continue
+                r = self.lab_hole_table.rowCount()
+                self.lab_hole_table.insertRow(r)
+                vals = [f"纸箱P{index + 1}", f"{float(xyz[0]):.1f}", f"{float(xyz[1]):.1f}", f"{float(xyz[2]):.1f}"]
+                for c, val in enumerate(vals):
+                    self.lab_hole_table.setItem(r, c, QTableWidgetItem(str(val)))
+            region_flag = place.get("inside_planned_region")
+            if region_flag is None:
+                region_flag = pre_monitor.get("inside_planned_region")
+            if region_flag is None:
+                region_flag = (latest.get("extra") or {}).get("inside_planned_region")
+            if region_flag is not None:
+                r = self.lab_hole_table.rowCount()
+                self.lab_hole_table.insertRow(r)
+                judge = "全部在区内" if region_flag else "有角点越界"
+                for c, val in enumerate(["判区", judge, "", ""]):
+                    self.lab_hole_table.setItem(r, c, QTableWidgetItem(str(val)))
+        else:
+            for side, label in (("left", "左插孔"), ("right", "右插孔")):
+                world = hole.get(f"{side}_world_xyz_mm")
+                cam = hole.get(f"{side}_xyz_mm")
+                xyz = world if world is not None else cam
+                if xyz is None:
+                    continue
+                frame = "WORLD" if world is not None else "相机"
+                r = self.lab_hole_table.rowCount()
+                self.lab_hole_table.insertRow(r)
+                vals = [f"{label}({frame})", f"{float(xyz[0]):.1f}", f"{float(xyz[1]):.1f}", f"{float(xyz[2]):.1f}"]
+                for c, val in enumerate(vals):
+                    self.lab_hole_table.setItem(r, c, QTableWidgetItem(str(val)))
 
         final_corners = corner.get("final_world_corners") or {}
         camera_corners = corner.get("camera_world_corners") or {}
@@ -1057,10 +1109,7 @@ class MainWindow(QMainWindow):
         radar_corners = radar.get("world_points") or {}
         corners = final_corners or camera_corners or radar_corners or truck.get("corners") or {}
         ids = list(corners.keys()) or list(radar.get("corner_ids") or [])
-        if not ids:
-            ids = sorted(corners.keys(), key=lambda x: int(x[1:]) if str(x)[1:].isdigit() else 999)
-        else:
-            ids = sorted(ids, key=lambda x: int(str(x)[1:]) if str(x)[1:].isdigit() else 999)
+        ids = sorted(ids, key=lambda x: int(str(x)[1:]) if str(x)[1:].isdigit() else 999)
         self.lab_radar_table.setRowCount(0)
         for pid in ids:
             q = corners.get(pid) or {}
