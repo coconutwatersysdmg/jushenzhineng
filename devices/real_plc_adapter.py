@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 from core.digital_twin_state import DigitalTwinState
@@ -149,6 +149,7 @@ class RealPlcAdapter(PLCAdapter):
         timeout_s: float = 60.0,
         soft_limits: Mapping[str, Any] | None = None,
         axes: tuple[str, ...] = ("X", "Y", "Z", "R"),
+        progress_callback: Callable[[], None] | None = None,
     ) -> dict:
         """按 finished_app 时序写指定轴目标并等待到位。"""
         if not self.connected or self._motion is None:
@@ -177,6 +178,7 @@ class RealPlcAdapter(PLCAdapter):
                 timeout_s=timeout_s,
                 soft_limits=soft_limits,
                 axes=selected_axes,
+                progress_callback=progress_callback,
             )
             result = {
                 **result,

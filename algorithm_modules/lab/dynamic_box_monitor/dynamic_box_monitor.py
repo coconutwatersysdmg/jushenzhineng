@@ -171,17 +171,14 @@ def draw_result(image: np.ndarray, result: Mapping[str, Any], planned=None):
     if planned is not None:
         polygon = np.asarray(planned, np.int32).reshape(-1, 1, 2)
         cv.polylines(output, [polygon], True, (255, 255, 0), 3, cv.LINE_AA)
-    boxes = result.get("all_boxes", [])
     selected = result.get("selected_box")
-    for index, box in enumerate(boxes):
-        points = np.asarray(box["corners_uv"], np.int32).reshape(-1, 1, 2)
-        is_selected = selected is not None and index == 0
-        color = (0, 255, 0) if is_selected else (0, 165, 255)
-        cv.polylines(output, [points], True, color, 4 if is_selected else 2, cv.LINE_AA)
-        if is_selected:
-            for corner_index, (px, py) in enumerate(np.asarray(box["corners_uv"], np.int32), 1):
-                cv.circle(output, (int(px), int(py)), 6, (0, 255, 0), -1, cv.LINE_AA)
-                cv.putText(output, f"P{corner_index}", (int(px) + 7, int(py) - 7), cv.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2, cv.LINE_AA)
+    # 右侧只关注本次判区选中的纸箱；已完成区域的旧箱不再叠加标注。
+    if selected is not None:
+        points = np.asarray(selected["corners_uv"], np.int32).reshape(-1, 1, 2)
+        cv.polylines(output, [points], True, (0, 255, 0), 4, cv.LINE_AA)
+        for corner_index, (px, py) in enumerate(np.asarray(selected["corners_uv"], np.int32), 1):
+            cv.circle(output, (int(px), int(py)), 6, (0, 255, 0), -1, cv.LINE_AA)
+            cv.putText(output, f"P{corner_index}", (int(px) + 7, int(py) - 7), cv.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2, cv.LINE_AA)
     cv.rectangle(output, (12, 12), (600, 105), (20, 20, 20), -1)
     cv.putText(output, f"Detected boxes: {result.get('box_count', 0)}", (28, 42), cv.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2, cv.LINE_AA)
     status = "N/A" if selected is None else selected.get("plan_check_status", "N/A")

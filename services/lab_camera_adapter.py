@@ -160,11 +160,11 @@ class LabCameraCornerService:
         """按采集组（TAIL/HEAD）调用实验室 detect_pair，输出 P1-P4 WORLD。"""
         localizer = self._ensure()
         ids = [str(x) for x in corner_ids]
-        if len(ids) != 4:
+        if len(ids) not in {2, 4}:
             return {
                 "success": False,
                 "algorithm": "lab_camera",
-                "message": f"实验室相机算法仅支持 4 点平板，当前角点：{ids}",
+                "message": f"实验室相机算法仅支持 P1/P2 或 P3/P4 成对识别，当前角点：{ids}",
             }
 
         groups: Dict[str, list[str]] = {}
@@ -245,7 +245,7 @@ class LabCameraCornerService:
             "result_image_path": next(iter(annotated_paths.values()), ""),
             "model_path": str(self.model_path),
             "extrinsic_path": str(self.extrinsic_path),
-            "message": "实验室 YOLO+深度+外参 已直接输出 P1-P4 WORLD",
+            "message": "实验室 YOLO+深度+外参 已直接输出 " + "/".join(ids) + " WORLD",
             "reviewed": False,
             "review_skipped": True,
         }

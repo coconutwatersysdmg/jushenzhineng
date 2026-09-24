@@ -94,7 +94,7 @@ class FlowController:
         ("FEEDBACK", "11. 偏差回PLC / 修正下一托盘 / 更新空间"),
         ("RETURN", "12. 机械臂返回 / 下一轮"),
     ]
-    # 实验室：首轮建图；后续按 B1→B2→…→B6 做返回/插孔/放前监测/放后检测。
+    # 实验室：首轮建图；后续按 B1→B2→…→B5 做返回/插孔/放前监测/放后检测。
     LAB_FIRST_STEPS = list(LAB_POLICY_FIRST_STEPS)
     LAB_REPEAT_STEPS = list(LAB_POLICY_REPEAT_STEPS)
 
@@ -170,6 +170,8 @@ class FlowController:
         # PLC 到位后只留极短稳定时间；采集不再与机械臂运动并发。
         self.lab_camera_settle_seconds = 0.50
         self.state_listener = None
+        # 主界面在 PLC 到位轮询期间处理后台识别完成的画面更新。
+        self.ui_event_pump = None
         self.truck_initialized = False
         self.corner_review_callback = None
         review_cfg = self.system_config.get("corner_review") or {}
@@ -197,6 +199,10 @@ class FlowController:
     def set_state_listener(self, listener):
         """Receive intermediate motion snapshots so the UI can animate real step actions."""
         self.state_listener = listener if callable(listener) else None
+
+    def set_ui_event_pump(self, callback):
+        """Allow the GUI to paint queued camera results during a blocking PLC wait."""
+        self.ui_event_pump = callback if callable(callback) else None
 
     def set_plc_command_listener(self, listener):
         self.plc_command_listener = listener if callable(listener) else None
@@ -1245,12 +1251,21 @@ class FlowController:
         except Exception:
             GANTRY = {}
         try:
+            def pump_ui_during_motion():
+                if callable(getattr(self, "ui_event_pump", None)):
+                    try:
+                        self.ui_event_pump()
+                    except Exception:
+                        # UI 刷新不能影响 PLC 到位、安全检查或超时判断。
+                        pass
+
             completion = self.plc.move_absolute_xyzr(
                 xy_targets,
                 speed=float((GANTRY or {}).get("default_speed") or 30.0),
                 timeout_s=float((GANTRY or {}).get("move_timeout_s") or 60.0),
                 soft_limits=dict((GANTRY or {}).get("soft_limits") or {}) or None,
                 axes=("X", "Y"),
+                progress_callback=pump_ui_during_motion,
             )
         except Exception as exc:
             completion = {"success": False, "message": str(exc)}
@@ -1351,100 +1366,173 @@ class FlowController:
         group_captures: dict[str, dict[str, Any]] = {}
         captured_groups: list[str] = []
         capture_log: list[dict[str, Any]] = []
-        for item in targets:
-            pair = tuple(item["pair"])
-            group = "".join(pair)
-            target_world_pose = planner.plc_to_world_pose(item["plc_command"], mapping)
-            moved = self._lab_move_tool_world_and_wait(
-                target_world_pose,
-                f"LAB_CORNER_{group}",
-                plc_command=item["plc_command"],
-                held_r_deg=held_r,
-            )
-            if not moved.get("success"):
-                raise RuntimeError(moved.get("message") or f"组 {group} PLC XY 到位失败")
-            plc_pose = self._plc_pose_for_lab_camera(moved, target_world_pose)
-            self.twin.add_message(
-                "LAB_CORNER_SHELL",
-                "INFO",
-                (
-                    f"组 {group} 已到位（目标点 {pair[0]}/{pair[1]}），"
-                    f"PLC XY={moved.get('plc_xy')}；Z/R 未下发"
-                ),
-                {"group": group, "moved": deepcopy(moved), "plc_pose": deepcopy(plc_pose)},
-            )
-            cap = self._capture_rgbd(camera_id, f"LAB_CORNER_{group}")
-            group_captures[group] = deepcopy(cap)
-            captured_groups.append(group)
-            shot_ok = bool(cap.get("success"))
-            capture_log.append(
-                {
-                    "group": group,
-                    "pair": list(pair),
-                    "capture_success": shot_ok,
-                    "rgb_path": cap.get("rgb_path"),
-                    "depth_path": cap.get("depth_path"),
-                    "message": cap.get("message"),
-                    "plc_xy": deepcopy(moved.get("plc_xy")),
-                    "z_axis_untouched": True,
-                    "r_axis_untouched": True,
+        group_results: dict[str, dict[str, Any]] = {}
+        p34_future = None
+
+        def recognize_group(pair: tuple[str, ...], group: str) -> dict[str, Any]:
+            pair_meta = {point_id: deepcopy(capture_meta[point_id]) for point_id in pair}
+            try:
+                result = self.algorithms.lab_corner_world_recognize(
+                    list(pair), pair_meta, {group: deepcopy(group_captures[group])}
+                )
+            except FileNotFoundError:
+                raise
+            except Exception as exc:
+                result = {
+                    "success": False,
+                    "algorithm": "lab_camera",
+                    "world_points": {},
+                    "message": f"{group} 相机角点识别失败：{exc}",
                 }
-            )
-            self.twin.add_message(
-                "LAB_CORNER_SHELL",
-                "SUCCESS" if shot_ok else "FAILED",
-                (
-                    f"组 {group} 已拍照 RGB-D"
-                    if shot_ok
-                    else f"组 {group} 拍照失败：{cap.get('message')}"
-                ),
-                {
-                    "rgb_path": cap.get("rgb_path"),
-                    "depth_path": cap.get("depth_path"),
-                    "source": cap.get("source"),
-                },
-            )
+            # P3/P4 的 YOLO 一结束就发布标注图；此时 PLC 正在去 P1/P2，
+            # 所以右侧单窗口能先显示 P3/P4，稍后由 P1/P2 结果自然覆盖。
+            if group == "P3P4":
+                show_group_result(group, result)
+            return result
+
+        def show_group_result(group: str, group_result: Mapping[str, Any]) -> None:
+            """单窗口模式：仅在该组仍是当前画面时显示其标注图。"""
+            details = (group_result.get("details") or {}).get(group)
+            if not isinstance(details, Mapping):
+                return
             self._lab_record_camera_view(
-                step="corner_capture",
-                title=f"角点组 {group} 拍照",
-                image_path=str(cap.get("rgb_path") or ""),
-                rgb_path=str(cap.get("rgb_path") or ""),
-                depth_path=str(cap.get("depth_path") or ""),
-                region_id=group,
-                status="SUCCESS" if shot_ok else "FAILED",
-                message=str(cap.get("message") or ""),
+                step="corner_recognize",
+                title=f"角点组 {group} · YOLO 识别结果",
+                image_path=str(details.get("annotated_image_path") or details.get("rgb_path") or ""),
+                result_image_path=str(details.get("annotated_image_path") or ""),
+                rgb_path=str(details.get("rgb_path") or ""),
+                depth_path=str(details.get("depth_path") or ""),
+                region_id=str(group),
+                status="SUCCESS" if group_result.get("success") else "FAILED",
+                message="已标注本组底板角点中心",
+                extra={"image_points": deepcopy(details.get("image_points") or {})},
             )
-            camera_world_pose = deepcopy(cap.get("camera_world_pose") or self.twin.camera_world_pose(camera_id))
-            for point_id in pair:
-                capture_meta[point_id] = {
-                    "camera_id": camera_id,
-                    "capture_group": group,
-                    "camera_world_pose": camera_world_pose,
-                    "rgb_path": cap.get("rgb_path"),
-                    "depth_path": cap.get("depth_path"),
-                    "plc_pose": deepcopy(plc_pose),
-                    "depth_scale_mm": cap.get("depth_scale_mm"),
-                    "radar_coarse_world_xyz_mm": deepcopy(radar_points.get(point_id)),
-                }
 
         started = perf_counter()
-        try:
-            camera_result = self.algorithms.lab_corner_world_recognize(
-                ["P1", "P2", "P3", "P4"],
-                capture_meta,
-                group_captures,
-            )
-            yolo_invoked = True
-        except FileNotFoundError:
-            raise
-        except Exception as exc:
-            yolo_invoked = True
-            camera_result = {
-                "success": False,
-                "algorithm": "lab_camera",
-                "world_points": {},
-                "message": f"实验室相机角点识别失败，逐点使用雷达兜底：{exc}",
-            }
+        # P3/P4 实拍后立即在后台识别；主线程继续让 PLC 走向 P1/P2。
+        # 到 P1/P2 后才取回后台结果，确保相机实拍与机械臂运动均不被抢占。
+        with ThreadPoolExecutor(max_workers=1) as corner_pool:
+            for item in targets:
+                pair = tuple(item["pair"])
+                group = "".join(pair)
+                target_world_pose = planner.plc_to_world_pose(item["plc_command"], mapping)
+                moved = self._lab_move_tool_world_and_wait(
+                    target_world_pose,
+                    f"LAB_CORNER_{group}",
+                    plc_command=item["plc_command"],
+                    held_r_deg=held_r,
+                )
+                if not moved.get("success"):
+                    raise RuntimeError(moved.get("message") or f"组 {group} PLC XY 到位失败")
+                plc_pose = self._plc_pose_for_lab_camera(moved, target_world_pose)
+                self.twin.add_message(
+                    "LAB_CORNER_SHELL",
+                    "INFO",
+                    (
+                        f"组 {group} 已到位（目标点 {pair[0]}/{pair[1]}），"
+                        f"PLC XY={moved.get('plc_xy')}；Z/R 未下发"
+                    ),
+                    {"group": group, "moved": deepcopy(moved), "plc_pose": deepcopy(plc_pose)},
+                )
+                # P3/P4 若已在 P1/P2 走位期间完成识别，先显示其标注图；
+                # 随后的 P1/P2 实拍会自然覆盖该单一预览窗口。标注图已由
+                # P3/P4 后台任务即时发布，这里只收集识别数据，不重复刷新。
+                if group == "P1P2" and p34_future is not None and p34_future.done():
+                    try:
+                        group_results["P3P4"] = p34_future.result()
+                    except FileNotFoundError:
+                        raise
+                    except Exception as exc:
+                        group_results["P3P4"] = {
+                            "success": False, "algorithm": "lab_camera", "world_points": {},
+                            "message": f"P3/P4 相机角点识别失败：{exc}",
+                        }
+                cap = self._capture_rgbd(camera_id, f"LAB_CORNER_{group}")
+                group_captures[group] = deepcopy(cap)
+                captured_groups.append(group)
+                shot_ok = bool(cap.get("success"))
+                capture_log.append(
+                    {
+                        "group": group, "pair": list(pair), "capture_success": shot_ok,
+                        "rgb_path": cap.get("rgb_path"), "depth_path": cap.get("depth_path"),
+                        "message": cap.get("message"), "plc_xy": deepcopy(moved.get("plc_xy")),
+                        "z_axis_untouched": True, "r_axis_untouched": True,
+                    }
+                )
+                self.twin.add_message(
+                    "LAB_CORNER_SHELL", "SUCCESS" if shot_ok else "FAILED",
+                    f"组 {group} 已拍照 RGB-D" if shot_ok else f"组 {group} 拍照失败：{cap.get('message')}",
+                    {"rgb_path": cap.get("rgb_path"), "depth_path": cap.get("depth_path"), "source": cap.get("source")},
+                )
+                self._lab_record_camera_view(
+                    step="corner_capture", title=f"角点组 {group} 拍照",
+                    image_path=str(cap.get("rgb_path") or ""), rgb_path=str(cap.get("rgb_path") or ""),
+                    depth_path=str(cap.get("depth_path") or ""), region_id=group,
+                    status="SUCCESS" if shot_ok else "FAILED", message=str(cap.get("message") or ""),
+                )
+                camera_world_pose = deepcopy(cap.get("camera_world_pose") or self.twin.camera_world_pose(camera_id))
+                for point_id in pair:
+                    capture_meta[point_id] = {
+                        "camera_id": camera_id, "capture_group": group, "camera_world_pose": camera_world_pose,
+                        "rgb_path": cap.get("rgb_path"), "depth_path": cap.get("depth_path"),
+                        "plc_pose": deepcopy(plc_pose), "depth_scale_mm": cap.get("depth_scale_mm"),
+                        "radar_coarse_world_xyz_mm": deepcopy(radar_points.get(point_id)),
+                    }
+                # P1/P2 已实拍后才等待 P3/P4 后台识别完成，避免抢同一个 YOLO 实例。
+                # 若 P3/P4 此时才完成，只保留数据用于划格，绝不抢回 P1/P2 当前画面。
+                if group == "P1P2" and p34_future is not None:
+                    try:
+                        if "P3P4" not in group_results:
+                            group_results["P3P4"] = p34_future.result()
+                    except FileNotFoundError:
+                        raise
+                    except Exception as exc:
+                        group_results["P3P4"] = {
+                            "success": False, "algorithm": "lab_camera", "world_points": {},
+                            "message": f"P3/P4 相机角点识别失败：{exc}",
+                        }
+                if group == "P3P4":
+                    p34_future = corner_pool.submit(recognize_group, pair, group)
+                    self.twin.add_message("LAB_CORNER_SHELL", "INFO", "P3/P4 已开始 YOLO 识别，PLC 同时前往 P1/P2", {"group": group})
+                else:
+                    group_results[group] = recognize_group(pair, group)
+
+            if p34_future is not None and "P3P4" not in group_results:
+                group_results["P3P4"] = p34_future.result()
+
+        yolo_invoked = bool(group_results)
+        camera_points: dict[str, Any] = {}
+        camera_details: dict[str, Any] = {}
+        image_points: dict[str, Any] = {}
+        annotated_paths: dict[str, str] = {}
+        failures: list[str] = []
+        for group in captured_groups:
+            group_result = group_results.get(group) or {}
+            camera_points.update(deepcopy(group_result.get("world_points") or {}))
+            camera_details.update(deepcopy(group_result.get("details") or {}))
+            image_points.update(deepcopy(group_result.get("image_points") or {}))
+            annotated_paths.update(deepcopy(group_result.get("annotated_image_paths") or {}))
+            if not group_result.get("success"):
+                failures.append(str(group_result.get("message") or f"{group} 识别失败"))
+        missing_points = [point_id for point_id in ("P1", "P2", "P3", "P4") if point_id not in camera_points]
+        camera_result = {
+            "success": not failures and not missing_points,
+            "algorithm": "lab_camera",
+            "source": "lab_yolo_d435i_world",
+            "recognition_source": "lab_yolo_d435i_world",
+            "coordinate_frame": "world",
+            "coordinate_unit": "mm",
+            "corner_ids": ["P1", "P2", "P3", "P4"],
+            "world_points": camera_points,
+            "image_points": image_points,
+            "details": camera_details,
+            "annotated_image_paths": annotated_paths,
+            "result_image_path": next(iter(annotated_paths.values()), ""),
+            "message": "；".join(failures) if failures else (
+                f"实验室 YOLO+深度+外参 已直接输出 P1-P4 WORLD"
+                if not missing_points else f"实验室相机未得到全部角点：缺少 {missing_points}"
+            ),
+        }
         self._evidence(
             "CORNER_YOLO",
             {
@@ -1462,43 +1550,9 @@ class FlowController:
         )
 
         camera_points = camera_result.get("world_points") or {}
-        # 角点识别结果写入右上角图库（优先标注图）
-        corner_result_image = str(
-            camera_result.get("result_image_path")
-            or camera_result.get("annotated_image_path")
-            or next(
-                (
-                    str((group_captures.get(g) or {}).get("rgb_path") or "")
-                    for g in captured_groups
-                    if (group_captures.get(g) or {}).get("rgb_path")
-                ),
-                "",
-            )
-        )
-        for group, details in (camera_result.get("details") or {}).items():
-            if not isinstance(details, Mapping):
-                continue
-            self._lab_record_camera_view(
-                step="corner_recognize",
-                title=f"角点组 {group} · YOLO 识别结果",
-                image_path=str(details.get("annotated_image_path") or details.get("rgb_path") or ""),
-                result_image_path=str(details.get("annotated_image_path") or ""),
-                rgb_path=str(details.get("rgb_path") or ""),
-                depth_path=str(details.get("depth_path") or ""),
-                region_id=str(group),
-                status="SUCCESS" if camera_result.get("success") else "FAILED",
-                message="已标注本组底板角点中心",
-                extra={"image_points": deepcopy(details.get("image_points") or {})},
-            )
-        self._lab_record_camera_view(
-            step="corner_recognize",
-            title="第3步：角点 YOLO 识别结果",
-            image_path=corner_result_image,
-            result_image_path=corner_result_image,
-            status="SUCCESS" if camera_result.get("success") else "FAILED",
-            message=str(camera_result.get("message") or ""),
-            extra={"world_points": deepcopy(camera_points)},
-        )
+        # 单一预览窗口最终只显示当前 P1/P2 的标注结果；P3/P4 若已显示过，
+        # 已被 P1/P2 实拍覆盖，不再因汇总结果重复刷新回来。
+        show_group_result("P1P2", group_results.get("P1P2") or camera_result)
         final_points = merge_lab_corner_points(radar_points, camera_points)
         final_corner_ids = [
             pid

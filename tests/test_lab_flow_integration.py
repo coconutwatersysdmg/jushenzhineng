@@ -104,7 +104,7 @@ def test_step_failure_dialog_offers_retry_skip_and_stop_for_every_lab_step():
     assert '"retry_required"' not in continue_method
 
 
-def test_lab_corner_shell_is_real_camera_flow_and_round_reuse_is_present():
+def test_lab_corner_shell_recognizes_p3p4_while_plc_moves_to_p1p2():
     source = Path("controllers/flow_controller.py").read_text(encoding="utf-8")
     shell = source[source.index("def _lab_corner_shell"):source.index("def _lab_region_camera_move")]
     advance = source[source.index("def _advance_lab_round"):source.index("def _parallel_locate")]
@@ -112,6 +112,16 @@ def test_lab_corner_shell_is_real_camera_flow_and_round_reuse_is_present():
     assert 'group = "".join(pair)' in shell
     assert 'f"LAB_CORNER_{group}"' in shell
     assert "lab_corner_world_recognize" in shell
+    assert "p34_future = corner_pool.submit(" in shell
+    assert 'if group == "P3P4":' in shell
+    assert 'if group == "P1P2" and p34_future is not None:' in shell
+    assert "p34_future.done()" in shell
+    assert shell.index("p34_future.done()") < shell.index('cap = self._capture_rgbd(camera_id, f"LAB_CORNER_{group}")')
+    assert "p34_future.result()" in shell
+    recognize_group = shell[shell.index("def recognize_group"):shell.index("def show_group_result")]
+    assert 'show_group_result(group, result)' in recognize_group
+    assert recognize_group.index('show_group_result(group, result)') < recognize_group.index('return result')
+    assert 'title="第3步：角点 YOLO 识别结果"' not in shell
     assert "build_lab_space_plan(" in shell
     assert '"lab_space_plan"' in shell
     assert "shell_only" not in shell
@@ -142,12 +152,12 @@ def test_lab_backend_grid_plan_uses_final_world_corners_without_ui_grid_payload(
 
     assert result["success"] is True
     assert result["geometry"]["decision_source"] == "camera_world_corners"
-    assert len(result["space"]["regions"]) == 12
-    assert result["geometry"]["lab_equal_row_count"] == 6
+    assert len(result["space"]["regions"]) == 10
+    assert result["geometry"]["lab_equal_row_count"] == 5
     assert result["ui_display"] is False
 
 
-def test_lab_grid_uses_world_corners_to_make_two_columns_and_six_equal_rows():
+def test_lab_grid_uses_world_corners_to_make_two_columns_and_five_equal_rows():
     final_points = {
         "P1": {"x": 100.0, "y": 200.0, "z": 1000.0, "source": "camera_yolo"},
         "P2": {"x": 1300.0, "y": 400.0, "z": 1020.0, "source": "camera_yolo"},
@@ -159,19 +169,19 @@ def test_lab_grid_uses_world_corners_to_make_two_columns_and_six_equal_rows():
 
     assert [r["region_id"] for r in result["space"]["regions"]] == [
         "A1", "B1", "A2", "B2", "A3", "B3",
-        "A4", "B4", "A5", "B5", "A6", "B6",
+        "A4", "B4", "A5", "B5",
     ]
-    assert result["loading_order"] == ["B1", "B2", "B3", "B4", "B5", "B6"]
+    assert result["loading_order"] == ["B1", "B2", "B3", "B4", "B5"]
     regions = {region["region_id"]: region for region in result["space"]["regions"]}
     assert regions["A1"]["corners_world_xyz_mm"] == [
         [100.0, 200.0, 1000.0],
         [700.0, 300.0, 1010.0],
-        [200.0, 1200.0, 1050.0],
-        [800.0, 1300.0, 1060.0],
+        [220.0, 1400.0, 1060.0],
+        [820.0, 1500.0, 1070.0],
     ]
-    assert regions["B6"]["corners_world_xyz_mm"][3] == [1900.0, 6400.0, 1320.0]
+    assert regions["B5"]["corners_world_xyz_mm"][3] == [1900.0, 6400.0, 1320.0]
     assert lab_b_region_for_round(result["space"], 0)["region_id"] == "B1"
-    assert lab_b_region_for_round(result["space"], 5)["region_id"] == "B6"
+    assert lab_b_region_for_round(result["space"], 4)["region_id"] == "B5"
 
 
 def test_lab_grid_rejects_lidar_fallback_corner():
@@ -357,4 +367,4 @@ def test_only_passed_post_place_check_occupies_current_b_region():
     snapshot = manager.snapshot()
     assert [r["region_id"] for r in snapshot["occupied"]] == ["B1"]
     assert "A1" in [r["region_id"] for r in snapshot["available"]]
-    assert plan["loading_order"] == ["B1", "B2", "B3", "B4", "B5", "B6"]
+    assert plan["loading_order"] == ["B1", "B2", "B3", "B4", "B5"]

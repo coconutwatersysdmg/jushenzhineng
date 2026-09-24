@@ -78,6 +78,7 @@ class MainWindow(QMainWindow):
         self.motionSnapshot.connect(self._apply_motion_snapshot)
         self.plcCommandReady.connect(self._enqueue_plc_command, Qt.ConnectionType.QueuedConnection)
         self.controller.set_state_listener(self.motionSnapshot.emit)
+        self.controller.set_ui_event_pump(self._pump_lab_camera_preview)
         self.controller.set_plc_command_listener(self.plcCommandReady.emit)
         self.controller.set_corner_review_callback(self._review_corners)
         self.timer=QTimer(self); self.timer.setInterval(900); self.timer.timeout.connect(self._auto_tick)
@@ -438,7 +439,7 @@ class MainWindow(QMainWindow):
             self.lab_right_panel.setVisible(lab)
         if hasattr(self, "debug_btn"):
             self.debug_btn.setVisible(not lab)
-        title = "实验室装载测试 · B列循环（B1 → B2 → … → B6）" if lab else "具身智能装载数字孪生 · 单机械臂携货 / 挂载相机角点识别"
+        title = "实验室装载测试 · B列循环（B1 → B2 → … → B5）" if lab else "具身智能装载数字孪生 · 单机械臂携货 / 挂载相机角点识别"
         self.setWindowTitle(title)
         if lab and hasattr(self, "main_splitter"):
             self.main_splitter.setSizes([280, 780, 420])
@@ -971,6 +972,10 @@ class MainWindow(QMainWindow):
         self.phase.setText(f"场景动作 · {motion.get('robot_id','')} · {motion.get('task','')}")
         if self.isVisible():
             loop=QEventLoop(self); QTimer.singleShot(460,loop.quit); loop.exec()
+
+    def _pump_lab_camera_preview(self):
+        """PLC 轮询时仅放行后台画面刷新，不响应新的鼠标/键盘操作。"""
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
 
     def _refresh_flow_chain(self,s):
         # DONE=已跑完；RUN=本点击正在执行的那一格；WAIT=等待用户点「执行下一步」或尚未轮到

@@ -279,8 +279,10 @@ class LabLivePalletHoleCaptureTests(unittest.TestCase):
             def __init__(self):
                 self.calls = []
 
-            def move_absolute_xyzr(self, targets, speed, timeout_s, soft_limits=None, axes=None):
+            def move_absolute_xyzr(self, targets, speed, timeout_s, soft_limits=None, axes=None, progress_callback=None):
                 self.calls.append({"targets": dict(targets), "speed": speed, "timeout_s": timeout_s, "axes": axes})
+                if progress_callback is not None:
+                    progress_callback()
                 return {"success": True, "message": "XYZ 绝对定位完成", "positions": dict(targets)}
 
         controller = FlowController.__new__(FlowController)
@@ -288,6 +290,8 @@ class LabLivePalletHoleCaptureTests(unittest.TestCase):
         controller.robot = _Robot()
         controller.plc = _Plc()
         controller.lab_camera_settle_seconds = 0.0
+        refreshes = []
+        controller.ui_event_pump = lambda: refreshes.append("refresh")
 
         result = controller._lab_move_tool_world_and_wait(
             {"x_mm": -3000.0, "y_mm": 500.0, "z_mm": 1800.0},
@@ -299,3 +303,4 @@ class LabLivePalletHoleCaptureTests(unittest.TestCase):
         self.assertTrue(result["motion_completion"]["success"])
         self.assertEqual(controller.plc.calls[0]["targets"], {"X": 120.0, "Y": 340.0})
         self.assertEqual(controller.plc.calls[0]["axes"], ("X", "Y"))
+        self.assertEqual(refreshes, ["refresh"])
