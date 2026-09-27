@@ -248,14 +248,14 @@ Item {
     function regionColor(r) {
         var tid=st.truck && st.truck.current_target ? st.truck.current_target.region_id : ""
         var rid=r.region_id || r.blind_code || r.id || ""
-        if (rid === tid) return "#ffc83d"
-        if (r.status === "OCCUPIED") return "#54758d"
-        if (r.status === "RESERVED") return "#a869c5"
-        return "#28a77b"
+        if (rid === tid) return "#f9a825"
+        if (r.status === "OCCUPIED") return "#78909c"
+        if (r.status === "RESERVED") return "#7e57c2"
+        return "#43a047"
     }
     function robotColor(id) {
-        if (id === "PICK_ARM") return "#d9df19"
-        return "#d94c36"
+        if (id === "PICK_ARM") return "#1565c0"
+        return "#607d8b"
     }
 
     property var truckPose: st.truck && st.truck.pose ? st.truck.pose : ({})
@@ -329,14 +329,13 @@ Item {
         DirectionalLight { eulerRotation: Qt.vector3d(-48,-28,0); brightness: 0.72; castsShadow: false }
         DirectionalLight { eulerRotation: Qt.vector3d(-38,152,0); brightness: 0.46; castsShadow: false }
 
-        // Factory floor.
+        // Plant floor — light HMI friendly.
         Model {
             source: "#Cube"
             position: Qt.vector3d(root.sceneCenterX,-0.055,root.sceneCenterZ)
             scale: root.cubeScaleM(30,0.11,24)
-            materials: PrincipledMaterial { baseColor: "#26323a"; roughness: 0.95 }
+            materials: PrincipledMaterial { baseColor: "#c5cad3"; roughness: 0.96 }
         }
-        // Floor longitudinal grid.
         Repeater3D {
             model: 17
             delegate: Model {
@@ -344,7 +343,7 @@ Item {
                 source: "#Cube"
                 position: Qt.vector3d(root.sceneCenterX-7+index*0.9,0.008,root.sceneCenterZ)
                 scale: root.cubeScaleM(0.012,0.012,22)
-                materials: PrincipledMaterial { baseColor: "#52616b"; opacity: 0.25 }
+                materials: PrincipledMaterial { baseColor: "#9aa3b2"; opacity: 0.35 }
             }
         }
         Repeater3D {
@@ -354,12 +353,11 @@ Item {
                 source: "#Cube"
                 position: Qt.vector3d(root.sceneCenterX,0.009,root.sceneCenterZ-10.2+index*2.55)
                 scale: root.cubeScaleM(28,0.012,0.012)
-                materials: PrincipledMaterial { baseColor: "#52616b"; opacity: 0.22 }
+                materials: PrincipledMaterial { baseColor: "#9aa3b2"; opacity: 0.30 }
             }
         }
 
-        // Dual-side gantry from the reference layout. The one loading arm is
-        // suspended from a moving crossbeam and can work from either side.
+        // Dual-side gantry — steel blue-gray (not toy yellow).
         Node {
             id: gantryFrame
             property real leftX: -3.5
@@ -369,8 +367,8 @@ Item {
             property real centerZ: (tailZ+headZ)/2
             property real railLength: headZ-tailZ
             property real topY: 5.3
-            property color frameColor: "#d9df19"
-            property color frameDark: "#aeb515"
+            property color frameColor: "#607d8b"
+            property color frameDark: "#455a64"
 
             // Two fixed longitudinal travel rails.
             Model { source:"#Cube"; position:Qt.vector3d(gantryFrame.leftX,gantryFrame.topY,gantryFrame.centerZ); scale:root.cubeScaleM(0.34,0.34,gantryFrame.railLength); materials:PrincipledMaterial{baseColor:gantryFrame.frameColor;metalness:0.28;roughness:0.43} }
@@ -394,67 +392,60 @@ Item {
             }
         }
 
-        // Detailed flatbed truck. Deck/chassis scale with measured board corners
-        // (WORLD mm → scene m) so visual length/width track real data.
+        // Flatbed: deck scales with measured board; detailed cab stays unstretched.
         Node {
             id: truckNode
             property var tp: root.truckPose
-            position: root.worldPos(tp)
+            property bool hasBoard: !!(root.boardExtent && root.boardExtent.valid)
+            position: hasBoard
+                     ? Qt.vector3d(root.m(root.boardExtent.cx), root.m(root.boardExtent.cz), root.m(root.boardExtent.cy))
+                     : root.worldPos(tp)
             eulerRotation.y: 90 - Number(tp.yaw_deg || 0)
 
-            // The reported truck pose is the deck centre.  The detailed mesh
-            // was authored from the cab/front origin, so centre it on that pose
-            // before applying WORLD yaw.  This keeps it under P1-P4/regions.
+            // Deck + chassis + wheels — scale with measured WORLD length/width.
             Node {
-                id: truckBody
-                position: Qt.vector3d(-6.15 * root.deckScaleX, 0, 0)
+                id: deckChassis
                 scale: Qt.vector3d(root.deckScaleX, 1.0, root.deckScaleZ)
-
-                // chassis and frame
-                Model { source:"#Cube"; position:Qt.vector3d(5.4,0.62,0); scale:root.cubeScaleM(12.6,0.34,2.28); materials:PrincipledMaterial{baseColor:"#34393d";metalness:0.32;roughness:0.58} }
-                Model { source:"#Cube"; position:Qt.vector3d(6.15,1.28,0); scale:root.cubeScaleM(13.3,0.16,2.78); materials:PrincipledMaterial{baseColor:"#6c625b";metalness:0.18;roughness:0.70} }
-            // deck side boards
-            Model { source:"#Cube"; position:Qt.vector3d(6.15,1.72,-1.43); scale:root.cubeScaleM(13.3,0.78,0.10); materials:PrincipledMaterial{baseColor:"#8b5745";metalness:0.10;roughness:0.80} }
-            Model { source:"#Cube"; position:Qt.vector3d(6.15,1.72, 1.43); scale:root.cubeScaleM(13.3,0.78,0.10); materials:PrincipledMaterial{baseColor:"#8b5745";metalness:0.10;roughness:0.80} }
-            // side panel ribs
-            Repeater3D {
-                model: 12
-                delegate: Model {
-                    required property int index
-                    source:"#Cube"
-                    position:Qt.vector3d(0.45+index*1.12,1.72,-1.49)
-                    scale:root.cubeScaleM(0.05,0.70,0.05)
-                    materials:PrincipledMaterial{baseColor:"#b2785d";roughness:0.78}
+                Model { source:"#Cube"; position:Qt.vector3d(0,0.62,0); scale:root.cubeScaleM(12.6,0.34,2.28); materials:PrincipledMaterial{baseColor:"#4b5563";metalness:0.32;roughness:0.58} }
+                Model { source:"#Cube"; position:Qt.vector3d(0,1.28,0); scale:root.cubeScaleM(13.3,0.16,2.78); materials:PrincipledMaterial{baseColor:"#8b939e";metalness:0.18;roughness:0.70;opacity: truckNode.hasBoard ? 0.35 : 0.95} }
+                Model { source:"#Cube"; position:Qt.vector3d(0,1.72,-1.43); scale:root.cubeScaleM(13.3,0.78,0.10); materials:PrincipledMaterial{baseColor:"#8b5745";metalness:0.10;roughness:0.80;opacity: truckNode.hasBoard ? 0.40 : 0.95} }
+                Model { source:"#Cube"; position:Qt.vector3d(0,1.72, 1.43); scale:root.cubeScaleM(13.3,0.78,0.10); materials:PrincipledMaterial{baseColor:"#8b5745";metalness:0.10;roughness:0.80;opacity: truckNode.hasBoard ? 0.40 : 0.95} }
+                Repeater3D {
+                    model: 12
+                    delegate: Model {
+                        required property int index
+                        source:"#Cube"
+                        position:Qt.vector3d(-6.15+0.45+index*1.12,1.72,-1.49)
+                        scale:root.cubeScaleM(0.05,0.70,0.05)
+                        materials:PrincipledMaterial{baseColor:"#b2785d";roughness:0.78;opacity: truckNode.hasBoard ? 0.40 : 0.95}
+                    }
+                }
+                Repeater3D {
+                    model: [ -5.2, -1.5, 2.2, 5.6 ]
+                    delegate: Node {
+                        required property real modelData
+                        Model { source:"#Cylinder"; position:Qt.vector3d(modelData,0.52,-1.26); eulerRotation.x:90; scale:root.cylScaleM(0.94,0.34); materials:PrincipledMaterial{baseColor:"#121619";roughness:0.97} }
+                        Model { source:"#Cylinder"; position:Qt.vector3d(modelData,0.52, 1.26); eulerRotation.x:90; scale:root.cylScaleM(0.94,0.34); materials:PrincipledMaterial{baseColor:"#121619";roughness:0.97} }
+                        Model { source:"#Cylinder"; position:Qt.vector3d(modelData,0.52,-1.44); eulerRotation.x:90; scale:root.cylScaleM(0.38,0.05); materials:PrincipledMaterial{baseColor:"#b3bac0";metalness:0.82;roughness:0.22} }
+                        Model { source:"#Cylinder"; position:Qt.vector3d(modelData,0.52, 1.44); eulerRotation.x:90; scale:root.cylScaleM(0.38,0.05); materials:PrincipledMaterial{baseColor:"#b3bac0";metalness:0.82;roughness:0.22} }
+                    }
                 }
             }
-
-            // cab main body
-            Model { source:"#Cube"; position:Qt.vector3d(-1.55,1.55,0); scale:root.cubeScaleM(2.65,2.75,2.58); materials:PrincipledMaterial{baseColor:"#c93443";metalness:0.22;roughness:0.40} }
-            Model { source:"#Cube"; position:Qt.vector3d(-1.43,3.00,0); scale:root.cubeScaleM(2.30,0.22,2.45); materials:PrincipledMaterial{baseColor:"#b52a38";metalness:0.20;roughness:0.42} }
-            // windshield and side windows
-            Model { source:"#Cube"; position:Qt.vector3d(-0.19,2.12,0); scale:root.cubeScaleM(0.035,1.05,2.10); materials:PrincipledMaterial{baseColor:"#7fc4d8";opacity:0.78;roughness:0.16} }
-            Model { source:"#Cube"; position:Qt.vector3d(-1.35,2.15,-1.305); scale:root.cubeScaleM(1.20,0.85,0.03); materials:PrincipledMaterial{baseColor:"#81c4d8";opacity:0.78;roughness:0.16} }
-            Model { source:"#Cube"; position:Qt.vector3d(-1.35,2.15, 1.305); scale:root.cubeScaleM(1.20,0.85,0.03); materials:PrincipledMaterial{baseColor:"#81c4d8";opacity:0.78;roughness:0.16} }
-            // bumper + grille + headlights
-            Model { source:"#Cube"; position:Qt.vector3d(-2.93,0.66,0); scale:root.cubeScaleM(0.18,0.28,2.52); materials:PrincipledMaterial{baseColor:"#c8ccd0";metalness:0.72;roughness:0.28} }
-            Model { source:"#Cube"; position:Qt.vector3d(-2.90,1.22,0); scale:root.cubeScaleM(0.05,0.58,1.20); materials:PrincipledMaterial{baseColor:"#24292e";metalness:0.30;roughness:0.52} }
-            Model { source:"#Sphere"; position:Qt.vector3d(-2.95,1.18,-0.92); scale:root.sphereScaleM(0.20); materials:PrincipledMaterial{baseColor:"#ffe7a8";emissiveFactor:Qt.vector3d(0.55,0.38,0.12)} }
-            Model { source:"#Sphere"; position:Qt.vector3d(-2.95,1.18, 0.92); scale:root.sphereScaleM(0.20); materials:PrincipledMaterial{baseColor:"#ffe7a8";emissiveFactor:Qt.vector3d(0.55,0.38,0.12)} }
-            // mirrors
-            Model { source:"#Cube"; position:Qt.vector3d(-1.10,2.35,-1.55); scale:root.cubeScaleM(0.28,0.42,0.12); materials:PrincipledMaterial{baseColor:"#20252a";metalness:0.25} }
-            Model { source:"#Cube"; position:Qt.vector3d(-1.10,2.35, 1.55); scale:root.cubeScaleM(0.28,0.42,0.12); materials:PrincipledMaterial{baseColor:"#20252a";metalness:0.25} }
-
-            // wheels and metallic hubs
-            Repeater3D {
-                model: [ -1.2, 4.2, 9.7 ]
-                delegate: Node {
-                    required property real modelData
-                    Model { source:"#Cylinder"; position:Qt.vector3d(modelData,0.52,-1.26); eulerRotation.x:90; scale:root.cylScaleM(0.94,0.34); materials:PrincipledMaterial{baseColor:"#121619";roughness:0.97} }
-                    Model { source:"#Cylinder"; position:Qt.vector3d(modelData,0.52, 1.26); eulerRotation.x:90; scale:root.cylScaleM(0.94,0.34); materials:PrincipledMaterial{baseColor:"#121619";roughness:0.97} }
-                    Model { source:"#Cylinder"; position:Qt.vector3d(modelData,0.52,-1.44); eulerRotation.x:90; scale:root.cylScaleM(0.38,0.05); materials:PrincipledMaterial{baseColor:"#b3bac0";metalness:0.82;roughness:0.22} }
-                    Model { source:"#Cylinder"; position:Qt.vector3d(modelData,0.52, 1.44); eulerRotation.x:90; scale:root.cylScaleM(0.38,0.05); materials:PrincipledMaterial{baseColor:"#b3bac0";metalness:0.82;roughness:0.22} }
-                }
-            }
+            // Detailed cab — always visible, never non-uniformly stretched with the deck.
+            Node {
+                id: cabDecor
+                position: Qt.vector3d(-root.authoredDeckLengthM*0.5*root.deckScaleX - 1.55, 0, 0)
+                Model { source:"#Cube"; position:Qt.vector3d(0,1.55,0); scale:root.cubeScaleM(2.65,2.75,2.58); materials:PrincipledMaterial{baseColor:"#c93443";metalness:0.22;roughness:0.40} }
+                Model { source:"#Cube"; position:Qt.vector3d(0.12,3.00,0); scale:root.cubeScaleM(2.30,0.22,2.45); materials:PrincipledMaterial{baseColor:"#b52a38";metalness:0.20;roughness:0.42} }
+                Model { source:"#Cube"; position:Qt.vector3d(1.36,2.12,0); scale:root.cubeScaleM(0.035,1.05,2.10); materials:PrincipledMaterial{baseColor:"#7fc4d8";opacity:0.78;roughness:0.16} }
+                Model { source:"#Cube"; position:Qt.vector3d(0.20,2.15,-1.305); scale:root.cubeScaleM(1.20,0.85,0.03); materials:PrincipledMaterial{baseColor:"#81c4d8";opacity:0.78;roughness:0.16} }
+                Model { source:"#Cube"; position:Qt.vector3d(0.20,2.15, 1.305); scale:root.cubeScaleM(1.20,0.85,0.03); materials:PrincipledMaterial{baseColor:"#81c4d8";opacity:0.78;roughness:0.16} }
+                Model { source:"#Cube"; position:Qt.vector3d(-1.38,0.66,0); scale:root.cubeScaleM(0.18,0.28,2.52); materials:PrincipledMaterial{baseColor:"#c8ccd0";metalness:0.72;roughness:0.28} }
+                Model { source:"#Cube"; position:Qt.vector3d(-1.35,1.22,0); scale:root.cubeScaleM(0.05,0.58,1.20); materials:PrincipledMaterial{baseColor:"#24292e";metalness:0.30;roughness:0.52} }
+                Model { source:"#Sphere"; position:Qt.vector3d(-1.40,1.18,-0.92); scale:root.sphereScaleM(0.20); materials:PrincipledMaterial{baseColor:"#ffe7a8";emissiveFactor:Qt.vector3d(0.55,0.38,0.12)} }
+                Model { source:"#Sphere"; position:Qt.vector3d(-1.40,1.18, 0.92); scale:root.sphereScaleM(0.20); materials:PrincipledMaterial{baseColor:"#ffe7a8";emissiveFactor:Qt.vector3d(0.55,0.38,0.12)} }
+                Model { source:"#Cube"; position:Qt.vector3d(0.45,2.35,-1.55); scale:root.cubeScaleM(0.28,0.42,0.12); materials:PrincipledMaterial{baseColor:"#20252a";metalness:0.25} }
+                Model { source:"#Cube"; position:Qt.vector3d(0.45,2.35, 1.55); scale:root.cubeScaleM(0.28,0.42,0.12); materials:PrincipledMaterial{baseColor:"#20252a";metalness:0.25} }
             }
         }
 
@@ -468,9 +459,9 @@ Item {
                 property var rp: root.poseOf(modelData)
                 position: Qt.vector3d(0,5.08,root.m(rp.y_mm))
                 Behavior on z { NumberAnimation{duration:420;easing.type:Easing.InOutCubic} }
-                Model { source:"#Cube"; scale:root.cubeScaleM(7.45,0.48,0.58); materials:PrincipledMaterial{baseColor:"#d9df19";metalness:0.30;roughness:0.40} }
-                Model { source:"#Cube"; position:Qt.vector3d(-3.5,0.10,0); scale:root.cubeScaleM(0.72,0.30,0.82); materials:PrincipledMaterial{baseColor:"#aeb515";metalness:0.38;roughness:0.36} }
-                Model { source:"#Cube"; position:Qt.vector3d( 3.5,0.10,0); scale:root.cubeScaleM(0.72,0.30,0.82); materials:PrincipledMaterial{baseColor:"#aeb515";metalness:0.38;roughness:0.36} }
+                Model { source:"#Cube"; scale:root.cubeScaleM(7.45,0.48,0.58); materials:PrincipledMaterial{baseColor:"#78909c";metalness:0.30;roughness:0.42} }
+                Model { source:"#Cube"; position:Qt.vector3d(-3.5,0.10,0); scale:root.cubeScaleM(0.72,0.30,0.82); materials:PrincipledMaterial{baseColor:"#546e7a";metalness:0.35;roughness:0.40} }
+                Model { source:"#Cube"; position:Qt.vector3d( 3.5,0.10,0); scale:root.cubeScaleM(0.72,0.30,0.82); materials:PrincipledMaterial{baseColor:"#546e7a";metalness:0.35;roughness:0.40} }
             }
         }
 
@@ -545,8 +536,8 @@ Item {
             property real h: Math.max(0.6,root.m(rp.z_mm))
             position: root.worldPos(rp)
             Model { source:"#Cylinder"; position:Qt.vector3d(0,-radarNode.h/2,0); scale:root.cylScaleM(0.12,radarNode.h); materials:PrincipledMaterial{baseColor:"#8f999f";metalness:0.45;roughness:0.40} }
-            Model { source:"#Cube"; scale:root.cubeScaleM(0.50,0.28,0.38); materials:PrincipledMaterial{baseColor:"#7e5cb8";metalness:0.25;roughness:0.34} }
-            Model { source:"#Cube"; position:Qt.vector3d(0.20,0,0); scale:root.cubeScaleM(0.05,0.20,0.26); materials:PrincipledMaterial{baseColor:"#241d32"} }
+            Model { source:"#Cube"; scale:root.cubeScaleM(0.50,0.28,0.38); materials:PrincipledMaterial{baseColor:"#5c6bc0";metalness:0.22;roughness:0.40} }
+            Model { source:"#Cube"; position:Qt.vector3d(0.20,0,0); scale:root.cubeScaleM(0.05,0.20,0.26); materials:PrincipledMaterial{baseColor:"#37474f"} }
         }
 
         // Complete task inventory. Delegates persist by queue index, so a
@@ -599,11 +590,11 @@ Item {
                 visible: !highLowVisual.isHighLow && !!(highLowVisual.flatSurface && highLowVisual.flatSurface.valid)
                 source:"#Cube"
                 position:Qt.vector3d(root.m(highLowVisual.flatSurface.cx),root.m(highLowVisual.flatSurface.cz)+0.03,root.m(highLowVisual.flatSurface.cy))
-                scale:root.cubeScaleMm(highLowVisual.flatSurface.width,60,highLowVisual.flatSurface.length)
-                materials:PrincipledMaterial{baseColor:"#6c625b";opacity:0.78;roughness:0.62}
+                scale:root.cubeScaleMm(highLowVisual.flatSurface.width,70,highLowVisual.flatSurface.length)
+                materials:PrincipledMaterial{baseColor:"#90a4ae";opacity:0.88;roughness:0.70;metalness:0.12}
             }
-            Model { visible: highLowVisual.isHighLow && !!(highLowVisual.highSurface && highLowVisual.highSurface.valid); source:"#Cube"; position:Qt.vector3d(root.m(highLowVisual.highSurface.cx),root.m(highLowVisual.highSurface.cz)+0.03,root.m(highLowVisual.highSurface.cy)); scale:root.cubeScaleMm(highLowVisual.highSurface.width,60,highLowVisual.highSurface.length); materials:PrincipledMaterial{baseColor:"#a66b3f";opacity:0.74;roughness:0.58} }
-            Model { visible: highLowVisual.isHighLow && !!(highLowVisual.lowSurface && highLowVisual.lowSurface.valid); source:"#Cube"; position:Qt.vector3d(root.m(highLowVisual.lowSurface.cx),root.m(highLowVisual.lowSurface.cz)+0.03,root.m(highLowVisual.lowSurface.cy)); scale:root.cubeScaleMm(highLowVisual.lowSurface.width,60,highLowVisual.lowSurface.length); materials:PrincipledMaterial{baseColor:"#567d8e";opacity:0.74;roughness:0.58} }
+            Model { visible: highLowVisual.isHighLow && !!(highLowVisual.highSurface && highLowVisual.highSurface.valid); source:"#Cube"; position:Qt.vector3d(root.m(highLowVisual.highSurface.cx),root.m(highLowVisual.highSurface.cz)+0.03,root.m(highLowVisual.highSurface.cy)); scale:root.cubeScaleMm(highLowVisual.highSurface.width,70,highLowVisual.highSurface.length); materials:PrincipledMaterial{baseColor:"#a1887f";opacity:0.85;roughness:0.68} }
+            Model { visible: highLowVisual.isHighLow && !!(highLowVisual.lowSurface && highLowVisual.lowSurface.valid); source:"#Cube"; position:Qt.vector3d(root.m(highLowVisual.lowSurface.cx),root.m(highLowVisual.lowSurface.cz)+0.03,root.m(highLowVisual.lowSurface.cy)); scale:root.cubeScaleMm(highLowVisual.lowSurface.width,70,highLowVisual.lowSurface.length); materials:PrincipledMaterial{baseColor:"#78909c";opacity:0.85;roughness:0.68} }
         }
 
         // Loading regions sized from each region's WORLD corners / row_length_mm.
@@ -614,10 +605,9 @@ Item {
                 property var c: modelData.center_world_xyz_mm || modelData.center_world || [0,0,0]
                 property var extent: root.regionExtentMm(modelData)
                 property real halfW: root.m(extent.width) * 0.5
-                Model { source:"#Cube"; position:Qt.vector3d(root.m(c[0]),root.m(c[2])+0.025,root.m(c[1])); scale:root.cubeScaleMm(extent.width,40,extent.length); materials:PrincipledMaterial{baseColor:root.regionColor(modelData);opacity:modelData.status==="OCCUPIED"?0.62:0.38;roughness:0.55} }
-                // white boundary around each cell, approximated with thin strips
-                Model { source:"#Cube"; position:Qt.vector3d(root.m(c[0])-halfW,root.m(c[2])+0.05,root.m(c[1])); scale:root.cubeScaleMm(18,18,extent.length); materials:PrincipledMaterial{baseColor:"#d6e3e8";opacity:0.65} }
-                Model { source:"#Cube"; position:Qt.vector3d(root.m(c[0])+halfW,root.m(c[2])+0.05,root.m(c[1])); scale:root.cubeScaleMm(18,18,extent.length); materials:PrincipledMaterial{baseColor:"#d6e3e8";opacity:0.65} }
+                Model { source:"#Cube"; position:Qt.vector3d(root.m(c[0]),root.m(c[2])+0.025,root.m(c[1])); scale:root.cubeScaleMm(extent.width,36,extent.length); materials:PrincipledMaterial{baseColor:root.regionColor(modelData);opacity:modelData.status==="OCCUPIED"?0.55:0.32;roughness:0.60} }
+                Model { source:"#Cube"; position:Qt.vector3d(root.m(c[0])-halfW,root.m(c[2])+0.05,root.m(c[1])); scale:root.cubeScaleMm(14,14,extent.length); materials:PrincipledMaterial{baseColor:"#37474f";opacity:0.45} }
+                Model { source:"#Cube"; position:Qt.vector3d(root.m(c[0])+halfW,root.m(c[2])+0.05,root.m(c[1])); scale:root.cubeScaleMm(14,14,extent.length); materials:PrincipledMaterial{baseColor:"#37474f";opacity:0.45} }
             }
         }
 
@@ -627,8 +617,7 @@ Item {
             delegate: Node {
                 required property var modelData
                 position:Qt.vector3d(root.m(modelData.x),root.m(modelData.z)+0.10,root.m(modelData.y))
-                Model { source:"#Sphere"; scale:root.sphereScaleM(0.16); materials:PrincipledMaterial{baseColor:"#ff5664";emissiveFactor:Qt.vector3d(0.30,0.02,0.02)} }
-                Model { source:"#Cylinder"; position:Qt.vector3d(0,0.17,0); scale:root.cylScaleM(0.035,0.34); materials:PrincipledMaterial{baseColor:"#ff8a92"} }
+                Model { source:"#Sphere"; scale:root.sphereScaleM(0.12); materials:PrincipledMaterial{baseColor:"#c62828";emissiveFactor:Qt.vector3d(0.12,0.01,0.01)} }
             }
         }
 
@@ -640,9 +629,8 @@ Item {
             position: root.worldPos(pp)
             property real targetLengthMm: Math.max(600,Number(st.cargo && st.cargo.length_mm || 1200))
             property real targetWidthMm: Math.max(500,Number(st.cargo && st.cargo.width_mm || 1000))
-            Model { source:"#Cube"; position:Qt.vector3d(0,0.035,0); scale:root.cubeScaleMm(targetMarker.targetLengthMm,70,targetMarker.targetWidthMm); materials:PrincipledMaterial{baseColor:"#ffd33d";opacity:0.32;emissiveFactor:Qt.vector3d(0.22,0.14,0.01);roughness:0.48} }
-            Model { source:"#Cylinder"; position:Qt.vector3d(0,0.18,0); scale:root.cylScaleM(0.52,0.36); materials:PrincipledMaterial{baseColor:"#ffd33d";emissiveFactor:Qt.vector3d(0.42,0.28,0.01)} }
-            Model { source:"#Cylinder"; position:Qt.vector3d(0,0.78,0); scale:root.cylScaleM(0.075,1.20); materials:PrincipledMaterial{baseColor:"#fff0a2";emissiveFactor:Qt.vector3d(0.30,0.22,0.04)} }
+            Model { source:"#Cube"; position:Qt.vector3d(0,0.035,0); scale:root.cubeScaleMm(targetMarker.targetLengthMm,60,targetMarker.targetWidthMm); materials:PrincipledMaterial{baseColor:"#f9a825";opacity:0.38;roughness:0.55} }
+            Model { source:"#Cylinder"; position:Qt.vector3d(0,0.16,0); scale:root.cylScaleM(0.36,0.28); materials:PrincipledMaterial{baseColor:"#f9a825";emissiveFactor:Qt.vector3d(0.18,0.12,0.01)} }
         }
     }
 

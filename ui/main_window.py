@@ -84,7 +84,7 @@ class MainWindow(QMainWindow):
         self.controller.set_plc_command_listener(self.plcCommandReady.emit)
         self.controller.set_corner_review_callback(self._review_corners)
         self.timer=QTimer(self); self.timer.setInterval(900); self.timer.timeout.connect(self._auto_tick)
-        self.setWindowTitle("具身智能装载数字孪生 · 单机械臂携货 / 挂载相机角点识别")
+        self.setWindowTitle("装载数字孪生监控台")
         screen=self.screen().availableGeometry()
         self.resize(min(1920,max(1080,int(screen.width()*0.94))),min(1120,max(700,int(screen.height()*0.92))))
         self.setMinimumSize(1024,680)
@@ -131,22 +131,39 @@ class MainWindow(QMainWindow):
         # Global chrome: ui.theme → hmi_monitor.qss (dense industrial monitor)
         lay=QVBoxLayout(root); lay.setContentsMargins(8,6,8,6); lay.setSpacing(6)
 
-        # 顶栏：标题 + 设备 LED + 模式 + 阶段/进度（HMI 状态条一体）
+        # 顶栏：品牌块 + 设备状态簇 + 模式/阶段/进度
         top_bar=QFrame(); top_bar.setObjectName("topBar")
-        top=QHBoxLayout(top_bar); top.setContentsMargins(8,4,8,4); top.setSpacing(8)
-        title=QLabel("装载数字孪生监控台"); title.setObjectName("title"); top.addWidget(title,0)
-        sep=QLabel("|"); sep.setObjectName("mutedArrow"); top.addWidget(sep,0)
+        top=QHBoxLayout(top_bar); top.setContentsMargins(0,0,10,0); top.setSpacing(10)
+
+        brand=QFrame(); brand.setObjectName("topBrand")
+        brand_l=QHBoxLayout(brand); brand_l.setContentsMargins(12,8,14,8); brand_l.setSpacing(10)
+        accent=QFrame(); accent.setObjectName("brandAccent"); accent.setFixedWidth(4)
+        brand_l.addWidget(accent,0)
+        brand_text=QVBoxLayout(); brand_text.setSpacing(1); brand_text.setContentsMargins(0,0,0,0)
+        title=QLabel("装载数字孪生监控台"); title.setObjectName("title")
+        sub=QLabel("LOADING DIGITAL TWIN"); sub.setObjectName("titleSub")
+        brand_text.addWidget(title); brand_text.addWidget(sub)
+        brand_l.addLayout(brand_text,0)
+        top.addWidget(brand,0)
+
+        device_cluster=QFrame(); device_cluster.setObjectName("deviceCluster")
+        dc=QHBoxLayout(device_cluster); dc.setContentsMargins(8,6,8,6); dc.setSpacing(6)
+        dc_label=QLabel("外设"); dc_label.setObjectName("clusterLabel"); dc.addWidget(dc_label,0)
         self.device_status_badges={}
         for device_id,dev_title in (("PLC","PLC"),("RADAR","雷达"),("CAM_PICK","相机")):
             badge=QLabel(f"○ {dev_title}")
             badge.setObjectName("deviceLed")
             badge.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
             self.device_status_badges[device_id]=badge
-            top.addWidget(badge,0)
+            dc.addWidget(badge,0)
+        top.addWidget(device_cluster,0)
         top.addStretch(1)
-        mode_label=QLabel("模式"); mode_label.setObjectName("mutedLabel")
-        top.addWidget(mode_label)
-        self.profile_combo=QComboBox(); self.profile_combo.setMinimumWidth(120)
+
+        ops=QFrame(); ops.setObjectName("opsCluster")
+        ops_l=QHBoxLayout(ops); ops_l.setContentsMargins(8,6,8,6); ops_l.setSpacing(8)
+        mode_label=QLabel("模式"); mode_label.setObjectName("clusterLabel")
+        ops_l.addWidget(mode_label,0)
+        self.profile_combo=QComboBox(); self.profile_combo.setMinimumWidth(110); self.profile_combo.setObjectName("modeCombo")
         for item in list_run_profiles():
             self.profile_combo.addItem(f"{item['title']}", item["id"])
             idx=self.profile_combo.count()-1
@@ -156,9 +173,11 @@ class MainWindow(QMainWindow):
         if found>=0: self.profile_combo.setCurrentIndex(found)
         self.profile_combo.currentIndexChanged.connect(self._on_run_profile_changed)
         self._sync_profile_combo_tooltip()
-        top.addWidget(self.profile_combo)
-        self.phase=QLabel("IDLE"); self.phase.setObjectName("phaseLabel"); top.addWidget(self.phase)
-        self.progress=QLabel("0/0"); self.progress.setObjectName("progressLabel"); top.addWidget(self.progress)
+        ops_l.addWidget(self.profile_combo,0)
+        phase_cap=QLabel("阶段"); phase_cap.setObjectName("clusterLabel"); ops_l.addWidget(phase_cap,0)
+        self.phase=QLabel("IDLE"); self.phase.setObjectName("phaseLabel"); ops_l.addWidget(self.phase,1)
+        self.progress=QLabel("0 / 0"); self.progress.setObjectName("progressLabel"); ops_l.addWidget(self.progress,0)
+        top.addWidget(ops,1)
         lay.addWidget(top_bar,0)
 
         f,l,self.flow_toggle=self._collapsible_card("流程链路",expanded=False)
@@ -193,12 +212,31 @@ class MainWindow(QMainWindow):
         left=QWidget(); ll=QVBoxLayout(left); ll.setContentsMargins(0,0,0,0); ll.setSpacing(6); main.addWidget(left)
         center=QWidget(); cl=QVBoxLayout(center); cl.setContentsMargins(0,0,0,0); cl.setSpacing(6); main.addWidget(center)
         right=QWidget(); rl=QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(6); main.addWidget(right)
-        main.setStretchFactor(0,2); main.setStretchFactor(1,7); main.setStretchFactor(2,2)
-        main.setSizes([220,1120,340])
+        main.setStretchFactor(0,3); main.setStretchFactor(1,6); main.setStretchFactor(2,2)
+        main.setSizes([340,980,260])
+        left.setMinimumWidth(280)
+        right.setMaximumWidth(420)
+        right.setMinimumWidth(220)
 
         f,l,_=self._collapsible_card("货物 / 托盘 实时数据",expanded=True)
         self.cargo_card=f
         self.cargo_table=QTableWidget(0,2); self.cargo_table.setHorizontalHeaderLabels(["字段","值"]); self.cargo_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); self._tune_table(self.cargo_table); l.addWidget(self.cargo_table); ll.addWidget(f,1)
+
+        def _left_kv_card(title, attr, stretch=1, expanded=True):
+            card,body,_=self._collapsible_card(title,expanded=expanded)
+            table=QTableWidget(0,2)
+            table.setHorizontalHeaderLabels(["字段","值"])
+            table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+            self._tune_table(table)
+            body.addWidget(table)
+            setattr(self, attr, table)
+            ll.addWidget(card, stretch)
+            return card
+
+        self.arm_pose_card=_left_kv_card("抓取臂 / 相机 WORLD", "arm_pose_table", 1)
+        self.place_target_card=_left_kv_card("放置目标 WORLD", "place_target_table", 1)
+        self.comp_card=_left_kv_card("邻托 / 板面 / 反馈补偿", "comp_table", 1)
+        self.hole_offset_card=_left_kv_card("插孔检测与货托偏移", "hole_offset_table", 1)
 
         f,l,_=self._collapsible_card("车辆 / 车板 WORLD",expanded=True)
         self.truck_card=f
@@ -317,6 +355,30 @@ class MainWindow(QMainWindow):
         device_layout.addWidget(f,2)
         self.right_tabs.addTab(device_page,"设备与消息")
         self.right_tabs.addTab(space_page,"空间与补偿")
+
+        sensor_page=QWidget(); sensor_layout=QVBoxLayout(sensor_page); sensor_layout.setContentsMargins(5,5,5,5); sensor_layout.setSpacing(7)
+        cam_param_card,cam_param_l,_=self._collapsible_card("臂上相机 CAM_PICK",expanded=True)
+        self.camera_param_table=QTableWidget(0,2)
+        self.camera_param_table.setHorizontalHeaderLabels(["参数","值"])
+        self.camera_param_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._tune_table(self.camera_param_table)
+        cam_param_l.addWidget(self.camera_param_table)
+        sensor_layout.addWidget(cam_param_card,2)
+        radar_param_card,radar_param_l,_=self._collapsible_card("雷达 RADAR",expanded=True)
+        self.radar_param_table=QTableWidget(0,2)
+        self.radar_param_table.setHorizontalHeaderLabels(["参数","值"])
+        self.radar_param_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._tune_table(self.radar_param_table)
+        radar_param_l.addWidget(self.radar_param_table)
+        sensor_layout.addWidget(radar_param_card,2)
+        corner_param_card,corner_param_l,_=self._collapsible_card("本轮角点 / 雷达结果",expanded=True)
+        self.sensor_corner_table=QTableWidget(0,5)
+        self.sensor_corner_table.setHorizontalHeaderLabels(["角点","X","Y","Z","来源"])
+        self.sensor_corner_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._tune_table(self.sensor_corner_table)
+        corner_param_l.addWidget(self.sensor_corner_table)
+        sensor_layout.addWidget(corner_param_card,3)
+        self.right_tabs.addTab(sensor_page,"相机 / 雷达")
 
         module_page=QWidget(); module_layout=QVBoxLayout(module_page); module_layout.setContentsMargins(5,5,5,5); module_layout.setSpacing(7)
         self.module_summary=QLabel("等待流程调用模型/模块；未执行步骤不提前显示")
@@ -531,6 +593,97 @@ class MainWindow(QMainWindow):
         for k,v in data:
             r=table.rowCount(); table.insertRow(r); table.setItem(r,0,QTableWidgetItem(str(k))); table.setItem(r,1,QTableWidgetItem(str(v)))
 
+    @staticmethod
+    def _fmt_xyz(pose, keys=("x_mm","y_mm","z_mm"), digits=0):
+        if not isinstance(pose, dict) or not pose:
+            return "-"
+        vals=[]
+        for key in keys:
+            raw=pose.get(key)
+            if raw is None and key.endswith("_mm"):
+                raw=pose.get(key[:-3])
+            if raw is None:
+                vals.append("-")
+            else:
+                try:
+                    vals.append(f"{float(raw):.{digits}f}")
+                except (TypeError, ValueError):
+                    vals.append(str(raw))
+        return ", ".join(vals)
+
+    @staticmethod
+    def _fmt_comp(comp):
+        if not isinstance(comp, dict) or not comp:
+            return "-"
+        try:
+            return f"Δx{float(comp.get('dx',0)):.0f} Δy{float(comp.get('dy',0)):.0f} Δz{float(comp.get('dz',0)):.0f}"
+        except (TypeError, ValueError):
+            return str(comp)
+
+    def _refresh_live_metrics(self, s: dict, t: dict, rd: dict):
+        """按卡片刷新臂位姿、放置目标、补偿与插孔偏移。"""
+        truck=t.get("truck") or {}
+        target=truck.get("current_target") or {}
+        tp=target.get("final_world_pose") or {}
+        np_=target.get("nominal_world_pose") or {}
+        arm=((t.get("devices") or {}).get("PICK_ARM") or {})
+        arm_pose=arm.get("pose") or {}
+        cam=((t.get("cameras") or {}).get("CAM_PICK") or {})
+        cam_pose=cam.get("world_pose") or {}
+        fb=t.get("feedback_compensation_mm") or {}
+        neigh=((rd.get("neighbor_pose") or {}).get("compensation_world_mm") or {})
+        board_comp=target.get("board_compensation_world_mm") or {}
+        hole=((rd.get("pick_result") or {}).get("hole_result") or {})
+
+        delta="-"
+        if tp and np_:
+            try:
+                delta=(
+                    f"Δx{float(tp.get('x_mm',0))-float(np_.get('x_mm',0)):.0f} "
+                    f"Δy{float(tp.get('y_mm',0))-float(np_.get('y_mm',0)):.0f} "
+                    f"Δz{float(tp.get('z_mm',0))-float(np_.get('z_mm',0)):.0f}"
+                )
+            except (TypeError, ValueError):
+                delta="-"
+
+        left_hole=hole.get("left_world_xyz_mm") or hole.get("left_xyz_mm")
+        right_hole=hole.get("right_world_xyz_mm") or hole.get("right_xyz_mm")
+        def _hole(v):
+            if not isinstance(v,(list,tuple)) or len(v)<3:
+                return "-"
+            try:
+                return f"{float(v[0]):.0f},{float(v[1]):.0f},{float(v[2]):.0f}"
+            except (TypeError, ValueError):
+                return "-"
+
+        if hasattr(self, "arm_pose_table"):
+            self._fill_kv(self.arm_pose_table, [
+                ("臂 WORLD XYZ", self._fmt_xyz(arm_pose)),
+                ("臂 RPY°", self._fmt_xyz(arm_pose, ("roll_deg","pitch_deg","yaw_deg"), 1)),
+                ("臂任务", arm.get("task") or "-"),
+                ("相机 WORLD XYZ", self._fmt_xyz(cam_pose)),
+            ])
+        if hasattr(self, "place_target_table"):
+            self._fill_kv(self.place_target_table, [
+                ("目标盲码", target.get("blind_code") or target.get("region_id") or "-"),
+                ("目标 WORLD XYZ", self._fmt_xyz(tp)),
+                ("名义 WORLD XYZ", self._fmt_xyz(np_)),
+                ("名义→最终", delta),
+            ])
+        if hasattr(self, "comp_table"):
+            self._fill_kv(self.comp_table, [
+                ("8.2 邻托补偿", self._fmt_comp(neigh)),
+                ("板面补偿", self._fmt_comp(board_comp)),
+                ("历史反馈补偿", self._fmt_comp(fb)),
+            ])
+        if hasattr(self, "hole_offset_table"):
+            self._fill_kv(self.hole_offset_table, [
+                ("插孔左 WORLD", _hole(left_hole)),
+                ("插孔右 WORLD", _hole(right_hole)),
+                ("取货前偏移%", (rd.get("pre_pick_offset") or {}).get("overhang_percent","-")),
+                ("货托偏移 mm", (rd.get("post_cargo_offset") or {}).get("offset_distance_mm","-")),
+            ])
+
     def _load_plan(self):
         if DEFAULT_PLAN.is_file():
             try:
@@ -627,12 +780,10 @@ class MainWindow(QMainWindow):
             self.lab_right_panel.setVisible(lab)
         if hasattr(self, "debug_btn"):
             self.debug_btn.setVisible(not lab)
-        title = "实验室装载测试 · B列循环（B1 → B2 → … → B5）" if lab else "具身智能装载数字孪生 · 单机械臂携货 / 挂载相机角点识别"
-        self.setWindowTitle(title)
-        if lab and hasattr(self, "main_splitter"):
-            self.main_splitter.setSizes([220, 1120, 340])
-        elif hasattr(self, "main_splitter"):
-            self.main_splitter.setSizes([240, 1100, 360])
+        self.setWindowTitle("装载数字孪生监控台")
+        if hasattr(self, "main_splitter"):
+            # 左栏中间量多，加宽；右栏收窄，相机/雷达参数走专用页
+            self.main_splitter.setSizes([340, 980, 260] if not lab else [320, 1000, 280])
 
     @staticmethod
     def _first_image(value):
@@ -1224,6 +1375,7 @@ class MainWindow(QMainWindow):
         self.phase.setText(f"第 {s['round']} 轮 · {mode_text} · {s['step_name']}"); self.progress.setText(f"{s['completed']} / {s['total']}")
         rd=s.get("round_data") or {}; cargo=t.get("cargo") or {}; p=cargo.get("pose") or {}; truck=t.get("truck") or {}; target=truck.get("current_target") or {}; tp=target.get("final_world_pose") or {}; fb=t.get("feedback_compensation_mm") or {}
         hole=((rd.get("pick_result") or {}).get("hole_result") or {})
+        self._refresh_live_metrics(s, t, rd)
         if lab:
             self._fill_kv(self.cargo_table,[
                 ("货物编号",cargo.get("instance_id") or cargo.get("cargo_code","-")),
@@ -1271,6 +1423,7 @@ class MainWindow(QMainWindow):
             for did,kind,parent,status,pp,task in rows:
                 r=self.device_table.rowCount(); self.device_table.insertRow(r); vals=[did,kind,parent,status,f"{pp.get('x_mm','-'):.0f}, {pp.get('y_mm','-'):.0f}, {pp.get('z_mm','-'):.0f}" if pp else "-",f"{pp.get('roll_deg','-')}, {pp.get('pitch_deg','-')}, {pp.get('yaw_deg','-')}",task]
                 for c,val in enumerate(vals): self.device_table.setItem(r,c,QTableWidgetItem(str(val)))
+            self._refresh_sensor_panels(t, rd, truck)
 
             self.space_table.setRowCount(0)
             for reg in truck.get("regions") or []:
@@ -1438,6 +1591,82 @@ class MainWindow(QMainWindow):
                 text = f"{float(val):.1f}" if isinstance(val, (int, float)) else str(val)
                 self.lab_radar_table.setItem(r, c, QTableWidgetItem(text))
 
+    def _refresh_sensor_panels(self, t: dict, rd: dict, truck: dict):
+        """右侧「相机 / 雷达」页：设备参数 + 本轮角点结果。"""
+        cam=((t.get("cameras") or {}).get("CAM_PICK") or {})
+        cam_pose=cam.get("world_pose") or {}
+        mount=cam.get("mount_pose") or {}
+        intr=cam.get("intrinsics") or {}
+        radar=((t.get("devices") or {}).get("RADAR") or {})
+        radar_pose=radar.get("pose") or {}
+        parallel=((t.get("parallel") or {}).get("radar") or {})
+        check=((rd.get("device_check") or {}).get("devices") or {})
+        cam_check=check.get("CAM_PICK") or {}
+        radar_check=check.get("RADAR") or {}
+        radar_result=rd.get("radar_result") or {}
+        corner_shell=rd.get("lab_corner_shell") or rd.get("corner_result") or {}
+        if hasattr(self, "camera_param_table"):
+            self._fill_kv(self.camera_param_table, [
+                ("状态", cam.get("status") or "-"),
+                ("任务", cam.get("task") or "-"),
+                ("探测", "已连接" if cam_check.get("success") else (cam_check.get("message") or "未检测")),
+                ("父设备", cam.get("parent_robot_id") or "-"),
+                ("标定名", cam.get("calibration_name") or "-"),
+                ("RGBD", "是" if cam.get("rgbd") else "否"),
+                ("WORLD XYZ", self._fmt_xyz(cam_pose)),
+                ("WORLD RPY°", self._fmt_xyz(cam_pose, ("roll_deg","pitch_deg","yaw_deg"), 1)),
+                ("安装 XYZ", self._fmt_xyz(mount)),
+                ("fx / fy", f"{intr.get('fx','-')} / {intr.get('fy','-')}"),
+                ("cx / cy", f"{intr.get('cx','-')} / {intr.get('cy','-')}"),
+                ("内参状态", intr.get("status") or "-"),
+                ("角色", cam.get("role") or "-"),
+            ])
+        if hasattr(self, "radar_param_table"):
+            self._fill_kv(self.radar_param_table, [
+                ("状态", radar.get("status") or "-"),
+                ("任务", radar.get("task") or "-"),
+                ("探测", "已连接" if radar_check.get("success") else (radar_check.get("message") or "未检测")),
+                ("并行状态", parallel.get("status") or "-"),
+                ("并行消息", parallel.get("message") or "-"),
+                ("WORLD XYZ", self._fmt_xyz(radar_pose)),
+                ("WORLD RPY°", self._fmt_xyz(radar_pose, ("roll_deg","pitch_deg","yaw_deg"), 1)),
+                ("本轮消息", radar_result.get("message") or "-"),
+                ("角点 ID", ", ".join(str(x) for x in (radar_result.get("corner_ids") or [])) or "-"),
+                ("角点数", str(len(radar_result.get("world_points") or {}))),
+            ])
+        if not hasattr(self, "sensor_corner_table"):
+            return
+        camera_corners=(corner_shell.get("camera_world_corners")
+                        or corner_shell.get("final_world_corners")
+                        or truck.get("corners") or {})
+        radar_corners=radar_result.get("world_points") or {}
+        final_corners=corner_shell.get("final_world_corners") or camera_corners or radar_corners or {}
+        ids=list(final_corners.keys()) or list(radar_result.get("corner_ids") or [])
+        def _xyz(pt):
+            if isinstance(pt,(list,tuple)) and len(pt)>=3:
+                return pt[0],pt[1],pt[2]
+            if isinstance(pt,dict):
+                return (pt.get("x", pt.get("x_mm")),
+                        pt.get("y", pt.get("y_mm")),
+                        pt.get("z", pt.get("z_mm")))
+            return "-","-","-"
+        self.sensor_corner_table.setRowCount(0)
+        for pid in sorted(ids, key=lambda x: int(str(x)[1:]) if str(x)[1:].isdigit() else 999):
+            pt=final_corners.get(pid) or radar_corners.get(pid) or {}
+            x,y,z=_xyz(pt)
+            if pid in (corner_shell.get("camera_world_corners") or {}) or (
+                pid in camera_corners and not radar_corners.get(pid)
+            ):
+                source="camera"
+            elif pid in radar_corners:
+                source="lidar"
+            else:
+                source=str(corner_shell.get("source") or truck.get("board_mode") or "-")
+            r=self.sensor_corner_table.rowCount(); self.sensor_corner_table.insertRow(r)
+            for c,val in enumerate([pid,x,y,z,source]):
+                text=f"{float(val):.1f}" if isinstance(val,(int,float)) else str(val if val is not None else "-")
+                self.sensor_corner_table.setItem(r,c,QTableWidgetItem(text))
+
     def _refresh_ext_devices(self,s):
         """顶栏紧凑状态：以 DEVICE_CHECK 探测结果为准。"""
         twin=(s or {}).get("twin") or {}
@@ -1481,5 +1710,6 @@ class MainWindow(QMainWindow):
                 badge.setToolTip(note)
                 badge.setStyleSheet(
                     f"QLabel#deviceLed{{color:{color};background:{bg};border:1px solid {border};"
-                    f"font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px}}"
+                    f"border-left:3px solid {border};font-size:11px;font-weight:700;"
+                    f"padding:3px 8px;border-radius:2px}}"
                 )
