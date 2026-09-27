@@ -9,7 +9,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PLC_APP_DIR = PROJECT_ROOT / "third_party" / "plc_finished_app"
@@ -148,12 +148,16 @@ class GantryModbusMotion:
         self,
         targets: Mapping[str, float],
         soft_limits: Mapping[str, Any] | None = None,
+        axes: tuple[str, ...] | None = None,
     ) -> None:
         limits = dict(DEFAULT_SOFT_LIMITS)
         for axis, pair in dict(soft_limits or {}).items():
             if isinstance(pair, (list, tuple)) and len(pair) >= 2:
                 limits[str(axis).upper()] = (float(pair[0]), float(pair[1]))
-        for axis in ("X", "Y", "Z", "R"):
+        for axis in (axes or tuple(str(key).upper() for key in targets)):
+            axis = str(axis).upper()
+            if axis not in limits:
+                raise RuntimeError(f"未知运动轴 {axis}")
             if axis not in targets:
                 raise RuntimeError(f"缺少轴目标 {axis}")
             value = float(targets[axis])
@@ -169,13 +173,14 @@ class GantryModbusMotion:
         soft_limits: Mapping[str, Any] | None = None,
         axes: tuple[str, ...] = ("X", "Y", "Z", "R"),
         position_tol: float = 1.0,
+        progress_callback: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """写目标并等待各轴到位（与 console run_targets 时序一致）。"""
         if not self.connected and not self.open():
             raise RuntimeError(f"无法连接 PLC {self.host}:{self.port}")
 
         wanted = {axis: float(targets[axis]) for axis in axes}
-        self.validate_targets(wanted, soft_limits)
+        self.validate_targets(wanted, soft_limits, axes=axes)
         self.ensure_upper_mode()
 
         speed_i = max(1, int(round(float(speed))))
@@ -191,6 +196,8 @@ class GantryModbusMotion:
 
         deadline = time.time() + max(1.0, float(timeout_s))
         while time.time() < deadline:
+            if progress_callback is not None:
+                progress_callback()
             _, estop = self.read_mode_estop()
             if estop != 0:
                 raise RuntimeError("运动过程中急停触发")
@@ -216,7 +223,7 @@ class GantryModbusMotion:
                     "targets": wanted,
                     "positions": positions,
                     "speed": speed_i,
-                    "message": "四轴绝对定位完成",
+                    "message": f"{'/'.join(axes)} 绝对定位完成",
                 }
             time.sleep(0.1)
 

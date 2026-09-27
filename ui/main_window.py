@@ -19,7 +19,7 @@ from controllers.flow_controller import FlowController
 from ui.twin_bridge import TwinBridge
 from ui.debug_dialog import DebugInputDialog
 from ui.corner_review_dialog import run_corner_review
-from ui.plc_motion_dialog import PlcMotionDialog
+from ui.plc_motion_dialog import PlcMotionDialog, open_plc_manual_console
 from config.feature_switches import (
     apply_run_profile,
     get_run_profile,
@@ -54,11 +54,11 @@ class MainWindow(QMainWindow):
         (1, "设备连接检查"),
         (2, "相机插孔识别 ∥ 雷达四角粗定位"),
         (3, "相机精定位（拍照+YOLO）"),
-        (4, "到 B 区中心拍照判区（纸箱四角）"),
+        (4, "B 区循环：监测 → 人工确认 → 拍照判区"),
     ]
     STEP_STAGE = {
         "DEVICE_CHECK":1,"LAB_SENSE":2,"LAB_CORNER_SHELL":3,
-        "LAB_RETURN_ORIGIN":4,"LAB_PRE_PLACE_MONITOR":4,"LAB_PLACE_VERIFY":4,
+        "LAB_RETURN_ORIGIN":4,"LAB_PRE_PLACE_MONITOR":4,"LAB_WAIT_MANUAL_PLACE":4,"LAB_PLACE_VERIFY":4,
         "PRE_PICK_OFFSET":2,"PARALLEL_LOCATE":3,"PICK_ONLY":3,"RADAR_TO_CAMERA":4,
         "CAPTURE_CORNERS":5,"CORNER_RECOGNITION":6,"CAMERA_TO_WORLD":7,
         "INITIAL_SPACE_PLAN":8,"NEIGHBOR_POSE":8,"TARGET_CONFIRM":8,"PRE_PLACE_MONITOR":9,"PLACE":9,
@@ -69,6 +69,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.controller=FlowController(); self.bridge=TwinBridge(); self.debug_inputs=self.controller.default_debug_inputs()
         self._step_busy=False
+        self._lab_auto_waiting_for_manual_place=False
         self._running_stage=0  # 正在执行的流程格编号；与 step_code（可能已前进到下一步）区分
         self._profile_changing=False
         self._latest_plc_cmd=None
@@ -78,6 +79,7 @@ class MainWindow(QMainWindow):
         self.motionSnapshot.connect(self._apply_motion_snapshot)
         self.plcCommandReady.connect(self._enqueue_plc_command, Qt.ConnectionType.QueuedConnection)
         self.controller.set_state_listener(self.motionSnapshot.emit)
+        self.controller.set_ui_event_pump(self._pump_lab_camera_preview)
         self.controller.set_plc_command_listener(self.plcCommandReady.emit)
         self.controller.set_corner_review_callback(self._review_corners)
         self.timer=QTimer(self); self.timer.setInterval(900); self.timer.timeout.connect(self._auto_tick)
@@ -294,13 +296,16 @@ class MainWindow(QMainWindow):
         self.next_btn=QPushButton("执行下一步"); self.next_btn.setObjectName("primary"); self.next_btn.clicked.connect(self._next)
         self.auto_btn=QPushButton("自动运行"); self.auto_btn.clicked.connect(self._auto)
         self.debug_btn=QPushButton("调试输入"); self.debug_btn.clicked.connect(self._debug); reset=QPushButton("重置"); reset.clicked.connect(self._reset)
-        self.plc_panel_btn=QPushButton("PLC 运动…")
-        self.plc_panel_btn.setToolTip("打开弹出窗口：查看输出坐标、确认下发、启动 PLC 控制台")
+        self.plc_panel_btn=QPushButton("PLC 自动坐标…")
+        self.plc_panel_btn.setToolTip("查看自动流程的 XYZ 坐标并确认下发；R 轴不会自动下发")
         self.plc_panel_btn.clicked.connect(self._show_plc_dialog)
+        self.plc_manual_btn=QPushButton("打开 PLC 手动控制")
+        self.plc_manual_btn.setToolTip("打开独立 PLC 控制界面，可手动移动机械臂；不会暂停或改变自动流程")
+        self.plc_manual_btn.clicked.connect(self._open_plc_manual_control)
         self.auto_push_cb=QCheckBox("自动运行时自动下发到 PLC")
         self.auto_push_cb.setToolTip("勾选且处于自动运行时，算出坐标后经已连接的 PLC 直接写轴。逐步执行请在弹窗里确认下发。")
         self.auto_push_cb.toggled.connect(lambda _=False: self._sync_auto_push_policy())
-        for b in (self.next_btn,self.auto_btn,self.debug_btn,reset,self.plc_panel_btn): controls.addWidget(b)
+        for b in (self.next_btn,self.auto_btn,self.debug_btn,reset,self.plc_panel_btn,self.plc_manual_btn): controls.addWidget(b)
         controls.addWidget(self.auto_push_cb)
         controls.addStretch(1); cl.addLayout(controls)
 
@@ -369,7 +374,7 @@ class MainWindow(QMainWindow):
         # 实验室右侧：相机照片 + 插孔坐标 + 雷达四角（相机预览/状态/点位合一模块）
         self.lab_right_panel=QWidget()
         lab_rl=QVBoxLayout(self.lab_right_panel); lab_rl.setContentsMargins(0,0,0,0); lab_rl.setSpacing(8)
-        cam_card,cam_l,_=self._collapsible_card("相机照片 / 识别结果",expanded=True)
+        cam_card,cam_l,_=self._collapsible_card("相机实拍 / 标注结果 / 托盘插孔 WORLD",expanded=True)
         cam_unit=QFrame(); cam_unit.setObjectName("camUnit")
         cam_unit_l=QVBoxLayout(cam_unit); cam_unit_l.setContentsMargins(0,0,0,0); cam_unit_l.setSpacing(0)
         self.lab_camera_preview=QLabel("执行后显示：插孔 / 角点 / B区纸箱检测图")
@@ -381,6 +386,11 @@ class MainWindow(QMainWindow):
         self.lab_camera_caption.setWordWrap(True)
         self.lab_camera_caption.setStyleSheet("color:#9ec8dc;background:#0a1828;padding:8px 10px;border:none;border-bottom:1px solid #1f537e")
         cam_unit_l.addWidget(self.lab_camera_caption,0)
+        self.lab_camera_history=QComboBox()
+        self.lab_camera_history.setToolTip("选择本轮任一次实拍及对应识别标注图")
+        self.lab_camera_history.setStyleSheet("QComboBox{border:none;border-bottom:1px solid #1f537e;border-radius:0;background:#0a1828}")
+        self.lab_camera_history.currentIndexChanged.connect(self._on_lab_camera_history_changed)
+        cam_unit_l.addWidget(self.lab_camera_history,0)
         self.lab_hole_table=QTableWidget(0,4)
         self.lab_hole_table.setHorizontalHeaderLabels(["点位","X(mm)","Y(mm)","Z(mm)"])
         self.lab_hole_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -632,7 +642,7 @@ class MainWindow(QMainWindow):
             self.lab_right_panel.setVisible(lab)
         if hasattr(self, "debug_btn"):
             self.debug_btn.setVisible(not lab)
-        title = "具身智能装载数字孪生" if lab else "具身智能装载数字孪生 · 单机械臂携货 / 挂载相机角点识别"
+        title = "实验室装载测试 · B列循环（B1 → B2 → … → B5）" if lab else "具身智能装载数字孪生 · 单机械臂携货 / 挂载相机角点识别"
         self.setWindowTitle(title)
         if lab and hasattr(self, "main_splitter"):
             self.main_splitter.setSizes([220, 1120, 340])
@@ -833,34 +843,61 @@ class MainWindow(QMainWindow):
             "跳过本步后后续结果可能不可靠；现场优先停止并重试本步。",
         )
 
-    def _ask_continue_after_failure(self, exc: Exception) -> bool:
-        """阻塞性失败弹窗：继续=跳过本步前进；停止=停在本步可重试。"""
-        code = ""
-        name = ""
-        try:
-            code, name = self.controller.current_step
-        except Exception:
-            pass
+    def _ask_continue_after_failure(
+        self,
+        exc: Exception,
+        *,
+        code: str = "",
+        name: str = "",
+    ) -> str:
+        """统一失败决策：重试当前动作、跳过或停止。"""
+        if not code or not name:
+            try:
+                current_code, current_name = self.controller.current_step
+                code = code or current_code
+                name = name or current_name
+            except Exception:
+                pass
         advice = self._continue_advice_for(code)
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Critical)
-        box.setWindowTitle("步骤失败 — 是否继续？")
+        box.setWindowTitle("步骤失败 — 请选择处理方式")
         box.setText(f"步骤失败：{name or code or '未知步骤'}")
         box.setInformativeText(
             f"{exc}\n\n"
             f"{advice}\n\n"
-            "「继续」= 跳过本步进入下一步（不重跑失败逻辑）。\n"
-            "「停止」= 停在本步，可稍后重试；自动运行会暂停。"
+            "「重新尝试」= 立即重跑当前失败步骤。\n"
+            "「继续跳过」= 跳过本步进入下一步（不重跑失败逻辑）。\n"
+            "「停止」= 停在本步；自动运行会暂停。"
         )
-        cont = box.addButton("继续", QMessageBox.ButtonRole.AcceptRole)
+        retry = box.addButton("重新尝试", QMessageBox.ButtonRole.ActionRole)
+        cont = box.addButton("继续跳过", QMessageBox.ButtonRole.AcceptRole)
         stop = box.addButton("停止", QMessageBox.ButtonRole.RejectRole)
-        box.setDefaultButton(stop)
+        box.setDefaultButton(retry)
         box.exec()
-        return box.clickedButton() is cont
+        if box.clickedButton() is retry:
+            return "retry"
+        if box.clickedButton() is cont:
+            return "continue"
+        return "stop"
+
+    def _retry_current_step(self) -> None:
+        """在当前异常处理栈退出后重跑同一个流程格。"""
+        if self._step_busy:
+            QTimer.singleShot(50, self._retry_current_step)
+            return
+        if self.timer.isActive():
+            self._auto_tick()
+        else:
+            self._next()
 
     def _handle_step_failure(self, exc: Exception, *, from_auto: bool = False) -> None:
         self._refresh()
-        if self._ask_continue_after_failure(exc):
+        action = self._ask_continue_after_failure(exc)
+        if action == "retry":
+            QTimer.singleShot(0, self._retry_current_step)
+            return
+        if action == "continue":
             try:
                 self.controller.continue_after_step_failure(str(exc))
             except Exception as cont_exc:
@@ -883,6 +920,11 @@ class MainWindow(QMainWindow):
             self._show_plc_dialog()
             return
         if self._step_busy: return
+        resume_lab_auto = bool(
+            self._lab_auto_waiting_for_manual_place
+            and self._is_lab_ui()
+            and self.controller.current_step[0] == "LAB_WAIT_MANUAL_PLACE"
+        )
         self._begin_step_run()
         try:
             self.controller.set_debug_inputs(self.debug_inputs)
@@ -899,6 +941,11 @@ class MainWindow(QMainWindow):
             self._handle_step_failure(e, from_auto=False)
         finally:
             self._end_step_run()
+        if resume_lab_auto and not self.controller.finished:
+            self._lab_auto_waiting_for_manual_place=False
+            self.timer.start()
+            self.auto_btn.setText("暂停")
+            self._sync_auto_push_policy()
 
     def _auto(self):
         if self.timer.isActive():
@@ -920,6 +967,13 @@ class MainWindow(QMainWindow):
             self._update_step_controls()
             return
         if self._step_busy: return
+        if self._is_lab_ui() and self.controller.running and self.controller.current_step[0] == "LAB_WAIT_MANUAL_PLACE":
+            self._lab_auto_waiting_for_manual_place=True
+            self.timer.stop()
+            self.auto_btn.setText("自动运行")
+            self._sync_auto_push_policy()
+            self._refresh()
+            return
         self._begin_step_run()
         try:
             if not self.controller.running:
@@ -963,7 +1017,19 @@ class MainWindow(QMainWindow):
         dlg.raise_()
         dlg.activateWindow()
 
+    def _open_plc_manual_control(self):
+        """独立打开 PLC 手动界面，不改变自动流程的暂停/下发状态。"""
+        if open_plc_manual_console(self):
+            self.controller.twin.add_message(
+                "PLC_MANUAL",
+                "INFO",
+                "已打开 PLC 手动控制界面；自动流程仍按当前状态运行",
+                {"automatic_flow_unchanged": True},
+            )
+
     def _plc_blocks_flow(self) -> bool:
+        if self._is_lab_ui():
+            return False
         dlg = self.plc_dialog
         return bool(dlg is not None and dlg.is_blocking())
 
@@ -1003,9 +1069,6 @@ class MainWindow(QMainWindow):
         self._update_step_controls()
 
     def _present_next_plc_command(self):
-        dlg = self._ensure_plc_dialog()
-        if dlg.is_blocking():
-            return
         if not self._plc_cmd_queue:
             return
         step = self._plc_cmd_queue[0].get("step")
@@ -1014,6 +1077,21 @@ class MainWindow(QMainWindow):
             batch.append(self._plc_cmd_queue.pop(0))
         self._latest_plc_batch = batch
         self._latest_plc_cmd = batch[0]
+        if self._is_lab_ui():
+            push = self._push_plc_batch(batch)
+            status = "SUCCESS" if push.get("success") else "FAILED"
+            self.controller.twin.add_message(
+                "PLC_PUSH", status, push.get("message", ""), {"count": len(batch), **(push or {})}
+            )
+            if not push.get("success"):
+                self._handle_plc_push_failure(batch, push)
+            self._update_step_controls()
+            return
+
+        dlg = self._ensure_plc_dialog()
+        if dlg.is_blocking():
+            self._plc_cmd_queue = batch + self._plc_cmd_queue
+            return
         auto = bool(self.auto_push_cb.isChecked() and self.timer.isActive())
         push = None
         if auto:
@@ -1028,6 +1106,27 @@ class MainWindow(QMainWindow):
                 self._sync_auto_push_policy()
         dlg.apply_batch(batch, auto_pushed=auto, push_result=push)
         self._update_step_controls()
+
+    def _handle_plc_push_failure(self, batch: list, push: dict) -> None:
+        """实验室自动下发失败时复用统一的三选项失败弹窗。"""
+        action = self._ask_continue_after_failure(
+            RuntimeError(str(push.get("message") or "PLC 运动下发失败")),
+            code="PLC_PUSH",
+            name="PLC 运动执行",
+        )
+        if action == "retry":
+            self._plc_cmd_queue = [dict(item) for item in batch] + self._plc_cmd_queue
+            QTimer.singleShot(0, self._present_next_plc_command)
+            return
+        if action == "continue":
+            self.controller.twin.add_message(
+                "PLC_PUSH", "WARNING", "用户选择跳过失败的 PLC 运动", {"count": len(batch)}
+            )
+            return
+        if self.timer.isActive():
+            self.timer.stop()
+            self.auto_btn.setText("自动运行")
+            self._sync_auto_push_policy()
 
     def _push_plc_batch(self, batch: list) -> dict:
         total = len(batch or [])
@@ -1077,6 +1176,10 @@ class MainWindow(QMainWindow):
         if self.isVisible():
             loop=QEventLoop(self); QTimer.singleShot(460,loop.quit); loop.exec()
 
+    def _pump_lab_camera_preview(self):
+        """PLC 轮询时仅放行后台画面刷新，不响应新的鼠标/键盘操作。"""
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+
     def _refresh_flow_chain(self,s):
         # DONE=已跑完；RUN=本点击正在执行的那一格；WAIT=等待用户点「执行下一步」或尚未轮到
         # 注意：execute_next 结束后 step_code 已指向「下一格」，不能用它+busy 画 RUN，否则会误亮下一格。
@@ -1113,6 +1216,10 @@ class MainWindow(QMainWindow):
         busy = bool(self._step_busy or self._plc_blocks_flow() or self.controller.finished)
         if hasattr(self, "next_btn"):
             self.next_btn.setEnabled(not busy)
+            if self._is_lab_ui() and self.controller.current_step[0] == "LAB_WAIT_MANUAL_PLACE":
+                self.next_btn.setText("确认已放好，开始拍照检测")
+            else:
+                self.next_btn.setText("执行下一步")
         if hasattr(self, "auto_btn") and not self.timer.isActive():
             # 自动运行进行中仍可点「暂停」；未在自动跑时若步骤忙则禁止启动自动
             self.auto_btn.setEnabled(not self._step_busy and not self.controller.finished)
@@ -1205,39 +1312,11 @@ class MainWindow(QMainWindow):
         if getattr(self, "_center_tab_index", 0) == 2:
             self._refresh_history_gallery(force=False)
 
-    def _refresh_lab_sense_panels(self, s: dict, rd: dict, hole: dict, truck: dict) -> None:
-        """实验室右侧：最新照片+标注图、当前识别点、底板角点。"""
-        latest = s.get("lab_latest_camera_view") or rd.get("lab_latest_camera_view") or {}
-        place = rd.get("lab_place_verify") or {}
-        pre_monitor = rd.get("lab_pre_place_monitor") or {}
-        pick = rd.get("pick_result") or {}
-        corner = rd.get("lab_corner_shell") or {}
-
-        image = str(latest.get("image_path") or "")
-        caption = str(latest.get("title") or "")
-        status = str(latest.get("status") or "")
-        message = str(latest.get("message") or "")
-        if not image:
-            if place.get("image_path"):
-                image = str(place.get("image_path"))
-                caption = f"{(place.get('planned_region_id') or place.get('target_region', {}).get('region_id') or 'B')} 放货后检测"
-                status = str(place.get("status") or "")
-                message = str(place.get("message") or "")
-            elif pre_monitor.get("image_path"):
-                image = str(pre_monitor.get("image_path"))
-                caption = f"{pre_monitor.get('planned_region_id') or 'B'} 放货前监测"
-                status = str(pre_monitor.get("status") or "")
-                message = str(pre_monitor.get("message") or "")
-            elif corner.get("image_path"):
-                image = str(corner.get("image_path"))
-                caption = "第3步：角点精定位拍照"
-            elif pick.get("image_path"):
-                image = str(pick.get("image_path"))
-                caption = "第2步：托盘插孔识别图"
-            else:
-                image = self._first_image(hole) or self._first_image(pick.get("capture")) or ""
-                caption = "等待拍照"
-
+    def _render_lab_camera_entry(self, entry: dict, gallery_n: int) -> None:
+        image = str(entry.get("image_path") or entry.get("result_image_path") or "")
+        caption = str(entry.get("title") or "相机视图")
+        status = str(entry.get("status") or "")
+        message = str(entry.get("message") or "")
         if image and Path(image).is_file():
             pix = QPixmap(image)
             if not pix.isNull():
@@ -1248,65 +1327,95 @@ class MainWindow(QMainWindow):
                     Qt.TransformationMode.SmoothTransformation,
                 )
                 self.lab_camera_preview.setPixmap(scaled)
+                self.lab_camera_preview.setText("")
                 self.lab_camera_preview.setToolTip(f"{caption}\n{image}")
             else:
+                self.lab_camera_preview.setPixmap(QPixmap())
                 self.lab_camera_preview.setText(f"无法加载图片：\n{image}")
         else:
             self.lab_camera_preview.setPixmap(QPixmap())
             self.lab_camera_preview.setText(caption or "等待拍照")
-
-        gallery_n = len(s.get("lab_camera_gallery") or rd.get("lab_camera_gallery") or [])
-        caption_bits = [caption or "相机视图"]
+        bits = [caption]
         if status:
-            caption_bits.append(f"状态={status}")
+            bits.append(f"状态={status}")
         if message:
-            caption_bits.append(message)
+            bits.append(message)
         if gallery_n:
-            caption_bits.append(f"已拍 {gallery_n} 张")
-        if hasattr(self, "lab_camera_caption"):
-            self.lab_camera_caption.setText("｜".join(caption_bits))
+            bits.append(f"本轮已拍 {gallery_n} 次")
+        self.lab_camera_caption.setText("｜".join(bits))
 
-        # 点位表：优先纸箱四角，其次插孔
+    def _on_lab_camera_history_changed(self, index: int) -> None:
+        entries = getattr(self, "_lab_camera_entries", [])
+        if 0 <= int(index) < len(entries):
+            self._render_lab_camera_entry(entries[int(index)], len(entries))
+
+    def _refresh_lab_sense_panels(self, s: dict, rd: dict, hole: dict, truck: dict) -> None:
+        """实验室右侧：最新照片+标注图、当前识别点、底板角点。"""
+        latest = s.get("lab_latest_camera_view") or rd.get("lab_latest_camera_view") or {}
+        place = rd.get("lab_place_verify") or {}
+        pre_monitor = rd.get("lab_pre_place_monitor") or {}
+        pick = rd.get("pick_result") or {}
+        corner = rd.get("lab_corner_shell") or {}
+
+        image = str(latest.get("image_path") or "")
+        fallback = dict(latest)
+        if not image:
+            if place.get("image_path"):
+                fallback = {
+                    "image_path": str(place.get("image_path")),
+                    "title": f"{(place.get('planned_region_id') or place.get('target_region', {}).get('region_id') or 'B')} 放货后检测",
+                    "status": str(place.get("status") or ""),
+                    "message": str(place.get("message") or ""),
+                }
+            elif pre_monitor.get("image_path"):
+                fallback = {
+                    "image_path": str(pre_monitor.get("image_path")),
+                    "title": f"{pre_monitor.get('planned_region_id') or 'B'} 放货前监测",
+                    "status": str(pre_monitor.get("status") or ""),
+                    "message": str(pre_monitor.get("message") or ""),
+                }
+            elif corner.get("image_path"):
+                fallback = {"image_path": str(corner.get("image_path")), "title": "第3步：角点精定位拍照"}
+            elif pick.get("image_path"):
+                fallback = {"image_path": str(pick.get("image_path")), "title": "第2步：托盘插孔识别图"}
+            else:
+                fallback = {
+                    "image_path": self._first_image(hole) or self._first_image(pick.get("capture")) or "",
+                    "title": "等待拍照",
+                }
+
+        gallery = list(s.get("lab_camera_gallery") or rd.get("lab_camera_gallery") or [])
+        entries = [dict(item) for item in gallery if isinstance(item, dict)]
+        signature = tuple((str(item.get("time") or ""), str(item.get("image_path") or ""), str(item.get("title") or "")) for item in entries)
+        if signature != getattr(self, "_lab_camera_gallery_signature", ()):
+            self._lab_camera_gallery_signature = signature
+            self._lab_camera_entries = entries
+            self.lab_camera_history.blockSignals(True)
+            self.lab_camera_history.clear()
+            for index, item in enumerate(entries, start=1):
+                self.lab_camera_history.addItem(f"{index}. {item.get('title') or item.get('step') or '相机拍照'}")
+            self.lab_camera_history.setCurrentIndex(len(entries) - 1)
+            self.lab_camera_history.blockSignals(False)
+        selected = fallback
+        index = self.lab_camera_history.currentIndex() if entries else -1
+        if 0 <= index < len(entries):
+            selected = entries[index]
+        self._render_lab_camera_entry(selected, len(entries))
+
+        # 此表固定只显示传统算法输出的两个托盘插孔 WORLD 坐标；纸箱坐标不在界面输出。
         self.lab_hole_table.setRowCount(0)
-        box_corners = (
-            latest.get("corners_world_xyz_mm")
-            or place.get("corners_world_xyz_mm")
-            or pre_monitor.get("corners_world_xyz_mm")
-            or []
-        )
-        if box_corners:
-            for index, xyz in enumerate(box_corners):
-                if not isinstance(xyz, (list, tuple)) or len(xyz) < 3:
-                    continue
-                r = self.lab_hole_table.rowCount()
-                self.lab_hole_table.insertRow(r)
-                vals = [f"纸箱P{index + 1}", f"{float(xyz[0]):.1f}", f"{float(xyz[1]):.1f}", f"{float(xyz[2]):.1f}"]
-                for c, val in enumerate(vals):
-                    self.lab_hole_table.setItem(r, c, QTableWidgetItem(str(val)))
-            region_flag = place.get("inside_planned_region")
-            if region_flag is None:
-                region_flag = pre_monitor.get("inside_planned_region")
-            if region_flag is None:
-                region_flag = (latest.get("extra") or {}).get("inside_planned_region")
-            if region_flag is not None:
-                r = self.lab_hole_table.rowCount()
-                self.lab_hole_table.insertRow(r)
-                judge = "全部在区内" if region_flag else "有角点越界"
-                for c, val in enumerate(["判区", judge, "", ""]):
-                    self.lab_hole_table.setItem(r, c, QTableWidgetItem(str(val)))
-        else:
-            for side, label in (("left", "左插孔"), ("right", "右插孔")):
-                world = hole.get(f"{side}_world_xyz_mm")
-                cam = hole.get(f"{side}_xyz_mm")
-                xyz = world if world is not None else cam
-                if xyz is None:
-                    continue
-                frame = "WORLD" if world is not None else "相机"
-                r = self.lab_hole_table.rowCount()
-                self.lab_hole_table.insertRow(r)
-                vals = [f"{label}({frame})", f"{float(xyz[0]):.1f}", f"{float(xyz[1]):.1f}", f"{float(xyz[2]):.1f}"]
-                for c, val in enumerate(vals):
-                    self.lab_hole_table.setItem(r, c, QTableWidgetItem(str(val)))
+        for side, label in (("left", "左插孔"), ("right", "右插孔")):
+            world = hole.get(f"{side}_world_xyz_mm")
+            cam = hole.get(f"{side}_xyz_mm")
+            xyz = world if world is not None else cam
+            if xyz is None:
+                continue
+            frame = "WORLD" if world is not None else "相机"
+            r = self.lab_hole_table.rowCount()
+            self.lab_hole_table.insertRow(r)
+            vals = [f"{label}({frame})", f"{float(xyz[0]):.1f}", f"{float(xyz[1]):.1f}", f"{float(xyz[2]):.1f}"]
+            for c, val in enumerate(vals):
+                self.lab_hole_table.setItem(r, c, QTableWidgetItem(str(val)))
 
         final_corners = corner.get("final_world_corners") or {}
         camera_corners = corner.get("camera_world_corners") or {}

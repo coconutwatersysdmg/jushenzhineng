@@ -37,7 +37,14 @@ class _Candidate:
 
 
 def _empty_result() -> dict[str, Any]:
-    return {"left_hole_xyz_mm": None, "right_hole_xyz_mm": None}
+    return {
+        "left_hole_xyz_mm": None,
+        "right_hole_xyz_mm": None,
+        "left_hole_pixel": None,
+        "right_hole_pixel": None,
+        "left_hole_box": None,
+        "right_hole_box": None,
+    }
 
 
 def _detect_two_holes(image_bgr: np.ndarray, dark_threshold: int | None = None):
@@ -225,6 +232,11 @@ def locate_fork_holes(
     return {
         "left_hole_xyz_mm": output[0],
         "right_hole_xyz_mm": output[1],
+        # 仅供结果图叠加显示孔中心和轮廓；不参与 WORLD/PLC 坐标下发。
+        "left_hole_pixel": [round(pair[0].cx, 1), round(pair[0].cy, 1)],
+        "right_hole_pixel": [round(pair[1].cx, 1), round(pair[1].cy, 1)],
+        "left_hole_box": [pair[0].x, pair[0].y, pair[0].w, pair[0].h],
+        "right_hole_box": [pair[1].x, pair[1].y, pair[1].w, pair[1].h],
     }
 
 

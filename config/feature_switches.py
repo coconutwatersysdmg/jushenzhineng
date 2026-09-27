@@ -48,7 +48,7 @@ RUN_PROFILES: Dict[str, Dict[str, Any]] = {
             "ALLOW_UNIMPLEMENTED_VISION_MEASUREMENT_ZERO": True,
             "ALLOW_REAL_MOTION": True,
             "USE_LIVE_LIDAR_CAPTURE": True,
-            "CORNER_REVIEW_ENABLED": True,
+            "CORNER_REVIEW_ENABLED": False,
             "CORNER_REVIEW_AUTO_ACCEPT_DEMO": False,
             "USE_LAB_LIDAR_ALGO": True,
             "USE_LAB_CAMERA_ALGO": True,

@@ -10,7 +10,7 @@ from services.camera_board_geometry_service import CameraBoardGeometryService
 from services.space_manager import SpaceManager
 
 
-LAB_EQUAL_ROW_COUNT = 6
+LAB_EQUAL_ROW_COUNT = 5
 
 
 def _world_xyz(point: Any) -> list[float]:
@@ -48,7 +48,7 @@ def _equal_lab_regions_from_world_corners(
     *,
     row_count: int = LAB_EQUAL_ROW_COUNT,
 ) -> tuple[list[dict[str, Any]], float]:
-    """使用相机最终 WORLD 边界插值生成两列×等长六排。"""
+    """使用相机最终 WORLD 边界插值生成两列×等长五排。"""
     ids = [str(value) for value in corner_ids]
     if len(ids) not in {4, 6}:
         raise RuntimeError(f"实验室等分需要 4/6 个最终 WORLD 角点，当前：{ids}")
@@ -116,7 +116,7 @@ def _relabel_lab_regions_from_p1_p2(geometry: dict[str, Any]) -> dict[str, Any]:
 
 
 def lab_b_regions(space_snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """返回实验室实际装货列，固定 B1 → B2 → … → B6。"""
+    """返回实验室实际装货列，固定 B1 → B2 → … → B5。"""
     regions = [
         deepcopy(region)
         for region in (space_snapshot.get("regions") or [])
@@ -165,7 +165,7 @@ def build_lab_space_plan(
     geometry["lab_grid_source"] = "final_world_corners"
     geometry["row_length_mm"] = equal_row_length_mm
     geometry["remaining_length_mm"] = 0.0
-    geometry["message"] = "实验室相机最终 WORLD 四角已动态等分为两列×六排"
+    geometry["message"] = "实验室相机最终 WORLD 四角已动态等分为两列×五排"
     geometry = _relabel_lab_regions_from_p1_p2(geometry)
     space = manager.initialize_from_camera_geometry(geometry)
     loading_order = [region["region_id"] for region in lab_b_regions(space)]

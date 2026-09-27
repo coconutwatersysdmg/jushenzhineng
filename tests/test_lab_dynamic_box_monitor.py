@@ -9,6 +9,46 @@ from services.lab_dynamic_box_monitor_service import (
 )
 from services.module_evidence_service import ModuleEvidenceService
 from services.sensor_calibration_service import SensorCalibrationService
+from algorithm_modules.lab.dynamic_box_monitor import dynamic_box_monitor
+
+
+def test_dynamic_result_visualizes_only_the_current_selected_box(monkeypatch):
+    calls = []
+
+    class FakeCv:
+        LINE_AA = 1
+        FONT_HERSHEY_SIMPLEX = 1
+
+        @staticmethod
+        def polylines(_image, polygons, *_args):
+            calls.append(polygons)
+
+        @staticmethod
+        def circle(*_args):
+            pass
+
+        @staticmethod
+        def rectangle(*_args):
+            pass
+
+        @staticmethod
+        def putText(*_args):
+            pass
+
+    monkeypatch.setattr(dynamic_box_monitor, "_require_cv2", lambda: FakeCv())
+    image = np.zeros((180, 180, 3), dtype=np.uint8)
+    old_box = {"corners_uv": [[20, 120], [60, 120], [60, 160], [20, 160]]}
+    current_box = {"corners_uv": [[100, 120], [150, 120], [150, 160], [100, 160]]}
+
+    rendered = dynamic_box_monitor.draw_result(
+        image,
+        {"box_count": 2, "all_boxes": [old_box, current_box], "selected_box": current_box},
+    )
+
+    # 已完成区域里的旧箱不应再画黄/橙色轮廓；只保留当前目标箱轮廓。
+    assert rendered is not None
+    assert len(calls) == 1
+    assert calls[0][0].reshape(-1, 2).tolist() == current_box["corners_uv"]
 
 
 def _region():
