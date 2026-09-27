@@ -63,9 +63,8 @@ Item {
         return st.truck && st.truck.current_target ? st.truck.current_target : ({})
     }
     function sceneBounds() {
-        // Fit the complete truck plus task cargo and moving equipment. Always
-        // include the truck extent: tail-staged cargo may otherwise pull the
-        // auto-frame away from the vehicle before camera corners exist.
+        // Tight work-cell frame: truck + gantry rails + cargo/arm only.
+        // Avoid padding a full plant floor that leaves the gantry tiny on screen.
         var minX=0, maxX=0, minZ=0, maxZ=0, count=0
         function addMm(x,y) {
             var sx=Number(x || 0)/1000.0, sz=Number(y || 0)/1000.0
@@ -74,12 +73,14 @@ Item {
             count++
         }
         var tp=st.truck && st.truck.pose ? st.truck.pose : ({})
-        addMm(Number(tp.x_mm||0)-1800,Number(tp.y_mm||0)-8500)
-        addMm(Number(tp.x_mm||0)+1800,Number(tp.y_mm||0)+8500)
-        // The complete dual-side gantry must remain visible even while the
-        // arm is parked on one rail.
-        addMm(-4000,railTailY())
-        addMm( 4000,railHeadY())
+        var board=measuredBoardExtent()
+        var halfLen=board.valid ? Math.max(2500,board.length*0.5) : 6800
+        var halfWid=board.valid ? Math.max(900,board.width*0.5) : 1500
+        addMm(Number(tp.x_mm||0)-halfWid-500,Number(tp.y_mm||0)-halfLen-600)
+        addMm(Number(tp.x_mm||0)+halfWid+500,Number(tp.y_mm||0)+halfLen+600)
+        // Dual rails (±3.5 m) with a small margin — not a 8 m-wide empty apron.
+        addMm(-3600,railTailY())
+        addMm( 3600,railHeadY())
         var corners=cornerArray()
         for (var i=0;i<corners.length;++i) addMm(corners[i].x,corners[i].y)
         if (st.truck && st.truck.regions) {
@@ -91,7 +92,8 @@ Item {
         if (st.cargo_inventory) {
             for (var ci=0;ci<st.cargo_inventory.length;++ci) {
                 var cp=(st.cargo_inventory[ci] || ({})).pose || ({})
-                addMm(cp.x_mm,cp.y_mm)
+                addMm(Number(cp.x_mm||0)-700,Number(cp.y_mm||0)-700)
+                addMm(Number(cp.x_mm||0)+700,Number(cp.y_mm||0)+700)
             }
         }
         var target=placementTarget()
@@ -105,8 +107,9 @@ Item {
                 }
             }
         }
+        var pad=0.6
         return {x:(minX+maxX)/2, z:(minZ+maxZ)/2,
-                spanX:Math.max(4,maxX-minX), spanZ:Math.max(12,maxZ-minZ)}
+                spanX:Math.max(7,maxX-minX)+pad, spanZ:Math.max(9,maxZ-minZ)+pad}
     }
     function targetCode() {
         var t=placementTarget()
@@ -161,14 +164,39 @@ Item {
         return "任务货物 "+items.length+" · 待装 "+staged+" · 已装 "+placed
     }
     function railHeadY() {
-        return 17500
+        // Clip longitudinal rails to the active work tip (truck / corners / arm).
+        var tp=st.truck && st.truck.pose ? st.truck.pose : ({})
+        var board=measuredBoardExtent()
+        var half=board.valid ? Math.max(2500,board.length*0.5) : 6800
+        var maxY=Number(tp.y_mm||9000)+half+500
+        var corners=cornerArray()
+        for (var i=0;i<corners.length;++i) maxY=Math.max(maxY,corners[i].y+400)
+        if (st.devices) {
+            for (var k in st.devices) {
+                if (st.devices[k].kind!=="robot") continue
+                var p=(st.devices[k].pose||({}))
+                maxY=Math.max(maxY,Number(p.y_mm||0)+800)
+            }
+        }
+        return maxY
     }
     function railTailY() {
-        var minY=1000, items=st.cargo_inventory || []
+        var minY=600, items=st.cargo_inventory || []
         for (var i=0;i<items.length;++i) {
             var p=(items[i] || ({})).pose || ({})
-            minY=Math.min(minY,Number(p.y_mm || 0)-1100)
+            minY=Math.min(minY,Number(p.y_mm || 0)-900)
         }
+        if (st.devices) {
+            for (var k in st.devices) {
+                if (st.devices[k].kind!=="robot") continue
+                var rp=(st.devices[k].pose||({}))
+                minY=Math.min(minY,Number(rp.y_mm||0)-700)
+            }
+        }
+        var tp=st.truck && st.truck.pose ? st.truck.pose : ({})
+        var board=measuredBoardExtent()
+        var half=board.valid ? Math.max(2500,board.length*0.5) : 6800
+        minY=Math.min(minY,Number(tp.y_mm||9000)-half-400)
         return minY
     }
     function cornerArray() {
@@ -264,12 +292,15 @@ Item {
     property var visibleBounds: sceneBounds()
     property real sceneCenterX: visibleBounds.x
     property real sceneCenterZ: visibleBounds.z
-    property real sceneCenterY: 1.65
-    property real fitDistance: clamp(Math.max(28,visibleBounds.spanZ*2.05,visibleBounds.spanX*2.65),28,52)
+    property real sceneCenterY: 1.85
+    // Closer auto-frame so gantry/truck fill the view instead of a tiny island.
+    property real fitDistance: clamp(Math.max(visibleBounds.spanZ*1.05,visibleBounds.spanX*1.45,12),11,30)
+    property real floorSpanX: Math.max(9, visibleBounds.spanX + 2.2)
+    property real floorSpanZ: Math.max(11, visibleBounds.spanZ + 2.2)
 
     // Orbit camera state. Mouse drag rotates; wheel zooms.
-    property real orbitYaw: 30
-    property real orbitPitch: -32
+    property real orbitYaw: 28
+    property real orbitPitch: -40
     property real orbitDistance: fitDistance
     property string viewName: "全景"
     property real dragX: 0
@@ -277,7 +308,7 @@ Item {
     property bool orbitDragging: false
     property real dragYawSensitivity: 0.38
     property real dragPitchSensitivity: 0.30
-    property real wheelZoomSensitivity: 0.030
+    property real wheelZoomSensitivity: 0.028
 
     function setView(name,yaw,pitch,distance) {
         viewName=name
@@ -315,9 +346,9 @@ Item {
                     PerspectiveCamera {
                         id: sceneCamera
                         position: Qt.vector3d(0,0,root.orbitDistance)
-                        fieldOfView: 43
+                        fieldOfView: 36
                         clipNear: 0.08
-                        clipFar: 250
+                        clipFar: 180
                     }
                 }
             }
@@ -329,31 +360,33 @@ Item {
         DirectionalLight { eulerRotation: Qt.vector3d(-48,-28,0); brightness: 0.72; castsShadow: false }
         DirectionalLight { eulerRotation: Qt.vector3d(-38,152,0); brightness: 0.46; castsShadow: false }
 
-        // Plant floor — light HMI friendly.
+        // Plant floor — sized to the work cell (not a huge empty apron).
         Model {
             source: "#Cube"
             position: Qt.vector3d(root.sceneCenterX,-0.055,root.sceneCenterZ)
-            scale: root.cubeScaleM(30,0.11,24)
+            scale: root.cubeScaleM(root.floorSpanX,0.11,root.floorSpanZ)
             materials: PrincipledMaterial { baseColor: "#c5cad3"; roughness: 0.96 }
         }
         Repeater3D {
-            model: 17
+            model: Math.max(5, Math.round(root.floorSpanX/0.9)+1)
             delegate: Model {
                 required property int index
+                property real step: root.floorSpanX/Math.max(1,Math.round(root.floorSpanX/0.9))
                 source: "#Cube"
-                position: Qt.vector3d(root.sceneCenterX-7+index*0.9,0.008,root.sceneCenterZ)
-                scale: root.cubeScaleM(0.012,0.012,22)
-                materials: PrincipledMaterial { baseColor: "#9aa3b2"; opacity: 0.35 }
+                position: Qt.vector3d(root.sceneCenterX-root.floorSpanX*0.5+index*step,0.008,root.sceneCenterZ)
+                scale: root.cubeScaleM(0.012,0.012,root.floorSpanZ*0.92)
+                materials: PrincipledMaterial { baseColor: "#9aa3b2"; opacity: 0.32 }
             }
         }
         Repeater3D {
-            model: 9
+            model: Math.max(5, Math.round(root.floorSpanZ/2.4)+1)
             delegate: Model {
                 required property int index
+                property real step: root.floorSpanZ/Math.max(1,Math.round(root.floorSpanZ/2.4))
                 source: "#Cube"
-                position: Qt.vector3d(root.sceneCenterX,0.009,root.sceneCenterZ-10.2+index*2.55)
-                scale: root.cubeScaleM(28,0.012,0.012)
-                materials: PrincipledMaterial { baseColor: "#9aa3b2"; opacity: 0.30 }
+                position: Qt.vector3d(root.sceneCenterX,0.009,root.sceneCenterZ-root.floorSpanZ*0.5+index*step)
+                scale: root.cubeScaleM(root.floorSpanX*0.92,0.012,0.012)
+                materials: PrincipledMaterial { baseColor: "#9aa3b2"; opacity: 0.28 }
             }
         }
 
@@ -662,11 +695,11 @@ Item {
         onWheel: function(wheel) {
             var delta=Number(wheel.angleDelta.y)
             if (Math.abs(delta)<1 && wheel.pixelDelta) delta=Number(wheel.pixelDelta.y)*8
-            root.orbitDistance=root.clamp(root.orbitDistance-delta*root.wheelZoomSensitivity,8,55)
+            root.orbitDistance=root.clamp(root.orbitDistance-delta*root.wheelZoomSensitivity,7,34)
             root.viewName="自由视角"
             wheel.accepted=true
         }
-        onDoubleClicked: root.setView("全景",30,-32,0)
+        onDoubleClicked: root.setView("全景",28,-40,0)
     }
 
     // Overlays removed: default panorama + mouse orbit/zoom/double-click restore.

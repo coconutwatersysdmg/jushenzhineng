@@ -212,9 +212,9 @@ class MainWindow(QMainWindow):
         left=QWidget(); ll=QVBoxLayout(left); ll.setContentsMargins(0,0,0,0); ll.setSpacing(6); main.addWidget(left)
         center=QWidget(); cl=QVBoxLayout(center); cl.setContentsMargins(0,0,0,0); cl.setSpacing(6); main.addWidget(center)
         right=QWidget(); rl=QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(6); main.addWidget(right)
-        main.setStretchFactor(0,3); main.setStretchFactor(1,6); main.setStretchFactor(2,2)
-        main.setSizes([340,980,260])
-        left.setMinimumWidth(280)
+        main.setStretchFactor(0,3); main.setStretchFactor(1,5); main.setStretchFactor(2,2)
+        main.setSizes([360,900,260])
+        left.setMinimumWidth(300)
         right.setMaximumWidth(420)
         right.setMinimumWidth(220)
 
@@ -248,7 +248,7 @@ class MainWindow(QMainWindow):
         self.center_tab_bar=QTabBar(); self.center_tab_bar.setExpanding(False); self.center_tab_bar.setDocumentMode(True)
         self.center_tab_bar.addTab("数字孪生"); self.center_tab_bar.addTab("实时雷达"); self.center_tab_bar.addTab("本流程相机")
         center_wrap_l.addWidget(self.center_tab_bar,0)
-        self.center_stage=QWidget(); self.center_stage.setMinimumHeight(420)
+        self.center_stage=QWidget(); self.center_stage.setMinimumHeight(300)
         center_wrap_l.addWidget(self.center_stage,1)
         cl.addWidget(center_wrap,1)
 
@@ -783,7 +783,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("装载数字孪生监控台")
         if hasattr(self, "main_splitter"):
             # 左栏中间量多，加宽；右栏收窄，相机/雷达参数走专用页
-            self.main_splitter.setSizes([340, 980, 260] if not lab else [320, 1000, 280])
+            self.main_splitter.setSizes([360, 900, 260] if not lab else [340, 920, 280])
 
     @staticmethod
     def _first_image(value):
