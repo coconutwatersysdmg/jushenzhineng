@@ -34,9 +34,10 @@ Item {
             cargoModel.setProperty(i,"yMm",Number(p.y_mm || 0))
             cargoModel.setProperty(i,"zMm",Number(p.z_mm || 0))
             cargoModel.setProperty(i,"yawDeg",Number(p.yaw_deg || 0))
-            cargoModel.setProperty(i,"lengthMm",Math.max(300,Number(c.length_mm || 1200)))
-            cargoModel.setProperty(i,"widthMm",Math.max(300,Number(c.width_mm || 1000)))
-            cargoModel.setProperty(i,"heightMm",Math.max(200,Number(c.height_mm || 900)))
+            // Use plan/measured cargo sizes as-is (mm); only guard against zero/negative.
+            cargoModel.setProperty(i,"lengthMm",Math.max(50,Number(c.length_mm || 1200)))
+            cargoModel.setProperty(i,"widthMm",Math.max(50,Number(c.width_mm || 1000)))
+            cargoModel.setProperty(i,"heightMm",Math.max(50,Number(c.height_mm || 900)))
             cargoModel.setProperty(i,"cargoStatus",String(c.status || "STAGED"))
             cargoModel.setProperty(i,"carried",String(c.attached_to || "") === "PICK_ARM")
         }
@@ -193,14 +194,57 @@ Item {
     function boardSurface(ids) {
         var pts=[]
         for (var i=0;i<ids.length;++i) { var p=cornerPoint(ids[i]); if(!p) return ({valid:false}); pts.push(p) }
+        return extentFromPoints(pts)
+    }
+    function extentFromPoints(pts) {
+        if (!pts || pts.length < 2) return ({valid:false,cx:0,cy:0,cz:0,length:13300,width:2780})
         var minX=pts[0].x,maxX=pts[0].x,minY=pts[0].y,maxY=pts[0].y,z=0
         for (var j=0;j<pts.length;++j) {
             minX=Math.min(minX,pts[j].x); maxX=Math.max(maxX,pts[j].x)
-            minY=Math.min(minY,pts[j].y); maxY=Math.max(maxY,pts[j].y); z+=pts[j].z
+            minY=Math.min(minY,pts[j].y); maxY=Math.max(maxY,pts[j].y); z+=Number(pts[j].z || 0)
         }
         z/=pts.length
         return {valid:true,cx:(minX+maxX)/2,cy:(minY+maxY)/2,cz:z,length:Math.max(50,maxY-minY),width:Math.max(50,maxX-minX)}
     }
+    // Decorative truck mesh authored size (metres). Scale factors map measured board → this mesh.
+    property real authoredDeckLengthM: 13.3
+    property real authoredDeckWidthM: 2.78
+    function measuredBoardExtent() {
+        var s=boardSurface(["P1","P2","P3","P4"])
+        if (s.valid) return s
+        var s6=boardSurface(["P1","P2","P3","P4","P5","P6"])
+        if (s6.valid) return s6
+        var arr=cornerArray(), pts=[]
+        for (var i=0;i<arr.length;++i) pts.push(arr[i])
+        return extentFromPoints(pts)
+    }
+    function regionExtentMm(r) {
+        r = r || ({})
+        var corners = r.corners_world_xyz_mm || r.corners || []
+        var pts=[]
+        for (var i=0;i<corners.length;++i) {
+            var c=corners[i]
+            if (!c) continue
+            if (Object.prototype.toString.call(c) === "[object Array]" || (typeof c.length === "number" && typeof c !== "string")) {
+                if (c.length >= 2) pts.push({x:Number(c[0]||0), y:Number(c[1]||0), z:Number(c[2]||0)})
+            } else {
+                pts.push({
+                    x:Number(c.x !== undefined ? c.x : c.x_mm || 0),
+                    y:Number(c.y !== undefined ? c.y : c.y_mm || 0),
+                    z:Number(c.z !== undefined ? c.z : c.z_mm || 0)
+                })
+            }
+        }
+        if (pts.length >= 2) return extentFromPoints(pts)
+        var len=Math.max(50,Number(r.row_length_mm || 1200))
+        var board=measuredBoardExtent()
+        var width=board.valid ? Math.max(50,board.width/2.0) : 1080
+        return {valid:true,cx:0,cy:0,cz:0,length:len,width:width}
+    }
+    // Re-evaluate when twin state changes (corners / board geometry).
+    property var boardExtent: { var _dep = st; return measuredBoardExtent() }
+    property real deckScaleX: boardExtent && boardExtent.valid ? Math.max(0.15,(boardExtent.length/1000.0)/authoredDeckLengthM) : 1.0
+    property real deckScaleZ: boardExtent && boardExtent.valid ? Math.max(0.15,(boardExtent.width/1000.0)/authoredDeckWidthM) : 1.0
     function regionColor(r) {
         var tid=st.truck && st.truck.current_target ? st.truck.current_target.region_id : ""
         var rid=r.region_id || r.blind_code || r.id || ""
@@ -350,7 +394,8 @@ Item {
             }
         }
 
-        // Detailed flatbed truck.
+        // Detailed flatbed truck. Deck/chassis scale with measured board corners
+        // (WORLD mm → scene m) so visual length/width track real data.
         Node {
             id: truckNode
             property var tp: root.truckPose
@@ -362,7 +407,8 @@ Item {
             // before applying WORLD yaw.  This keeps it under P1-P4/regions.
             Node {
                 id: truckBody
-                position: Qt.vector3d(-6.15,0,0)
+                position: Qt.vector3d(-6.15 * root.deckScaleX, 0, 0)
+                scale: Qt.vector3d(root.deckScaleX, 1.0, root.deckScaleZ)
 
                 // chassis and frame
                 Model { source:"#Cube"; position:Qt.vector3d(5.4,0.62,0); scale:root.cubeScaleM(12.6,0.34,2.28); materials:PrincipledMaterial{baseColor:"#34393d";metalness:0.32;roughness:0.58} }
@@ -530,10 +576,10 @@ Item {
                 property color crateColor: carried ? "#f3a84f" : (cargoStatus === "PLACED" ? "#a8c9af" : "#e4e7e5")
                 property color bandColor: carried ? "#ffe0a0" : (cargoStatus === "PLACED" ? "#d0e0d2" : "#c9cfce")
 
-                Model { source:"#Cube"; position:Qt.vector3d(0,0.06,-root.m(cargoNode.widthMm)*0.36); scale:root.cubeScaleMm(Math.max(cargoNode.lengthMm,1200),120,120); materials:PrincipledMaterial{baseColor:"#366da1";roughness:0.72} }
-                Model { source:"#Cube"; position:Qt.vector3d(0,0.06,0); scale:root.cubeScaleMm(Math.max(cargoNode.lengthMm,1200),120,120); materials:PrincipledMaterial{baseColor:"#366da1";roughness:0.72} }
-                Model { source:"#Cube"; position:Qt.vector3d(0,0.06, root.m(cargoNode.widthMm)*0.36); scale:root.cubeScaleMm(Math.max(cargoNode.lengthMm,1200),120,120); materials:PrincipledMaterial{baseColor:"#366da1";roughness:0.72} }
-                Model { source:"#Cube"; position:Qt.vector3d(0,0.145,0); scale:root.cubeScaleMm(Math.max(cargoNode.lengthMm,1200),70,Math.max(cargoNode.widthMm,1000)); materials:PrincipledMaterial{baseColor:cargoNode.palletColor;roughness:0.66} }
+                Model { source:"#Cube"; position:Qt.vector3d(0,0.06,-root.m(cargoNode.widthMm)*0.36); scale:root.cubeScaleMm(cargoNode.lengthMm,120,120); materials:PrincipledMaterial{baseColor:"#366da1";roughness:0.72} }
+                Model { source:"#Cube"; position:Qt.vector3d(0,0.06,0); scale:root.cubeScaleMm(cargoNode.lengthMm,120,120); materials:PrincipledMaterial{baseColor:"#366da1";roughness:0.72} }
+                Model { source:"#Cube"; position:Qt.vector3d(0,0.06, root.m(cargoNode.widthMm)*0.36); scale:root.cubeScaleMm(cargoNode.lengthMm,120,120); materials:PrincipledMaterial{baseColor:"#366da1";roughness:0.72} }
+                Model { source:"#Cube"; position:Qt.vector3d(0,0.145,0); scale:root.cubeScaleMm(cargoNode.lengthMm,70,cargoNode.widthMm); materials:PrincipledMaterial{baseColor:cargoNode.palletColor;roughness:0.66} }
                 Model { source:"#Cube"; position:Qt.vector3d(0,0.18+root.m(cargoNode.heightMm)/2,0); scale:root.cubeScaleMm(cargoNode.lengthMm,cargoNode.heightMm,cargoNode.widthMm); materials:PrincipledMaterial{baseColor:cargoNode.crateColor;metalness:0.04;roughness:0.56} }
                 Model { source:"#Cube"; position:Qt.vector3d(0,0.18+root.m(cargoNode.heightMm)*0.18,0); scale:root.cubeScaleMm(cargoNode.lengthMm+30,55,cargoNode.widthMm+30); materials:PrincipledMaterial{baseColor:cargoNode.bandColor;metalness:0.08;roughness:0.52} }
                 Model { source:"#Cube"; position:Qt.vector3d(0,0.18+root.m(cargoNode.heightMm)*0.82,0); scale:root.cubeScaleMm(cargoNode.lengthMm+30,55,cargoNode.widthMm+30); materials:PrincipledMaterial{baseColor:cargoNode.bandColor;metalness:0.08;roughness:0.52} }
@@ -542,27 +588,36 @@ Item {
             }
         }
 
-        // High/low deck surfaces from 6 corners.
+        // Deck surfaces from measured corners (flat or high/low), 1:1 WORLD mm.
         Node {
             id: highLowVisual
-            visible: !!(st.truck && String(st.truck.board_mode || "").toUpperCase().indexOf("HIGH") >= 0)
+            property bool isHighLow: !!(st.truck && String(st.truck.board_mode || "").toUpperCase().indexOf("HIGH") >= 0)
+            property var flatSurface: root.boardSurface(["P1","P2","P3","P4"])
             property var highSurface: root.boardSurface(["P1","P2","P3","P4"])
             property var lowSurface: root.boardSurface(["P3","P4","P5","P6"])
-            Model { visible: !!(highLowVisual.highSurface && highLowVisual.highSurface.valid); source:"#Cube"; position:Qt.vector3d(root.m(highLowVisual.highSurface.cx),root.m(highLowVisual.highSurface.cz)+0.03,root.m(highLowVisual.highSurface.cy)); scale:root.cubeScaleMm(highLowVisual.highSurface.width,60,highLowVisual.highSurface.length); materials:PrincipledMaterial{baseColor:"#a66b3f";opacity:0.74;roughness:0.58} }
-            Model { visible: !!(highLowVisual.lowSurface && highLowVisual.lowSurface.valid); source:"#Cube"; position:Qt.vector3d(root.m(highLowVisual.lowSurface.cx),root.m(highLowVisual.lowSurface.cz)+0.03,root.m(highLowVisual.lowSurface.cy)); scale:root.cubeScaleMm(highLowVisual.lowSurface.width,60,highLowVisual.lowSurface.length); materials:PrincipledMaterial{baseColor:"#567d8e";opacity:0.74;roughness:0.58} }
+            Model {
+                visible: !highLowVisual.isHighLow && !!(highLowVisual.flatSurface && highLowVisual.flatSurface.valid)
+                source:"#Cube"
+                position:Qt.vector3d(root.m(highLowVisual.flatSurface.cx),root.m(highLowVisual.flatSurface.cz)+0.03,root.m(highLowVisual.flatSurface.cy))
+                scale:root.cubeScaleMm(highLowVisual.flatSurface.width,60,highLowVisual.flatSurface.length)
+                materials:PrincipledMaterial{baseColor:"#6c625b";opacity:0.78;roughness:0.62}
+            }
+            Model { visible: highLowVisual.isHighLow && !!(highLowVisual.highSurface && highLowVisual.highSurface.valid); source:"#Cube"; position:Qt.vector3d(root.m(highLowVisual.highSurface.cx),root.m(highLowVisual.highSurface.cz)+0.03,root.m(highLowVisual.highSurface.cy)); scale:root.cubeScaleMm(highLowVisual.highSurface.width,60,highLowVisual.highSurface.length); materials:PrincipledMaterial{baseColor:"#a66b3f";opacity:0.74;roughness:0.58} }
+            Model { visible: highLowVisual.isHighLow && !!(highLowVisual.lowSurface && highLowVisual.lowSurface.valid); source:"#Cube"; position:Qt.vector3d(root.m(highLowVisual.lowSurface.cx),root.m(highLowVisual.lowSurface.cz)+0.03,root.m(highLowVisual.lowSurface.cy)); scale:root.cubeScaleMm(highLowVisual.lowSurface.width,60,highLowVisual.lowSurface.length); materials:PrincipledMaterial{baseColor:"#567d8e";opacity:0.74;roughness:0.58} }
         }
 
-        // Loading regions two columns x 1.2m.
+        // Loading regions sized from each region's WORLD corners / row_length_mm.
         Repeater3D {
             model: st.truck && st.truck.regions ? st.truck.regions : []
             delegate: Node {
                 required property var modelData
                 property var c: modelData.center_world_xyz_mm || modelData.center_world || [0,0,0]
-                property real lenM: 1.20
-                Model { source:"#Cube"; position:Qt.vector3d(root.m(c[0]),root.m(c[2])+0.025,root.m(c[1])); scale:root.cubeScaleM(1.08,0.04,1.16); materials:PrincipledMaterial{baseColor:root.regionColor(modelData);opacity:modelData.status==="OCCUPIED"?0.62:0.38;roughness:0.55} }
+                property var extent: root.regionExtentMm(modelData)
+                property real halfW: root.m(extent.width) * 0.5
+                Model { source:"#Cube"; position:Qt.vector3d(root.m(c[0]),root.m(c[2])+0.025,root.m(c[1])); scale:root.cubeScaleMm(extent.width,40,extent.length); materials:PrincipledMaterial{baseColor:root.regionColor(modelData);opacity:modelData.status==="OCCUPIED"?0.62:0.38;roughness:0.55} }
                 // white boundary around each cell, approximated with thin strips
-                Model { source:"#Cube"; position:Qt.vector3d(root.m(c[0])-0.54,root.m(c[2])+0.05,root.m(c[1])); scale:root.cubeScaleM(0.018,0.018,1.16); materials:PrincipledMaterial{baseColor:"#d6e3e8";opacity:0.65} }
-                Model { source:"#Cube"; position:Qt.vector3d(root.m(c[0])+0.54,root.m(c[2])+0.05,root.m(c[1])); scale:root.cubeScaleM(0.018,0.018,1.16); materials:PrincipledMaterial{baseColor:"#d6e3e8";opacity:0.65} }
+                Model { source:"#Cube"; position:Qt.vector3d(root.m(c[0])-halfW,root.m(c[2])+0.05,root.m(c[1])); scale:root.cubeScaleMm(18,18,extent.length); materials:PrincipledMaterial{baseColor:"#d6e3e8";opacity:0.65} }
+                Model { source:"#Cube"; position:Qt.vector3d(root.m(c[0])+halfW,root.m(c[2])+0.05,root.m(c[1])); scale:root.cubeScaleMm(18,18,extent.length); materials:PrincipledMaterial{baseColor:"#d6e3e8";opacity:0.65} }
             }
         }
 
@@ -626,118 +681,5 @@ Item {
         onDoubleClicked: root.setView("全景",30,-32,0)
     }
 
-    // View selector overlay.
-    Rectangle {
-        id: viewPanel
-        anchors.right: parent.right
-        anchors.top: parent.top
-        anchors.margins: 10
-        width: Math.min(parent.width < 800 ? 360 : Math.max(400,parent.width*0.54),parent.width-20)
-        height: 88
-        radius: 7
-        color: "#d00b1824"
-        border.color: "#3a6d87"
-        border.width: 1
-        Column {
-            anchors.fill: parent
-            anchors.margins: 8
-            spacing: 5
-            Row {
-                spacing: 5
-                Repeater {
-                    model: [
-                        {n:"全景",y:30,p:-32,d:0},
-                        {n:"俯视",y:0,p:-88,d:0},
-                        {n:"左侧",y:-90,p:-8,d:0},
-                        {n:"右侧",y:90,p:-8,d:0},
-                        {n:"车头",y:0,p:-8,d:0},
-                        {n:"车尾",y:180,p:-8,d:0}
-                    ]
-                    delegate: Rectangle {
-                        required property var modelData
-                        width: (viewPanel.width-66)/6; height: 32; radius: 4
-                        color: root.viewName===modelData.n ? "#1673a6" : "#173247"
-                        border.color: root.viewName===modelData.n ? "#77d7ff" : "#31556a"
-                        Text { anchors.centerIn: parent; text:modelData.n; color:"#e8f5fa"; font.pixelSize:12 }
-                        MouseArea { anchors.fill:parent; onClicked:root.setView(modelData.n,modelData.y,modelData.p,modelData.d) }
-                    }
-                }
-            }
-            Text { color:"#a9c7d5"; font.pixelSize:11; text:"左键拖动旋转 · 滚轮快速缩放 · 双击恢复全景" }
-        }
-    }
-
-    Rectangle {
-        id: sceneInfoPanel
-        anchors.left: parent.left
-        anchors.top: parent.top
-        anchors.margins: 10
-        // Keep clear of the right view panel; wrap long axis/process text inside the box.
-        width: Math.min(parent.width < 800 ? 300 : 420, Math.max(220, parent.width - viewPanel.width - 36))
-        height: sceneInfoColumn.implicitHeight + 18
-        radius: 7
-        color: "#ce0b1824"
-        border.color: "#35667f"
-        border.width: 1
-        clip: true
-        Column {
-            id: sceneInfoColumn
-            anchors.left: parent.left
-            anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.margins: 9
-            spacing: 3
-            Text {
-                width: parent.width
-                color: "#dcecff"
-                font.pixelSize: root.width < 800 ? 11 : 13
-                wrapMode: Text.WordWrap
-                text: "数字孪生 · world/mm → Scene/m"
-            }
-            Text {
-                width: parent.width
-                color: "#8ad6ff"
-                font.pixelSize: root.width < 800 ? 10 : 12
-                wrapMode: Text.WordWrap
-                text: "视角：" + root.viewName + "   4/6角点：" + root.cornerArray().length
-            }
-            Text {
-                width: parent.width
-                color: "#a9c7d5"
-                font.pixelSize: root.width < 800 ? 9 : 11
-                wrapMode: Text.WordWrap
-                text: "X右 · Y车尾→车头 · Z向上｜双侧龙门架 · 左侧一次拍照 · 按目标物理左右选放货侧"
-            }
-        }
-    }
-
-    Rectangle {
-        anchors.left: parent.left
-        anchors.bottom: parent.bottom
-        anchors.margins: 10
-        width: Math.min(620,parent.width-20)
-        height: 76
-        radius: 7
-        color: "#e00a1826"
-        border.color: "#2f89b7"
-        border.width: 1
-        Column {
-            anchors.fill: parent
-            anchors.margins: 9
-            spacing: 5
-            Text {
-                width: parent.width; color:"#6fd7ff"; font.pixelSize:13; font.bold:true
-                text:"当前流程 · "+String(st.phase || "IDLE"); elide:Text.ElideRight
-            }
-            Text {
-                width: parent.width; color:"#e2eef5"; font.pixelSize:12
-                text:root.activeTasks(); elide:Text.ElideRight
-            }
-            Text {
-                color:root.hasCargo() && st.cargo.attached_to ? "#ffd76f" : "#7fa9be"
-                font.pixelSize:10
-                text:root.cargoInventorySummary() + (root.hasCargo() ? (" ｜ 当前 "+String(st.cargo.status||"-")+(st.cargo.attached_to ? " 随动 "+st.cargo.attached_to : "")) : "")
-            }
-        }
-    }
+    // Overlays removed: default panorama + mouse orbit/zoom/double-click restore.
 }

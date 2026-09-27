@@ -5,13 +5,14 @@ import json
 from copy import deepcopy
 from pathlib import Path
 
-from PySide6.QtCore import QEventLoop, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QPixmap
+from PySide6.QtCore import QEvent, QEventLoop, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtQuickWidgets import QQuickWidget
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QFrame, QLabel,
     QPushButton, QTableWidget, QTableWidgetItem, QHeaderView, QTextEdit, QMessageBox,
-    QTabWidget, QToolButton, QSizePolicy, QComboBox, QCheckBox,
+    QTabWidget, QTabBar, QToolButton, QSizePolicy, QComboBox, QCheckBox, QListWidget, QListWidgetItem,
+    QAbstractItemView, QStackedWidget,
 )
 
 from controllers.flow_controller import FlowController
@@ -130,6 +131,14 @@ class MainWindow(QMainWindow):
         QComboBox QAbstractItemView{background:#0c1b2e;border:1px solid #2a78bd;selection-background-color:#194a78}
         QTableWidget,QTextEdit{background:#06101d;border:1px solid #244b72;border-radius:4px}
         QHeaderView::section{background:#102a46;color:#dcecff;padding:5px;border:0}
+        QTabWidget::pane{background:#0c1b2e;border:1px solid #1f537e;border-radius:6px;top:-1px}
+        QTabBar::tab{background:#102a46;color:#9ec8dc;padding:7px 14px;margin-right:2px;border:1px solid #1f537e;border-bottom:none;border-top-left-radius:5px;border-top-right-radius:5px}
+        QTabBar::tab:selected{background:#0b72d0;color:#ffffff;font-weight:700}
+        QTabBar::tab:hover{background:#194a78}
+        QListWidget{background:#06101d;border:none;outline:0}
+        QListWidget::item{color:#9ec8dc;padding:4px;border-radius:4px}
+        QListWidget::item:selected{background:#12395f;color:#ffffff}
+        QFrame#camUnit{background:#06101d;border:1px solid #2a78bd;border-radius:6px}
         """)
         lay=QVBoxLayout(root); lay.setContentsMargins(12,10,12,10); lay.setSpacing(8)
         top=QHBoxLayout(); title=QLabel("具身智能装载数字孪生"); title.setObjectName("title"); top.addWidget(title)
@@ -197,8 +206,8 @@ class MainWindow(QMainWindow):
         left=QWidget(); ll=QVBoxLayout(left); ll.setContentsMargins(0,0,0,0); ll.setSpacing(8); main.addWidget(left)
         center=QWidget(); cl=QVBoxLayout(center); cl.setContentsMargins(0,0,0,0); cl.setSpacing(8); main.addWidget(center)
         right=QWidget(); rl=QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8); main.addWidget(right)
-        main.setStretchFactor(0,2); main.setStretchFactor(1,5); main.setStretchFactor(2,3)
-        main.setSizes([320,820,480])
+        main.setStretchFactor(0,2); main.setStretchFactor(1,7); main.setStretchFactor(2,2)
+        main.setSizes([240,1100,360])
 
         f,l,_=self._collapsible_card("货物 / 托盘实时数据",expanded=True)
         self.cargo_card=f
@@ -209,9 +218,78 @@ class MainWindow(QMainWindow):
         self.truck_table=QTableWidget(0,2); self.truck_table.setHorizontalHeaderLabels(["字段","值"]); self.truck_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.truck_table)
         self.corner_table=QTableWidget(0,4); self.corner_table.setHorizontalHeaderLabels(["角点","X","Y","Z"]); self.corner_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.corner_table); ll.addWidget(f,2)
 
-        f,l=self._card("数字孪生场景 · world / mm · X右 Y车辆前进 Z向上")
-        self.quick=QQuickWidget(); self.quick.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView); self.quick.setClearColor(QColor("#07111f"))
-        self.quick.rootContext().setContextProperty("twinBridge",self.bridge); self.quick.statusChanged.connect(self._on_qml_status); self.quick.setSource(QUrl.fromLocalFile(str(QML_FILE))); l.addWidget(self.quick,1); cl.addWidget(f,1)
+        # QQuickWidget 放进 QTabWidget 隐藏/显示会极卡；孪生常驻底层，其它页用不透明遮罩盖住。
+        center_wrap=QWidget(); center_wrap_l=QVBoxLayout(center_wrap); center_wrap_l.setContentsMargins(0,0,0,0); center_wrap_l.setSpacing(0)
+        self.center_tab_bar=QTabBar(); self.center_tab_bar.setExpanding(False); self.center_tab_bar.setDocumentMode(True)
+        self.center_tab_bar.addTab("数字孪生"); self.center_tab_bar.addTab("实时雷达"); self.center_tab_bar.addTab("本流程相机")
+        center_wrap_l.addWidget(self.center_tab_bar,0)
+        self.center_stage=QWidget(); self.center_stage.setMinimumHeight(420)
+        center_wrap_l.addWidget(self.center_stage,1)
+        cl.addWidget(center_wrap,1)
+
+        self.quick=QQuickWidget(self.center_stage)
+        self.quick.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
+        self.quick.setClearColor(QColor("#07111f"))
+        self.quick.rootContext().setContextProperty("twinBridge",self.bridge)
+        self.quick.statusChanged.connect(self._on_qml_status)
+        self.quick.setSource(QUrl.fromLocalFile(str(QML_FILE)))
+
+        self.center_overlay=QStackedWidget(self.center_stage)
+        self.center_overlay.setStyleSheet("background:#07111f")
+        radar_page=QWidget(); radar_l=QVBoxLayout(radar_page); radar_l.setContentsMargins(16,16,16,16)
+        radar_hint=QLabel(
+            "实时雷达数据\n\n"
+            "此处预留对接外部雷达可视化软件 / SDK。\n"
+            "当前版本不在本程序内渲染点云，接入后将在此页展示。"
+        )
+        radar_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        radar_hint.setWordWrap(True)
+        radar_hint.setStyleSheet("color:#6f8ca5;font-size:14px;background:#06101d;border:1px dashed #2a78bd;border-radius:8px;padding:28px")
+        radar_l.addWidget(radar_hint,1)
+        self.center_overlay.addWidget(radar_page)
+
+        hist_page=QWidget(); hist_l=QVBoxLayout(hist_page); hist_l.setContentsMargins(8,8,8,8); hist_l.setSpacing(6)
+        hist_page.setStyleSheet("background:#07111f")
+        hist_bar=QHBoxLayout()
+        self.history_gallery_info=QLabel("本流程拍摄图片")
+        self.history_gallery_info.setStyleSheet("color:#9ec8dc;font-weight:600")
+        hist_refresh=QPushButton("刷新")
+        hist_refresh.setToolTip("刷新当前流程已记录的相机照片")
+        hist_refresh.clicked.connect(lambda: self._refresh_history_gallery(force=True))
+        hist_bar.addWidget(self.history_gallery_info,1); hist_bar.addWidget(hist_refresh,0)
+        hist_l.addLayout(hist_bar)
+        self.history_empty=QLabel("本流程暂无照片\n执行拍照步骤后将显示在这里")
+        self.history_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.history_empty.setStyleSheet("color:#6f8ca5;font-size:14px;background:#06101d;border:1px dashed #2a78bd;border-radius:8px;padding:24px")
+        hist_l.addWidget(self.history_empty,1)
+        self.history_gallery=QListWidget()
+        self.history_gallery.setViewMode(QListWidget.ViewMode.IconMode)
+        self.history_gallery.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.history_gallery.setMovement(QListWidget.Movement.Static)
+        self.history_gallery.setIconSize(QSize(140,105))
+        self.history_gallery.setGridSize(QSize(156,140))
+        self.history_gallery.setSpacing(6)
+        self.history_gallery.setWordWrap(True)
+        self.history_gallery.setUniformItemSizes(True)
+        self.history_gallery.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.history_gallery.itemClicked.connect(self._open_history_image)
+        self.history_gallery.currentItemChanged.connect(lambda cur,_prev: self._open_history_image(cur) if cur else None)
+        self.history_gallery.setVisible(False)
+        hist_l.addWidget(self.history_gallery,1)
+        self.history_preview=QLabel("点击上方缩略图查看大图")
+        self.history_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.history_preview.setMinimumHeight(150)
+        self.history_preview.setStyleSheet("background:#06101d;border:1px solid #244b72;border-radius:4px;color:#6f8ca5")
+        self.history_preview.setVisible(False)
+        hist_l.addWidget(self.history_preview,0)
+        self.center_overlay.addWidget(hist_page)
+        self._history_gallery_sig=""
+        self._center_tab_index=0
+        self.center_tab_bar.currentChanged.connect(self._on_center_tab_changed)
+        self.center_stage.installEventFilter(self)
+        self.center_overlay.hide()
+        QTimer.singleShot(0,self._layout_center_stage)
+
         controls=QHBoxLayout()
         self.next_btn=QPushButton("执行下一步"); self.next_btn.setObjectName("primary"); self.next_btn.clicked.connect(self._next)
         self.auto_btn=QPushButton("自动运行"); self.auto_btn.clicked.connect(self._auto)
@@ -288,24 +366,28 @@ class MainWindow(QMainWindow):
         self.right_tabs.addTab(module_page,"模型输入/输出")
         self._module_rows=[]; self._selected_module_id=""; self._latest_module_id=""
 
-        # 实验室右侧：相机照片 + 插孔坐标 + 雷达四角
+        # 实验室右侧：相机照片 + 插孔坐标 + 雷达四角（相机预览/状态/点位合一模块）
         self.lab_right_panel=QWidget()
         lab_rl=QVBoxLayout(self.lab_right_panel); lab_rl.setContentsMargins(0,0,0,0); lab_rl.setSpacing(8)
         cam_card,cam_l,_=self._collapsible_card("相机照片 / 识别结果",expanded=True)
+        cam_unit=QFrame(); cam_unit.setObjectName("camUnit")
+        cam_unit_l=QVBoxLayout(cam_unit); cam_unit_l.setContentsMargins(0,0,0,0); cam_unit_l.setSpacing(0)
         self.lab_camera_preview=QLabel("执行后显示：插孔 / 角点 / B区纸箱检测图")
         self.lab_camera_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lab_camera_preview.setMinimumHeight(220)
-        self.lab_camera_preview.setStyleSheet("background:#06101d;border:1px solid #244b72;color:#6f8ca5")
-        cam_l.addWidget(self.lab_camera_preview,3)
+        self.lab_camera_preview.setStyleSheet("background:transparent;border:none;border-bottom:1px solid #1f537e;color:#6f8ca5;padding:6px")
+        cam_unit_l.addWidget(self.lab_camera_preview,3)
         self.lab_camera_caption=QLabel("等待拍照")
         self.lab_camera_caption.setWordWrap(True)
-        self.lab_camera_caption.setStyleSheet("color:#9ec8dc")
-        cam_l.addWidget(self.lab_camera_caption,0)
+        self.lab_camera_caption.setStyleSheet("color:#9ec8dc;background:#0a1828;padding:8px 10px;border:none;border-bottom:1px solid #1f537e")
+        cam_unit_l.addWidget(self.lab_camera_caption,0)
         self.lab_hole_table=QTableWidget(0,4)
         self.lab_hole_table.setHorizontalHeaderLabels(["点位","X(mm)","Y(mm)","Z(mm)"])
         self.lab_hole_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.lab_hole_table.setMaximumHeight(140)
-        cam_l.addWidget(self.lab_hole_table,1)
+        self.lab_hole_table.setStyleSheet("QTableWidget{background:transparent;border:none;border-radius:0}")
+        cam_unit_l.addWidget(self.lab_hole_table,1)
+        cam_l.addWidget(cam_unit,1)
         lab_rl.addWidget(cam_card,3)
 
         radar_card,radar_l,_=self._collapsible_card("角点 WORLD（相机优先 / 雷达兜底，mm）",expanded=True)
@@ -318,15 +400,135 @@ class MainWindow(QMainWindow):
         rl.addWidget(self.lab_right_panel,1)
 
         bottom=QSplitter(Qt.Orientation.Horizontal); bottom.setChildrenCollapsible(False); self.body_splitter.addWidget(bottom)
-        f,l,_=self._collapsible_card("运行日志 / 报警",expanded=True); self.logs=QTextEdit(); self.logs.setReadOnly(True); self.logs.setMinimumHeight(110); l.addWidget(self.logs); bottom.addWidget(f)
+        f,l,_=self._collapsible_card("运行日志 / 报警",expanded=False); self.logs=QTextEdit(); self.logs.setReadOnly(True); self.logs.setMinimumHeight(90); l.addWidget(self.logs); bottom.addWidget(f)
         # 总体结果 JSON 过长暂不展示；数据仍写入 workdir 结果文件。
         self.results=None
-        self.body_splitter.setStretchFactor(0,5); self.body_splitter.setStretchFactor(1,1); self.body_splitter.setSizes([820,145])
+        self.body_splitter.setStretchFactor(0,8); self.body_splitter.setStretchFactor(1,0)
+        self.body_splitter.setSizes([980,42])
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, "center_stage", None) and event.type() == QEvent.Type.Resize:
+            self._layout_center_stage()
+        return super().eventFilter(obj, event)
+
+    def _layout_center_stage(self):
+        if not hasattr(self, "center_stage"):
+            return
+        rect = self.center_stage.rect()
+        if hasattr(self, "quick"):
+            self.quick.setGeometry(rect)
+        if hasattr(self, "center_overlay"):
+            self.center_overlay.setGeometry(rect)
 
     def _on_qml_status(self,status):
         if status==QQuickWidget.Status.Error:
             msg="\n".join(e.toString() for e in self.quick.errors()) or "未知 QML 错误"
             QTimer.singleShot(0,lambda m=msg: QMessageBox.critical(self,"数字孪生场景加载失败",m))
+
+    def _on_center_tab_changed(self, index: int):
+        self._center_tab_index = int(index)
+        self._layout_center_stage()
+        if index <= 0:
+            # 遮罩隐藏：孪生常驻，鼠标事件回到 QQuickWidget
+            self.center_overlay.hide()
+            return
+        self.center_overlay.show()
+        self.center_overlay.raise_()
+        self.center_overlay.setCurrentIndex(index - 1)
+        if index == 2:
+            self._refresh_history_gallery(force=False)
+
+    def _current_flow_camera_entries(self) -> list[dict]:
+        """只取当前流程记录的照片，不扫本地历史目录。"""
+        from services.lab_camera_gallery import build_lab_camera_gallery_entries
+
+        live = list(getattr(self.controller, "lab_camera_gallery", None) or [])
+        entries: list[dict] = []
+        seen: set[str] = set()
+
+        def _push(raw: dict):
+            path = str(raw.get("image_path") or raw.get("result_image_path") or raw.get("rgb_path") or "").strip()
+            if not path or path in seen:
+                return
+            p = Path(path)
+            if not p.is_file():
+                return
+            seen.add(path)
+            entries.append({
+                "image_path": str(p.resolve()),
+                "label": str(raw.get("title") or raw.get("label") or raw.get("step") or p.name),
+                "summary": str(raw.get("message") or raw.get("summary") or raw.get("status") or ""),
+            })
+
+        for item in live:
+            if isinstance(item, dict):
+                _push(item)
+
+        built = build_lab_camera_gallery_entries(
+            getattr(self.controller, "round_data", {}) or {},
+            round_index=int(getattr(self.controller, "round_index", 0) or 0) + 1,
+        )
+        for item in built:
+            if isinstance(item, dict):
+                _push(item)
+        return entries
+
+    def _refresh_history_gallery(self, force: bool = False):
+        if not hasattr(self, "history_gallery"):
+            return
+        entries = self._current_flow_camera_entries()
+        sig = "|".join(e["image_path"] for e in entries)
+        if not force and sig == getattr(self, "_history_gallery_sig", None):
+            return
+        self._history_gallery_sig = sig
+
+        self.history_gallery.clear()
+        for entry in entries:
+            path = Path(entry["image_path"])
+            pix = QPixmap(str(path))
+            if pix.isNull():
+                continue
+            thumb = pix.scaled(140, 105, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            item = QListWidgetItem(QIcon(thumb), entry["label"])
+            tip = entry["label"]
+            if entry.get("summary"):
+                tip += "\n" + entry["summary"]
+            tip += "\n" + str(path)
+            item.setToolTip(tip)
+            item.setData(Qt.ItemDataRole.UserRole, str(path))
+            self.history_gallery.addItem(item)
+
+        count = self.history_gallery.count()
+        has = count > 0
+        self.history_empty.setVisible(not has)
+        self.history_gallery.setVisible(has)
+        self.history_preview.setVisible(has)
+        if hasattr(self, "history_gallery_info"):
+            self.history_gallery_info.setText(f"本流程拍摄图片 · {count} 张" if has else "本流程拍摄图片")
+        if not has:
+            self.history_preview.setPixmap(QPixmap())
+            self.history_preview.setText("点击上方缩略图查看大图")
+        elif self.history_gallery.currentItem() is None:
+            self.history_gallery.setCurrentRow(0)
+
+    def _open_history_image(self, item: QListWidgetItem | None):
+        if item is None or not hasattr(self, "history_preview"):
+            return
+        path = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        if not path or not Path(path).is_file():
+            return
+        pix = QPixmap(path)
+        if pix.isNull():
+            return
+        self.history_preview.setVisible(True)
+        scaled = pix.scaled(
+            max(240, self.history_preview.width() - 8),
+            max(140, self.history_preview.height() - 8),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.history_preview.setPixmap(scaled)
+        self.history_preview.setToolTip(path)
 
     @staticmethod
     def _fill_kv(table,data):
@@ -430,12 +632,12 @@ class MainWindow(QMainWindow):
             self.lab_right_panel.setVisible(lab)
         if hasattr(self, "debug_btn"):
             self.debug_btn.setVisible(not lab)
-        title = "实验室装载测试 · B列循环（B1 → B2 → … → B6）" if lab else "具身智能装载数字孪生 · 单机械臂携货 / 挂载相机角点识别"
+        title = "具身智能装载数字孪生" if lab else "具身智能装载数字孪生 · 单机械臂携货 / 挂载相机角点识别"
         self.setWindowTitle(title)
         if lab and hasattr(self, "main_splitter"):
-            self.main_splitter.setSizes([280, 780, 420])
+            self.main_splitter.setSizes([220, 1120, 340])
         elif hasattr(self, "main_splitter"):
-            self.main_splitter.setSizes([320, 820, 480])
+            self.main_splitter.setSizes([240, 1100, 360])
 
     @staticmethod
     def _first_image(value):
@@ -999,6 +1201,9 @@ class MainWindow(QMainWindow):
         self._refresh_ext_devices(s)
         msgs=t.get("messages") or []
         alarm=t.get("alarm"); self.logs.setPlainText(("ALARM: "+str(alarm)+"\n\n" if alarm else "")+"\n".join(f"[{m.get('time')}] {m.get('source')} {m.get('status')} {m.get('message')}" for m in msgs))
+        # 相机页打开时轻量同步本流程相册（签名未变则跳过，不扫盘）
+        if getattr(self, "_center_tab_index", 0) == 2:
+            self._refresh_history_gallery(force=False)
 
     def _refresh_lab_sense_panels(self, s: dict, rd: dict, hole: dict, truck: dict) -> None:
         """实验室右侧：最新照片+标注图、当前识别点、底板角点。"""
