@@ -192,17 +192,18 @@ def _make_splash():
     from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
     from PySide6.QtWidgets import QSplashScreen
 
-    pixmap = QPixmap(680, 260)
-    pixmap.fill(QColor("#07111f"))
+    pixmap = QPixmap(680, 240)
+    pixmap.fill(QColor("#e8eaed"))
     painter = QPainter(pixmap)
-    painter.setPen(QColor("#74d8ff"))
-    painter.setFont(QFont("Microsoft YaHei UI", 22, QFont.Weight.Bold))
-    painter.drawText(36, 90, "具身智能装载数字孪生 v8")
-    painter.setPen(QColor("#dcecff"))
-    painter.setFont(QFont("Microsoft YaHei UI", 12))
-    painter.drawText(38, 140, "正在加载相机、算法服务与三维场景，请稍候……")
-    painter.setPen(QColor("#6f8ca5"))
-    painter.drawText(38, 195, "再次运行会自动唤醒已有窗口，无需连续重复点击。")
+    painter.fillRect(0, 0, 680, 4, QColor("#1565c0"))
+    painter.setPen(QColor("#152238"))
+    painter.setFont(QFont("Microsoft YaHei UI", 16, QFont.Weight.Bold))
+    painter.drawText(28, 78, "装载数字孪生监控台  ·  v8")
+    painter.setPen(QColor("#5c6675"))
+    painter.setFont(QFont("Microsoft YaHei UI", 10))
+    painter.drawText(28, 118, "正在加载设备链路、算法服务与三维场景……")
+    painter.setPen(QColor("#9aa3b2"))
+    painter.drawText(28, 156, "再次启动将唤醒已有窗口，无需重复打开。")
     painter.end()
     splash = QSplashScreen(pixmap, Qt.WindowType.WindowStaysOnTopHint)
     splash.show()
@@ -234,6 +235,13 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("Embodied Loading Digital Twin v8")
+    try:
+        from ui.theme import apply_app_theme, twin_clear_color
+
+        theme_name = apply_app_theme(app)
+        _log_startup(f"UI_THEME engine={theme_name} clear={twin_clear_color().name()}")
+    except Exception:
+        _log_startup("UI_THEME_FAILED\n" + traceback.format_exc().rstrip())
     _log_startup(f"QT_READY platform={app.platformName()} elapsed={time.perf_counter()-started:.3f}s")
 
     if already_running:

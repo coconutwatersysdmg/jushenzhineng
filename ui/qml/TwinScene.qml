@@ -290,14 +290,14 @@ Item {
     Behavior on orbitPitch { enabled: !root.orbitDragging; NumberAnimation { duration: 320; easing.type: Easing.InOutCubic } }
     Behavior on orbitDistance { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
 
-    Rectangle { anchors.fill: parent; color: "#07111b" }
+    Rectangle { anchors.fill: parent; color: "#d5dae2" }
 
     View3D {
         id: view3d
         anchors.fill: parent
         camera: sceneCamera
         environment: SceneEnvironment {
-            clearColor: "#0a1722"
+            clearColor: "#d5dae2"
             backgroundMode: SceneEnvironment.Color
             antialiasingMode: SceneEnvironment.MSAA
             antialiasingQuality: SceneEnvironment.High

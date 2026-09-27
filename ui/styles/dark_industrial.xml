@@ -1,0 +1,11 @@
+<!--?xml version="1.0" encoding="UTF-8"?-->
+<!-- Custom qt-material theme aligned with digital-twin navy / cyan. -->
+<resources>
+  <color name="primaryColor">#74d8ff</color>
+  <color name="primaryLightColor">#b3ecff</color>
+  <color name="secondaryColor">#0b1220</color>
+  <color name="secondaryLightColor">#2a3f5d</color>
+  <color name="secondaryDarkColor">#121a2b</color>
+  <color name="primaryTextColor">#ffffff</color>
+  <color name="secondaryTextColor">#e8eef7</color>
+</resources>

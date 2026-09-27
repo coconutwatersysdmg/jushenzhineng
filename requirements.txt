@@ -10,6 +10,11 @@
 #   重建 runtime，而不是在目标机临时 pip 升级。
 
 PySide6==6.8.3
+# UI theme: PyQtDarkTheme fork (Python 3.12) + optional qt-material
+pyqtdarktheme-fork==2.3.6
+qt-material==2.17
+Jinja2>=3.1
+darkdetect>=0.8
 PyMySQL==1.2.0
 numpy==2.5.2
 opencv-python==5.0.0.93

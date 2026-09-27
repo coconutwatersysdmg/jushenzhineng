@@ -20,6 +20,7 @@ from ui.twin_bridge import TwinBridge
 from ui.debug_dialog import DebugInputDialog
 from ui.corner_review_dialog import run_corner_review
 from ui.plc_motion_dialog import PlcMotionDialog, open_plc_manual_console
+from ui.theme import is_light_theme, twin_clear_color
 from config.feature_switches import (
     apply_run_profile,
     get_run_profile,
@@ -89,20 +90,26 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1024,680)
         self._build(); self._ensure_plc_dialog(); self._load_plan(); self._apply_ui_mode(); self._refresh(); self._sync_auto_push_policy()
 
+    def _tune_table(self, table: QTableWidget):
+        table.setAlternatingRowColors(True)
+        table.verticalHeader().setVisible(False)
+        table.verticalHeader().setDefaultSectionSize(22)
+        table.setShowGrid(True)
+        table.setWordWrap(False)
+
     def _card(self,title):
-        f=QFrame(); f.setObjectName("card"); l=QVBoxLayout(f); l.setContentsMargins(9,8,9,8)
+        f=QFrame(); f.setObjectName("card"); l=QVBoxLayout(f); l.setContentsMargins(8,6,8,6); l.setSpacing(4)
         t=QLabel(title); t.setObjectName("sectionTitle"); l.addWidget(t); return f,l
 
     def _collapsible_card(self,title,*,expanded=True):
-        f=QFrame(); f.setObjectName("card"); outer=QVBoxLayout(f); outer.setContentsMargins(9,8,9,8); outer.setSpacing(6)
-        header=QHBoxLayout(); header.setSpacing(6)
+        f=QFrame(); f.setObjectName("card"); outer=QVBoxLayout(f); outer.setContentsMargins(8,6,8,6); outer.setSpacing(4)
+        header=QHBoxLayout(); header.setSpacing(4)
         toggle=QToolButton(); toggle.setCheckable(True); toggle.setChecked(expanded); toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
-        toggle.setStyleSheet("QToolButton{border:none;background:transparent;color:#74d8ff;padding:0 2px}")
         toggle.setToolTip("展开 / 折叠")
         title_label=QLabel(title); title_label.setObjectName("sectionTitle"); title_label.setCursor(Qt.CursorShape.PointingHandCursor)
         header.addWidget(toggle,0); header.addWidget(title_label,1); header.addStretch(1); outer.addLayout(header)
-        body=QWidget(); body_l=QVBoxLayout(body); body_l.setContentsMargins(0,0,0,0); body_l.setSpacing(6); outer.addWidget(body); body.setVisible(expanded)
+        body=QWidget(); body_l=QVBoxLayout(body); body_l.setContentsMargins(0,0,0,0); body_l.setSpacing(4); outer.addWidget(body); body.setVisible(expanded)
 
         def _set_expanded(opened):
             body.setVisible(opened)
@@ -120,34 +127,26 @@ class MainWindow(QMainWindow):
         return f,body_l,toggle
 
     def _build(self):
-        root=QWidget(); self.setCentralWidget(root)
-        root.setStyleSheet("""
-        QWidget{background:#07111f;color:#dcecff;font-size:12px}
-        QFrame#card{background:#0c1b2e;border:1px solid #1f537e;border-radius:8px}
-        QLabel#title{font-size:22px;font-weight:700;color:#fff}
-        QLabel#sectionTitle{font-size:14px;font-weight:700;color:#74d8ff}
-        QPushButton{background:#12395f;border:1px solid #2a78bd;border-radius:5px;padding:7px 11px}
-        QPushButton:hover{background:#194a78} QPushButton#primary{background:#0b72d0;font-weight:700}
-        QComboBox{background:#102a46;border:1px solid #2a78bd;border-radius:5px;padding:5px 8px;min-width:160px}
-        QComboBox::drop-down{border:0;width:22px}
-        QComboBox QAbstractItemView{background:#0c1b2e;border:1px solid #2a78bd;selection-background-color:#194a78}
-        QTableWidget,QTextEdit{background:#06101d;border:1px solid #244b72;border-radius:4px}
-        QHeaderView::section{background:#102a46;color:#dcecff;padding:5px;border:0}
-        QTabWidget::pane{background:#0c1b2e;border:1px solid #1f537e;border-radius:6px;top:-1px}
-        QTabBar::tab{background:#102a46;color:#9ec8dc;padding:7px 14px;margin-right:2px;border:1px solid #1f537e;border-bottom:none;border-top-left-radius:5px;border-top-right-radius:5px}
-        QTabBar::tab:selected{background:#0b72d0;color:#ffffff;font-weight:700}
-        QTabBar::tab:hover{background:#194a78}
-        QListWidget{background:#06101d;border:none;outline:0}
-        QListWidget::item{color:#9ec8dc;padding:4px;border-radius:4px}
-        QListWidget::item:selected{background:#12395f;color:#ffffff}
-        QFrame#camUnit{background:#06101d;border:1px solid #2a78bd;border-radius:6px}
-        """)
-        lay=QVBoxLayout(root); lay.setContentsMargins(12,10,12,10); lay.setSpacing(8)
-        top=QHBoxLayout(); title=QLabel("具身智能装载数字孪生"); title.setObjectName("title"); top.addWidget(title)
+        root=QWidget(); root.setObjectName("centralRoot"); self.setCentralWidget(root)
+        # Global chrome: ui.theme → hmi_monitor.qss (dense industrial monitor)
+        lay=QVBoxLayout(root); lay.setContentsMargins(8,6,8,6); lay.setSpacing(6)
+
+        # 顶栏：标题 + 设备 LED + 模式 + 阶段/进度（HMI 状态条一体）
+        top_bar=QFrame(); top_bar.setObjectName("topBar")
+        top=QHBoxLayout(top_bar); top.setContentsMargins(8,4,8,4); top.setSpacing(8)
+        title=QLabel("装载数字孪生监控台"); title.setObjectName("title"); top.addWidget(title,0)
+        sep=QLabel("|"); sep.setObjectName("mutedArrow"); top.addWidget(sep,0)
+        self.device_status_badges={}
+        for device_id,dev_title in (("PLC","PLC"),("RADAR","雷达"),("CAM_PICK","相机")):
+            badge=QLabel(f"○ {dev_title}")
+            badge.setObjectName("deviceLed")
+            badge.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            self.device_status_badges[device_id]=badge
+            top.addWidget(badge,0)
         top.addStretch(1)
-        mode_label=QLabel("运行模式"); mode_label.setStyleSheet("color:#9ec8dc;font-weight:600")
+        mode_label=QLabel("模式"); mode_label.setObjectName("mutedLabel")
         top.addWidget(mode_label)
-        self.profile_combo=QComboBox()
+        self.profile_combo=QComboBox(); self.profile_combo.setMinimumWidth(120)
         for item in list_run_profiles():
             self.profile_combo.addItem(f"{item['title']}", item["id"])
             idx=self.profile_combo.count()-1
@@ -158,67 +157,53 @@ class MainWindow(QMainWindow):
         self.profile_combo.currentIndexChanged.connect(self._on_run_profile_changed)
         self._sync_profile_combo_tooltip()
         top.addWidget(self.profile_combo)
-        self.phase=QLabel("IDLE"); self.phase.setStyleSheet("font-size:15px;font-weight:700;color:#5ad0ff"); top.addWidget(self.phase)
-        self.progress=QLabel("0/0"); self.progress.setStyleSheet("font-size:18px;font-weight:700"); top.addWidget(self.progress); lay.addLayout(top)
+        self.phase=QLabel("IDLE"); self.phase.setObjectName("phaseLabel"); top.addWidget(self.phase)
+        self.progress=QLabel("0/0"); self.progress.setObjectName("progressLabel"); top.addWidget(self.progress)
+        lay.addWidget(top_bar,0)
 
-        # 三件外设：紧凑状态条（绿点已连接 / 红点未连接），悬停看原因
-        device_strip=QHBoxLayout(); device_strip.setSpacing(14)
-        strip_title=QLabel("外接设备")
-        strip_title.setStyleSheet("color:#8eb6cc;font-weight:600;font-size:12px")
-        device_strip.addWidget(strip_title,0)
-        self.device_status_badges={}
-        for device_id,title in (("PLC","PLC"),("RADAR","雷达"),("CAM_PICK","相机")):
-            badge=QLabel(f"○ {title} 未检测")
-            badge.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-            badge.setStyleSheet("color:#8faabd;font-size:12px;font-weight:600;padding:2px 0")
-            self.device_status_badges[device_id]=badge
-            device_strip.addWidget(badge,0)
-        device_strip.addStretch(1)
-        lay.addLayout(device_strip)
-
-        f,l,self.flow_toggle=self._collapsible_card("流程链路",expanded=True)
+        f,l,self.flow_toggle=self._collapsible_card("流程链路",expanded=False)
         self.field_flow_card=f
         self.flow_nodes=[]
         for row_index,stage_row in enumerate((self.FLOW_STAGES[:6],self.FLOW_STAGES[6:])):
-            row=QHBoxLayout(); row.setSpacing(5)
+            row=QHBoxLayout(); row.setSpacing(3)
             for index,(number,title_text) in enumerate(stage_row):
                 node=QLabel(f"{number}. {title_text}"); node.setAlignment(Qt.AlignmentFlag.AlignCenter); node.setWordWrap(True)
-                node.setMinimumHeight(42); node.setToolTip(f"步骤 {number}：{title_text}"); row.addWidget(node,1); self.flow_nodes.append(node)
+                node.setMinimumHeight(28); node.setToolTip(f"步骤 {number}：{title_text}"); row.addWidget(node,1); self.flow_nodes.append(node)
                 if index < len(stage_row)-1:
-                    arrow=QLabel("→"); arrow.setAlignment(Qt.AlignmentFlag.AlignCenter); arrow.setStyleSheet("color:#527a96;font-size:16px"); row.addWidget(arrow,0)
+                    arrow=QLabel("›"); arrow.setObjectName("mutedArrow"); arrow.setAlignment(Qt.AlignmentFlag.AlignCenter); row.addWidget(arrow,0)
             l.addLayout(row)
         lay.addWidget(f,0)
 
-        lab_flow,lab_flow_l,self.lab_flow_toggle=self._collapsible_card("实验室流程（前两步）",expanded=True)
+        lab_flow,lab_flow_l,self.lab_flow_toggle=self._collapsible_card("实验室流程",expanded=True)
         self.lab_flow_card=lab_flow
         self.lab_flow_nodes=[]
-        lab_row=QHBoxLayout(); lab_row.setSpacing(5)
+        lab_row=QHBoxLayout(); lab_row.setSpacing(3)
         for index,(number,title_text) in enumerate(self.LAB_FLOW_STAGES):
             node=QLabel(f"{number}. {title_text}"); node.setAlignment(Qt.AlignmentFlag.AlignCenter); node.setWordWrap(True)
-            node.setMinimumHeight(42); node.setToolTip(f"实验室步骤 {number}：{title_text}")
+            node.setMinimumHeight(28); node.setToolTip(f"实验室步骤 {number}：{title_text}")
             lab_row.addWidget(node,1); self.lab_flow_nodes.append(node)
             if index < len(self.LAB_FLOW_STAGES)-1:
-                arrow=QLabel("→"); arrow.setAlignment(Qt.AlignmentFlag.AlignCenter); arrow.setStyleSheet("color:#527a96;font-size:16px"); lab_row.addWidget(arrow,0)
+                arrow=QLabel("›"); arrow.setObjectName("mutedArrow"); arrow.setAlignment(Qt.AlignmentFlag.AlignCenter); lab_row.addWidget(arrow,0)
         lab_flow_l.addLayout(lab_row)
         lab_flow.setVisible(False)
         lay.addWidget(lab_flow,0)
 
         self.body_splitter=QSplitter(Qt.Orientation.Vertical); self.body_splitter.setChildrenCollapsible(False); lay.addWidget(self.body_splitter,1)
         main=QSplitter(Qt.Orientation.Horizontal); main.setChildrenCollapsible(False); self.body_splitter.addWidget(main); self.main_splitter=main
-        left=QWidget(); ll=QVBoxLayout(left); ll.setContentsMargins(0,0,0,0); ll.setSpacing(8); main.addWidget(left)
-        center=QWidget(); cl=QVBoxLayout(center); cl.setContentsMargins(0,0,0,0); cl.setSpacing(8); main.addWidget(center)
-        right=QWidget(); rl=QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(8); main.addWidget(right)
+        left=QWidget(); ll=QVBoxLayout(left); ll.setContentsMargins(0,0,0,0); ll.setSpacing(6); main.addWidget(left)
+        center=QWidget(); cl=QVBoxLayout(center); cl.setContentsMargins(0,0,0,0); cl.setSpacing(6); main.addWidget(center)
+        right=QWidget(); rl=QVBoxLayout(right); rl.setContentsMargins(0,0,0,0); rl.setSpacing(6); main.addWidget(right)
         main.setStretchFactor(0,2); main.setStretchFactor(1,7); main.setStretchFactor(2,2)
-        main.setSizes([240,1100,360])
+        main.setSizes([220,1120,340])
 
-        f,l,_=self._collapsible_card("货物 / 托盘实时数据",expanded=True)
+        f,l,_=self._collapsible_card("货物 / 托盘 实时数据",expanded=True)
         self.cargo_card=f
-        self.cargo_table=QTableWidget(0,2); self.cargo_table.setHorizontalHeaderLabels(["字段","值"]); self.cargo_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.cargo_table); ll.addWidget(f,1)
+        self.cargo_table=QTableWidget(0,2); self.cargo_table.setHorizontalHeaderLabels(["字段","值"]); self.cargo_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); self._tune_table(self.cargo_table); l.addWidget(self.cargo_table); ll.addWidget(f,1)
 
-        f,l,_=self._collapsible_card("车辆 / 相机最终车板 WORLD 数据",expanded=True)
+        f,l,_=self._collapsible_card("车辆 / 车板 WORLD",expanded=True)
         self.truck_card=f
-        self.truck_table=QTableWidget(0,2); self.truck_table.setHorizontalHeaderLabels(["字段","值"]); self.truck_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.truck_table)
-        self.corner_table=QTableWidget(0,4); self.corner_table.setHorizontalHeaderLabels(["角点","X","Y","Z"]); self.corner_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.corner_table); ll.addWidget(f,2)
+        self.truck_table=QTableWidget(0,2); self.truck_table.setHorizontalHeaderLabels(["字段","值"]); self.truck_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); self._tune_table(self.truck_table); l.addWidget(self.truck_table)
+        self.corner_table=QTableWidget(0,4); self.corner_table.setHorizontalHeaderLabels(["角点","X","Y","Z"]); self.corner_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); self._tune_table(self.corner_table); l.addWidget(self.corner_table); ll.addWidget(f,2)
 
         # QQuickWidget 放进 QTabWidget 隐藏/显示会极卡；孪生常驻底层，其它页用不透明遮罩盖住。
         center_wrap=QWidget(); center_wrap_l=QVBoxLayout(center_wrap); center_wrap_l.setContentsMargins(0,0,0,0); center_wrap_l.setSpacing(0)
@@ -231,46 +216,46 @@ class MainWindow(QMainWindow):
 
         self.quick=QQuickWidget(self.center_stage)
         self.quick.setResizeMode(QQuickWidget.ResizeMode.SizeRootObjectToView)
-        self.quick.setClearColor(QColor("#07111f"))
+        self.quick.setClearColor(twin_clear_color())
         self.quick.rootContext().setContextProperty("twinBridge",self.bridge)
         self.quick.statusChanged.connect(self._on_qml_status)
         self.quick.setSource(QUrl.fromLocalFile(str(QML_FILE)))
 
         self.center_overlay=QStackedWidget(self.center_stage)
-        self.center_overlay.setStyleSheet("background:#07111f")
+        self.center_overlay.setObjectName("centralRoot")
         radar_page=QWidget(); radar_l=QVBoxLayout(radar_page); radar_l.setContentsMargins(16,16,16,16)
         radar_hint=QLabel(
             "实时雷达数据\n\n"
             "此处预留对接外部雷达可视化软件 / SDK。\n"
             "当前版本不在本程序内渲染点云，接入后将在此页展示。"
         )
+        radar_hint.setObjectName("emptyState")
         radar_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         radar_hint.setWordWrap(True)
-        radar_hint.setStyleSheet("color:#6f8ca5;font-size:14px;background:#06101d;border:1px dashed #2a78bd;border-radius:8px;padding:28px")
         radar_l.addWidget(radar_hint,1)
         self.center_overlay.addWidget(radar_page)
 
         hist_page=QWidget(); hist_l=QVBoxLayout(hist_page); hist_l.setContentsMargins(8,8,8,8); hist_l.setSpacing(6)
-        hist_page.setStyleSheet("background:#07111f")
+        hist_page.setObjectName("centralRoot")
         hist_bar=QHBoxLayout()
         self.history_gallery_info=QLabel("本流程拍摄图片")
-        self.history_gallery_info.setStyleSheet("color:#9ec8dc;font-weight:600")
+        self.history_gallery_info.setObjectName("mutedLabel")
         hist_refresh=QPushButton("刷新")
         hist_refresh.setToolTip("刷新当前流程已记录的相机照片")
         hist_refresh.clicked.connect(lambda: self._refresh_history_gallery(force=True))
         hist_bar.addWidget(self.history_gallery_info,1); hist_bar.addWidget(hist_refresh,0)
         hist_l.addLayout(hist_bar)
         self.history_empty=QLabel("本流程暂无照片\n执行拍照步骤后将显示在这里")
+        self.history_empty.setObjectName("emptyState")
         self.history_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.history_empty.setStyleSheet("color:#6f8ca5;font-size:14px;background:#06101d;border:1px dashed #2a78bd;border-radius:8px;padding:24px")
         hist_l.addWidget(self.history_empty,1)
         self.history_gallery=QListWidget()
         self.history_gallery.setViewMode(QListWidget.ViewMode.IconMode)
         self.history_gallery.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.history_gallery.setMovement(QListWidget.Movement.Static)
-        self.history_gallery.setIconSize(QSize(140,105))
-        self.history_gallery.setGridSize(QSize(156,140))
-        self.history_gallery.setSpacing(6)
+        self.history_gallery.setIconSize(QSize(112,84))
+        self.history_gallery.setGridSize(QSize(124,112))
+        self.history_gallery.setSpacing(4)
         self.history_gallery.setWordWrap(True)
         self.history_gallery.setUniformItemSizes(True)
         self.history_gallery.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -279,9 +264,9 @@ class MainWindow(QMainWindow):
         self.history_gallery.setVisible(False)
         hist_l.addWidget(self.history_gallery,1)
         self.history_preview=QLabel("点击上方缩略图查看大图")
+        self.history_preview.setObjectName("historyPreview")
         self.history_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.history_preview.setMinimumHeight(150)
-        self.history_preview.setStyleSheet("background:#06101d;border:1px solid #244b72;border-radius:4px;color:#6f8ca5")
         self.history_preview.setVisible(False)
         hist_l.addWidget(self.history_preview,0)
         self.center_overlay.addWidget(hist_page)
@@ -292,68 +277,70 @@ class MainWindow(QMainWindow):
         self.center_overlay.hide()
         QTimer.singleShot(0,self._layout_center_stage)
 
-        controls=QHBoxLayout()
+        tool=QFrame(); tool.setObjectName("toolStrip")
+        controls=QHBoxLayout(tool); controls.setContentsMargins(6,3,6,3); controls.setSpacing(4)
         self.next_btn=QPushButton("执行下一步"); self.next_btn.setObjectName("primary"); self.next_btn.clicked.connect(self._next)
         self.auto_btn=QPushButton("自动运行"); self.auto_btn.clicked.connect(self._auto)
         self.debug_btn=QPushButton("调试输入"); self.debug_btn.clicked.connect(self._debug); reset=QPushButton("重置"); reset.clicked.connect(self._reset)
-        self.plc_panel_btn=QPushButton("PLC 自动坐标…")
+        self.plc_panel_btn=QPushButton("PLC 坐标")
         self.plc_panel_btn.setToolTip("查看自动流程的 XYZ 坐标并确认下发；R 轴不会自动下发")
         self.plc_panel_btn.clicked.connect(self._show_plc_dialog)
-        self.plc_manual_btn=QPushButton("打开 PLC 手动控制")
+        self.plc_manual_btn=QPushButton("PLC 手动")
         self.plc_manual_btn.setToolTip("打开独立 PLC 控制界面，可手动移动机械臂；不会暂停或改变自动流程")
         self.plc_manual_btn.clicked.connect(self._open_plc_manual_control)
-        self.auto_push_cb=QCheckBox("自动运行时自动下发到 PLC")
+        self.auto_push_cb=QCheckBox("自动下发 PLC")
         self.auto_push_cb.setToolTip("勾选且处于自动运行时，算出坐标后经已连接的 PLC 直接写轴。逐步执行请在弹窗里确认下发。")
         self.auto_push_cb.toggled.connect(lambda _=False: self._sync_auto_push_policy())
         for b in (self.next_btn,self.auto_btn,self.debug_btn,reset,self.plc_panel_btn,self.plc_manual_btn): controls.addWidget(b)
         controls.addWidget(self.auto_push_cb)
-        controls.addStretch(1); cl.addLayout(controls)
+        controls.addStretch(1); cl.addWidget(tool,0)
 
         self.right_tabs=QTabWidget(); rl.addWidget(self.right_tabs,1)
         self.field_right_panel=self.right_tabs
         device_page=QWidget(); device_layout=QVBoxLayout(device_page); device_layout.setContentsMargins(5,5,5,5); device_layout.setSpacing(7)
         space_page=QWidget(); space_layout=QVBoxLayout(space_page); space_layout.setContentsMargins(5,5,5,5)
 
-        f,l,_=self._collapsible_card("设备 / 单机械臂与挂载相机实时 WORLD 坐标",expanded=True)
-        self.device_table=QTableWidget(0,7); self.device_table.setMinimumHeight(130); self.device_table.setHorizontalHeaderLabels(["设备","类型","父设备","状态","WORLD XYZ","RPY","当前动作"]); self.device_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); self.device_table.horizontalHeader().setStretchLastSection(True); l.addWidget(self.device_table)
+        f,l,_=self._collapsible_card("设备 / 机械臂 WORLD",expanded=True)
+        self.device_table=QTableWidget(0,7); self.device_table.setMinimumHeight(110); self.device_table.setHorizontalHeaderLabels(["设备","类型","父设备","状态","WORLD XYZ","RPY","当前动作"]); self.device_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); self.device_table.horizontalHeader().setStretchLastSection(True); self._tune_table(self.device_table); l.addWidget(self.device_table)
         device_layout.addWidget(f,3)
 
-        f,l,_=self._collapsible_card("空间管理 · 相机几何 · 两列 × 1.2m",expanded=True)
-        self.space_table=QTableWidget(0,7); self.space_table.setHorizontalHeaderLabels(["盲码","板段","列","中心XYZ","支撑块","状态","货物"]); self.space_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); l.addWidget(self.space_table)
+        f,l,_=self._collapsible_card("空间管理 · 两列×1.2m",expanded=True)
+        self.space_table=QTableWidget(0,7); self.space_table.setHorizontalHeaderLabels(["盲码","板段","列","中心XYZ","支撑块","状态","货物"]); self.space_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch); self._tune_table(self.space_table); l.addWidget(self.space_table)
         self.comp=QLabel("补偿：-"); self.comp.setWordWrap(True); l.addWidget(self.comp); space_layout.addWidget(f,1)
 
         f,l,_=self._collapsible_card("并行状态 / 运行消息 / 标定状态",expanded=True)
         self.parallel_label=QLabel("-"); self.parallel_label.setWordWrap(True); l.addWidget(self.parallel_label)
-        self.cal_label=QLabel("-"); self.cal_label.setMaximumHeight(38); self.cal_label.setStyleSheet("color:#9ec8dc"); l.addWidget(self.cal_label)
+        self.cal_label=QLabel("-"); self.cal_label.setMaximumHeight(38); self.cal_label.setObjectName("mutedLabel"); l.addWidget(self.cal_label)
         self.database_label=QLabel("车辆数据库：等待装载会话")
-        self.database_label.setWordWrap(True); self.database_label.setStyleSheet("color:#8fd4b8"); l.addWidget(self.database_label)
-        self.message=QTextEdit(); self.message.setReadOnly(True); self.message.setMinimumHeight(110); l.addWidget(self.message,1)
+        self.database_label.setWordWrap(True); self.database_label.setObjectName("successInfo"); l.addWidget(self.database_label)
+        self.message=QTextEdit(); self.message.setReadOnly(True); self.message.setMinimumHeight(80); l.addWidget(self.message,1)
         device_layout.addWidget(f,2)
         self.right_tabs.addTab(device_page,"设备与消息")
         self.right_tabs.addTab(space_page,"空间与补偿")
 
         module_page=QWidget(); module_layout=QVBoxLayout(module_page); module_layout.setContentsMargins(5,5,5,5); module_layout.setSpacing(7)
         self.module_summary=QLabel("等待流程调用模型/模块；未执行步骤不提前显示")
-        self.module_summary.setWordWrap(True); self.module_summary.setStyleSheet("color:#9fdcff;font-weight:600")
+        self.module_summary.setWordWrap(True); self.module_summary.setObjectName("accentInfo")
         module_layout.addWidget(self.module_summary)
         self.module_table=QTableWidget(0,8)
         self.module_table.setHorizontalHeaderLabels(["阶段","模型/模块","类型","实现/权重","状态","调用","耗时ms","记录"])
         self.module_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.module_table.horizontalHeader().setStretchLastSection(True)
-        self.module_table.setMinimumHeight(150)
+        self.module_table.setMinimumHeight(120)
+        self._tune_table(self.module_table)
         self.module_table.cellClicked.connect(self._show_module_detail)
         module_layout.addWidget(self.module_table,2)
 
         self.current_module_title=QLabel("当前模型/模块：等待流程")
         self.current_module_title.setWordWrap(True)
-        self.current_module_title.setStyleSheet("color:#ffffff;font-size:13px;font-weight:700;background:#102a46;border:1px solid #2a78bd;border-radius:5px;padding:6px")
+        self.current_module_title.setObjectName("moduleBanner")
         module_layout.addWidget(self.current_module_title)
 
         io_splitter=QSplitter(Qt.Orientation.Horizontal); io_splitter.setChildrenCollapsible(False)
         input_card,input_layout,_=self._collapsible_card("本次输入（数据 + 图片）",expanded=True)
         self.module_input_preview=QLabel("该步骤执行后显示输入图片")
+        self.module_input_preview.setObjectName("mediaWell")
         self.module_input_preview.setAlignment(Qt.AlignmentFlag.AlignCenter); self.module_input_preview.setMinimumHeight(125)
-        self.module_input_preview.setStyleSheet("background:#06101d;border:1px solid #244b72;color:#6f8ca5")
         input_layout.addWidget(self.module_input_preview,2)
         self.module_input_data=QTextEdit(); self.module_input_data.setReadOnly(True); self.module_input_data.setMinimumHeight(135)
         self.module_input_data.setPlaceholderText("当前步骤的图像路径、深度图、点云、位姿、参数等输入将显示在这里")
@@ -361,8 +348,8 @@ class MainWindow(QMainWindow):
 
         output_card,output_layout,_=self._collapsible_card("本次输出（数据 + 图片）",expanded=True)
         self.module_output_preview=QLabel("该步骤执行后显示输出图片")
+        self.module_output_preview.setObjectName("mediaWell")
         self.module_output_preview.setAlignment(Qt.AlignmentFlag.AlignCenter); self.module_output_preview.setMinimumHeight(125)
-        self.module_output_preview.setStyleSheet("background:#06101d;border:1px solid #244b72;color:#6f8ca5")
         output_layout.addWidget(self.module_output_preview,2)
         self.module_output_data=QTextEdit(); self.module_output_data.setReadOnly(True); self.module_output_data.setMinimumHeight(135)
         self.module_output_data.setPlaceholderText("当前步骤的识别结果、坐标、判断、耗时和输出文件将显示在这里")
@@ -380,30 +367,28 @@ class MainWindow(QMainWindow):
         self.lab_camera_preview=QLabel("执行后显示：插孔 / 角点 / B区纸箱检测图")
         self.lab_camera_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lab_camera_preview.setMinimumHeight(220)
-        self.lab_camera_preview.setStyleSheet("background:transparent;border:none;border-bottom:1px solid #1f537e;color:#6f8ca5;padding:6px")
         cam_unit_l.addWidget(self.lab_camera_preview,3)
         self.lab_camera_caption=QLabel("等待拍照")
         self.lab_camera_caption.setWordWrap(True)
-        self.lab_camera_caption.setStyleSheet("color:#9ec8dc;background:#0a1828;padding:8px 10px;border:none;border-bottom:1px solid #1f537e")
         cam_unit_l.addWidget(self.lab_camera_caption,0)
         self.lab_camera_history=QComboBox()
         self.lab_camera_history.setToolTip("选择本轮任一次实拍及对应识别标注图")
-        self.lab_camera_history.setStyleSheet("QComboBox{border:none;border-bottom:1px solid #1f537e;border-radius:0;background:#0a1828}")
         self.lab_camera_history.currentIndexChanged.connect(self._on_lab_camera_history_changed)
         cam_unit_l.addWidget(self.lab_camera_history,0)
         self.lab_hole_table=QTableWidget(0,4)
         self.lab_hole_table.setHorizontalHeaderLabels(["点位","X(mm)","Y(mm)","Z(mm)"])
         self.lab_hole_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.lab_hole_table.setMaximumHeight(140)
-        self.lab_hole_table.setStyleSheet("QTableWidget{background:transparent;border:none;border-radius:0}")
+        self.lab_hole_table.setMaximumHeight(120)
+        self._tune_table(self.lab_hole_table)
         cam_unit_l.addWidget(self.lab_hole_table,1)
         cam_l.addWidget(cam_unit,1)
         lab_rl.addWidget(cam_card,3)
 
-        radar_card,radar_l,_=self._collapsible_card("角点 WORLD（相机优先 / 雷达兜底，mm）",expanded=True)
+        radar_card,radar_l,_=self._collapsible_card("角点 WORLD（相机优先 / 雷达兜底）",expanded=True)
         self.lab_radar_table=QTableWidget(0,5)
         self.lab_radar_table.setHorizontalHeaderLabels(["角点","X","Y","Z","来源"])
         self.lab_radar_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._tune_table(self.lab_radar_table)
         radar_l.addWidget(self.lab_radar_table,1)
         lab_rl.addWidget(radar_card,2)
         self.lab_right_panel.setVisible(False)
@@ -1198,17 +1183,25 @@ class MainWindow(QMainWindow):
         if lab and not s.get("first_round"):
             skipped = {1}  # 后续轮跳过设备检查
         running=int(self._running_stage or 0) if self._step_busy else 0
+        light=is_light_theme()
         for (number,title_text),node in zip(stages, nodes):
             if number in skipped:
-                status="SKIP"; bg="#172535"; border="#344b5e"; color="#7990a1"
+                status="SKIP"
+                bg,border,color=("#eceff1","#c5cad3","#90a4ae") if light else ("#172535","#344b5e","#7990a1")
             elif running and number == running:
-                status="RUN"; bg="#0b5794"; border="#61c7ff"; color="#ffffff"
+                status="RUN"
+                bg,border,color=("#1565c0","#0d47a1","#ffffff") if light else ("#0b5794","#61c7ff","#ffffff")
             elif current_stage and number < current_stage:
-                status="DONE"; bg="#123e37"; border="#28a985"; color="#9df0d3"
+                status="DONE"
+                bg,border,color=("#e8f5e9","#43a047","#1b5e20") if light else ("#123e37","#28a985","#9df0d3")
             else:
-                status="WAIT"; bg="#10243a"; border="#294d6d"; color="#8faabd"
-            node.setText(f"{number}. {title_text}\n{status}")
-            node.setStyleSheet(f"background:{bg};border:1px solid {border};border-radius:5px;color:{color};font-size:11px;font-weight:600;padding:3px")
+                status="WAIT"
+                bg,border,color=("#ffffff","#c5cad3","#5c6675") if light else ("#10243a","#294d6d","#8faabd")
+            node.setText(f"{number} {title_text}\n{status}")
+            node.setStyleSheet(
+                f"background:{bg};border:1px solid {border};border-radius:2px;color:{color};"
+                f"font-size:10px;font-weight:600;padding:2px 3px"
+            )
         self._update_step_controls()
 
     def _update_step_controls(self):
@@ -1474,13 +1467,19 @@ class MainWindow(QMainWindow):
                     ok=None; label="未检测"
                 note=str(meta.get("task") or kind)
             if ok is True:
-                color="#3dcea0"; mark="●"
+                color,bg,border=("#1b5e20","#e8f5e9","#66bb6a") if is_light_theme() else ("#3dcea0","#123e37","#28a985")
+                mark="●"
             elif ok is False:
-                color="#ff7b7b"; mark="●"
+                color,bg,border=("#b71c1c","#ffebee","#ef5350") if is_light_theme() else ("#ff7b7b","#3a1a1a","#ff7b7b")
+                mark="●"
             else:
-                color="#8faabd"; mark="○"
+                color,bg,border=("#5c6675","#ffffff","#c5cad3") if is_light_theme() else ("#8faabd","#10243a","#294d6d")
+                mark="○"
             badge=(getattr(self,"device_status_badges",{}) or {}).get(device_id)
             if badge is not None:
                 badge.setText(f"{mark} {titles.get(device_id,device_id)} {label}")
                 badge.setToolTip(note)
-                badge.setStyleSheet(f"color:{color};font-size:12px;font-weight:600;padding:2px 0")
+                badge.setStyleSheet(
+                    f"QLabel#deviceLed{{color:{color};background:{bg};border:1px solid {border};"
+                    f"font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px}}"
+                )
