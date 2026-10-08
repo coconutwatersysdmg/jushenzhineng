@@ -764,7 +764,8 @@ class MainWindow(QMainWindow):
         self._refresh()
 
     def _is_lab_ui(self) -> bool:
-        return str(feature_switches.RUN_PROFILE or "").strip().lower() == "lab"
+        """实验室与真实环境共用循环流程 UI；完全模拟仍用旧 12 步界面。"""
+        return str(feature_switches.RUN_PROFILE or "").strip().lower() in {"lab", "field"}
 
     def _apply_ui_mode(self) -> None:
         lab = self._is_lab_ui()

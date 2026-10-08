@@ -20,10 +20,11 @@ Item {
         var items = st.cargo_inventory || []
         if (cargoModel.count !== items.length) {
             cargoModel.clear()
-            for (var a=0; a<items.length; ++a) cargoModel.append({
+            for (var a=0; a<items.length; ++a)             cargoModel.append({
                 "cargoId":String(items[a].instance_id || a),
                 "xMm":0,"yMm":0,"zMm":0,"yawDeg":0,
                 "lengthMm":1200,"widthMm":1000,"heightMm":900,
+                "stackLayers":1,
                 "cargoStatus":"STAGED","carried":false
             })
         }
@@ -38,6 +39,7 @@ Item {
             cargoModel.setProperty(i,"lengthMm",Math.max(50,Number(c.length_mm || 1200)))
             cargoModel.setProperty(i,"widthMm",Math.max(50,Number(c.width_mm || 1000)))
             cargoModel.setProperty(i,"heightMm",Math.max(50,Number(c.height_mm || 900)))
+            cargoModel.setProperty(i,"stackLayers",Number(c.stack_layers || 1) >= 2 ? 2 : 1)
             cargoModel.setProperty(i,"cargoStatus",String(c.status || "STAGED"))
             cargoModel.setProperty(i,"carried",String(c.attached_to || "") === "PICK_ARM")
         }
@@ -234,9 +236,27 @@ Item {
         z/=pts.length
         return {valid:true,cx:(minX+maxX)/2,cy:(minY+maxY)/2,cz:z,length:Math.max(50,maxY-minY),width:Math.max(50,maxX-minX)}
     }
-    // Decorative truck mesh authored size (metres). Scale factors map measured board → this mesh.
+    // Default flatbed when no board measurement yet (metres).
     property real authoredDeckLengthM: 13.3
     property real authoredDeckWidthM: 2.78
+    function truckSpecExtent() {
+        // Prefer explicit board specs written after step-1 measurement (mm).
+        var t = st.truck || ({})
+        var len = Number(t.length_mm || 0)
+        var wid = Number(t.width_mm || 0)
+        if (!(len > 50 && wid > 50)) return ({valid:false})
+        var pose = t.pose || ({})
+        var cz = Number(t.deck_height_mm || pose.z_mm || 0)
+        return {
+            valid:true,
+            cx:Number(pose.x_mm || 0),
+            cy:Number(pose.y_mm || 0),
+            cz:cz,
+            length:len,
+            width:wid,
+            fromSpecs:true
+        }
+    }
     function measuredBoardExtent() {
         var s=boardSurface(["P1","P2","P3","P4"])
         if (s.valid) return s
@@ -244,7 +264,9 @@ Item {
         if (s6.valid) return s6
         var arr=cornerArray(), pts=[]
         for (var i=0;i<arr.length;++i) pts.push(arr[i])
-        return extentFromPoints(pts)
+        var fromCorners=extentFromPoints(pts)
+        if (fromCorners.valid) return fromCorners
+        return truckSpecExtent()
     }
     function regionExtentMm(r) {
         r = r || ({})
@@ -269,10 +291,30 @@ Item {
         var width=board.valid ? Math.max(50,board.width/2.0) : 1080
         return {valid:true,cx:0,cy:0,cz:0,length:len,width:width}
     }
-    // Re-evaluate when twin state changes (corners / board geometry).
-    property var boardExtent: { var _dep = st; return measuredBoardExtent() }
-    property real deckScaleX: boardExtent && boardExtent.valid ? Math.max(0.15,(boardExtent.length/1000.0)/authoredDeckLengthM) : 1.0
-    property real deckScaleZ: boardExtent && boardExtent.valid ? Math.max(0.15,(boardExtent.width/1000.0)/authoredDeckWidthM) : 1.0
+    // Re-evaluate when twin state changes (corners / board geometry / truck specs).
+    property var boardExtent: {
+        var _dep = st
+        var fromCorners = measuredBoardExtent()
+        if (fromCorners && fromCorners.valid) return fromCorners
+        return truckSpecExtent()
+    }
+    // True deck size in metres — parametric truck is built from these, not stretched.
+    property real deckLengthM: {
+        var _dep = st
+        var ext = boardExtent
+        if (ext && ext.valid) return Math.max(2.0, ext.length / 1000.0)
+        return authoredDeckLengthM
+    }
+    property real deckWidthM: {
+        var _dep = st
+        var ext = boardExtent
+        if (ext && ext.valid) return Math.max(1.2, ext.width / 1000.0)
+        return authoredDeckWidthM
+    }
+    property real deckTopY: 1.28
+    property real sideRailH: 0.78
+    property real deckScaleX: Math.max(0.15, deckLengthM / authoredDeckLengthM)
+    property real deckScaleZ: Math.max(0.15, deckWidthM / authoredDeckWidthM)
     function regionColor(r) {
         var tid=st.truck && st.truck.current_target ? st.truck.current_target.region_id : ""
         var rid=r.region_id || r.blind_code || r.id || ""
@@ -425,60 +467,185 @@ Item {
             }
         }
 
-        // Flatbed: deck scales with measured board; detailed cab stays unstretched.
+        // Parametric flatbed truck: deck built at true measured L×W (metres), cab unstretched.
         Node {
             id: truckNode
             property var tp: root.truckPose
             property bool hasBoard: !!(root.boardExtent && root.boardExtent.valid)
-            position: hasBoard
+            property real deckL: root.deckLengthM
+            property real deckW: root.deckWidthM
+            property real deckY: root.deckTopY
+            property real railY: root.deckTopY + root.sideRailH * 0.5
+            property real halfL: deckL * 0.5
+            property real halfW: deckW * 0.5
+            property real stakeCount: Math.max(4, Math.min(16, Math.round(deckL / 1.05)))
+            property real stakePitch: deckL / Math.max(1, stakeCount)
+            property var axleXs: [
+                -halfL + Math.min(1.1, deckL * 0.12),
+                -halfL + deckL * 0.38,
+                halfL - deckL * 0.28,
+                halfL - Math.min(1.0, deckL * 0.10)
+            ]
+            position: hasBoard && root.boardExtent && !root.boardExtent.fromSpecs
                      ? Qt.vector3d(root.m(root.boardExtent.cx), root.m(root.boardExtent.cz), root.m(root.boardExtent.cy))
                      : root.worldPos(tp)
             eulerRotation.y: 90 - Number(tp.yaw_deg || 0)
 
-            // Deck + chassis + wheels — scale with measured WORLD length/width.
-            Node {
-                id: deckChassis
-                scale: Qt.vector3d(root.deckScaleX, 1.0, root.deckScaleZ)
-                Model { source:"#Cube"; position:Qt.vector3d(0,0.62,0); scale:root.cubeScaleM(12.6,0.34,2.28); materials:PrincipledMaterial{baseColor:"#4b5563";metalness:0.32;roughness:0.58} }
-                Model { source:"#Cube"; position:Qt.vector3d(0,1.28,0); scale:root.cubeScaleM(13.3,0.16,2.78); materials:PrincipledMaterial{baseColor:"#8b939e";metalness:0.18;roughness:0.70;opacity: truckNode.hasBoard ? 0.35 : 0.95} }
-                Model { source:"#Cube"; position:Qt.vector3d(0,1.72,-1.43); scale:root.cubeScaleM(13.3,0.78,0.10); materials:PrincipledMaterial{baseColor:"#8b5745";metalness:0.10;roughness:0.80;opacity: truckNode.hasBoard ? 0.40 : 0.95} }
-                Model { source:"#Cube"; position:Qt.vector3d(0,1.72, 1.43); scale:root.cubeScaleM(13.3,0.78,0.10); materials:PrincipledMaterial{baseColor:"#8b5745";metalness:0.10;roughness:0.80;opacity: truckNode.hasBoard ? 0.40 : 0.95} }
-                Repeater3D {
-                    model: 12
-                    delegate: Model {
-                        required property int index
-                        source:"#Cube"
-                        position:Qt.vector3d(-6.15+0.45+index*1.12,1.72,-1.49)
-                        scale:root.cubeScaleM(0.05,0.70,0.05)
-                        materials:PrincipledMaterial{baseColor:"#b2785d";roughness:0.78;opacity: truckNode.hasBoard ? 0.40 : 0.95}
-                    }
+            // Chassis beam (slightly narrower/shorter than deck).
+            Model {
+                source: "#Cube"
+                position: Qt.vector3d(0, 0.58, 0)
+                scale: root.cubeScaleM(truckNode.deckL * 0.96, 0.32, Math.max(0.9, truckNode.deckW * 0.78))
+                materials: PrincipledMaterial { baseColor: "#3d4650"; metalness: 0.35; roughness: 0.55 }
+            }
+            // Main deck plate — exact board length × width (always solid; no fade).
+            Model {
+                source: "#Cube"
+                position: Qt.vector3d(0, truckNode.deckY, 0)
+                scale: root.cubeScaleM(truckNode.deckL, 0.18, truckNode.deckW)
+                materials: PrincipledMaterial {
+                    baseColor: "#8b939e"
+                    metalness: 0.16
+                    roughness: 0.72
                 }
-                Repeater3D {
-                    model: [ -5.2, -1.5, 2.2, 5.6 ]
-                    delegate: Node {
-                        required property real modelData
-                        Model { source:"#Cylinder"; position:Qt.vector3d(modelData,0.52,-1.26); eulerRotation.x:90; scale:root.cylScaleM(0.94,0.34); materials:PrincipledMaterial{baseColor:"#121619";roughness:0.97} }
-                        Model { source:"#Cylinder"; position:Qt.vector3d(modelData,0.52, 1.26); eulerRotation.x:90; scale:root.cylScaleM(0.94,0.34); materials:PrincipledMaterial{baseColor:"#121619";roughness:0.97} }
-                        Model { source:"#Cylinder"; position:Qt.vector3d(modelData,0.52,-1.44); eulerRotation.x:90; scale:root.cylScaleM(0.38,0.05); materials:PrincipledMaterial{baseColor:"#b3bac0";metalness:0.82;roughness:0.22} }
-                        Model { source:"#Cylinder"; position:Qt.vector3d(modelData,0.52, 1.44); eulerRotation.x:90; scale:root.cylScaleM(0.38,0.05); materials:PrincipledMaterial{baseColor:"#b3bac0";metalness:0.82;roughness:0.22} }
+            }
+            // Deck planks (visual grain along length).
+            Repeater3D {
+                model: Math.max(3, Math.min(10, Math.round(truckNode.deckW / 0.28)))
+                delegate: Model {
+                    required property int index
+                    property int n: Math.max(3, Math.min(10, Math.round(truckNode.deckW / 0.28)))
+                    property real zOff: -truckNode.halfW + truckNode.deckW * ((index + 0.5) / n)
+                    source: "#Cube"
+                    position: Qt.vector3d(0, truckNode.deckY + 0.03, zOff)
+                    scale: root.cubeScaleM(truckNode.deckL * 0.985, 0.05, Math.max(0.08, truckNode.deckW / n - 0.02))
+                    materials: PrincipledMaterial {
+                        baseColor: index % 2 === 0 ? "#9aa3ad" : "#7f8893"
+                        roughness: 0.78
                     }
                 }
             }
-            // Detailed cab — always visible, never non-uniformly stretched with the deck.
+            // Side rails.
+            Model {
+                source: "#Cube"
+                position: Qt.vector3d(0, truckNode.railY, -truckNode.halfW + 0.04)
+                scale: root.cubeScaleM(truckNode.deckL, root.sideRailH, 0.08)
+                materials: PrincipledMaterial {
+                    baseColor: "#8b5745"; metalness: 0.08; roughness: 0.82
+                }
+            }
+            Model {
+                source: "#Cube"
+                position: Qt.vector3d(0, truckNode.railY, truckNode.halfW - 0.04)
+                scale: root.cubeScaleM(truckNode.deckL, root.sideRailH, 0.08)
+                materials: PrincipledMaterial {
+                    baseColor: "#8b5745"; metalness: 0.08; roughness: 0.82
+                }
+            }
+            // Tail / head end rails.
+            Model {
+                source: "#Cube"
+                position: Qt.vector3d(-truckNode.halfL + 0.04, truckNode.railY, 0)
+                scale: root.cubeScaleM(0.08, root.sideRailH, truckNode.deckW * 0.96)
+                materials: PrincipledMaterial {
+                    baseColor: "#7a4c3c"; roughness: 0.80
+                }
+            }
+            Model {
+                source: "#Cube"
+                position: Qt.vector3d(truckNode.halfL - 0.04, truckNode.railY, 0)
+                scale: root.cubeScaleM(0.08, root.sideRailH, truckNode.deckW * 0.96)
+                materials: PrincipledMaterial {
+                    baseColor: "#7a4c3c"; roughness: 0.80
+                }
+            }
+            // Stake posts along both rails.
+            Repeater3D {
+                model: Math.round(truckNode.stakeCount)
+                delegate: Node {
+                    required property int index
+                    property real xPos: -truckNode.halfL + (index + 0.5) * truckNode.stakePitch
+                    Model {
+                        source: "#Cube"
+                        position: Qt.vector3d(xPos, truckNode.railY, -truckNode.halfW + 0.01)
+                        scale: root.cubeScaleM(0.05, root.sideRailH * 0.92, 0.05)
+                        materials: PrincipledMaterial {
+                            baseColor: "#b2785d"; roughness: 0.78
+                        }
+                    }
+                    Model {
+                        source: "#Cube"
+                        position: Qt.vector3d(xPos, truckNode.railY, truckNode.halfW - 0.01)
+                        scale: root.cubeScaleM(0.05, root.sideRailH * 0.92, 0.05)
+                        materials: PrincipledMaterial {
+                            baseColor: "#b2785d"; roughness: 0.78
+                        }
+                    }
+                }
+            }
+            // Axles + wheels — positions follow deck length; track follows width.
+            Repeater3D {
+                model: 4
+                delegate: Node {
+                    required property int index
+                    property real axleX: truckNode.axleXs[index]
+                    property real track: truckNode.halfW * 0.88
+                    Model {
+                        source: "#Cylinder"
+                        position: Qt.vector3d(axleX, 0.48, 0)
+                        eulerRotation.x: 90
+                        scale: root.cylScaleM(0.12, truckNode.deckW * 0.92)
+                        materials: PrincipledMaterial { baseColor: "#2a3036"; metalness: 0.55; roughness: 0.40 }
+                    }
+                    Model {
+                        source: "#Cylinder"
+                        position: Qt.vector3d(axleX, 0.48, -track)
+                        eulerRotation.x: 90
+                        scale: root.cylScaleM(0.92, 0.32)
+                        materials: PrincipledMaterial { baseColor: "#121619"; roughness: 0.97 }
+                    }
+                    Model {
+                        source: "#Cylinder"
+                        position: Qt.vector3d(axleX, 0.48, track)
+                        eulerRotation.x: 90
+                        scale: root.cylScaleM(0.92, 0.32)
+                        materials: PrincipledMaterial { baseColor: "#121619"; roughness: 0.97 }
+                    }
+                    Model {
+                        source: "#Cylinder"
+                        position: Qt.vector3d(axleX, 0.48, -track - 0.16)
+                        eulerRotation.x: 90
+                        scale: root.cylScaleM(0.36, 0.05)
+                        materials: PrincipledMaterial { baseColor: "#b3bac0"; metalness: 0.82; roughness: 0.22 }
+                    }
+                    Model {
+                        source: "#Cylinder"
+                        position: Qt.vector3d(axleX, 0.48, track + 0.16)
+                        eulerRotation.x: 90
+                        scale: root.cylScaleM(0.36, 0.05)
+                        materials: PrincipledMaterial { baseColor: "#b3bac0"; metalness: 0.82; roughness: 0.22 }
+                    }
+                }
+            }
+
+            // Cab — fixed size, parked at the head of the measured deck.
             Node {
                 id: cabDecor
-                position: Qt.vector3d(-root.authoredDeckLengthM*0.5*root.deckScaleX - 1.55, 0, 0)
-                Model { source:"#Cube"; position:Qt.vector3d(0,1.55,0); scale:root.cubeScaleM(2.65,2.75,2.58); materials:PrincipledMaterial{baseColor:"#c93443";metalness:0.22;roughness:0.40} }
-                Model { source:"#Cube"; position:Qt.vector3d(0.12,3.00,0); scale:root.cubeScaleM(2.30,0.22,2.45); materials:PrincipledMaterial{baseColor:"#b52a38";metalness:0.20;roughness:0.42} }
-                Model { source:"#Cube"; position:Qt.vector3d(1.36,2.12,0); scale:root.cubeScaleM(0.035,1.05,2.10); materials:PrincipledMaterial{baseColor:"#7fc4d8";opacity:0.78;roughness:0.16} }
-                Model { source:"#Cube"; position:Qt.vector3d(0.20,2.15,-1.305); scale:root.cubeScaleM(1.20,0.85,0.03); materials:PrincipledMaterial{baseColor:"#81c4d8";opacity:0.78;roughness:0.16} }
-                Model { source:"#Cube"; position:Qt.vector3d(0.20,2.15, 1.305); scale:root.cubeScaleM(1.20,0.85,0.03); materials:PrincipledMaterial{baseColor:"#81c4d8";opacity:0.78;roughness:0.16} }
-                Model { source:"#Cube"; position:Qt.vector3d(-1.38,0.66,0); scale:root.cubeScaleM(0.18,0.28,2.52); materials:PrincipledMaterial{baseColor:"#c8ccd0";metalness:0.72;roughness:0.28} }
+                position: Qt.vector3d(-truckNode.halfL - 1.55, 0, 0)
+                Model { source:"#Cube"; position:Qt.vector3d(0,1.55,0); scale:root.cubeScaleM(2.65,2.75,Math.min(2.58, truckNode.deckW*0.95)); materials:PrincipledMaterial{baseColor:"#c93443";metalness:0.22;roughness:0.40} }
+                Model { source:"#Cube"; position:Qt.vector3d(0.12,3.00,0); scale:root.cubeScaleM(2.30,0.22,Math.min(2.45, truckNode.deckW*0.90)); materials:PrincipledMaterial{baseColor:"#b52a38";metalness:0.20;roughness:0.42} }
+                Model { source:"#Cube"; position:Qt.vector3d(1.36,2.12,0); scale:root.cubeScaleM(0.035,1.05,Math.min(2.10, truckNode.deckW*0.82)); materials:PrincipledMaterial{baseColor:"#7fc4d8";opacity:0.78;roughness:0.16} }
+                Model { source:"#Cube"; position:Qt.vector3d(0.20,2.15,-Math.min(1.30, truckNode.halfW*0.95)); scale:root.cubeScaleM(1.20,0.85,0.03); materials:PrincipledMaterial{baseColor:"#81c4d8";opacity:0.78;roughness:0.16} }
+                Model { source:"#Cube"; position:Qt.vector3d(0.20,2.15, Math.min(1.30, truckNode.halfW*0.95)); scale:root.cubeScaleM(1.20,0.85,0.03); materials:PrincipledMaterial{baseColor:"#81c4d8";opacity:0.78;roughness:0.16} }
+                Model { source:"#Cube"; position:Qt.vector3d(-1.38,0.66,0); scale:root.cubeScaleM(0.18,0.28,Math.min(2.52, truckNode.deckW*0.92)); materials:PrincipledMaterial{baseColor:"#c8ccd0";metalness:0.72;roughness:0.28} }
                 Model { source:"#Cube"; position:Qt.vector3d(-1.35,1.22,0); scale:root.cubeScaleM(0.05,0.58,1.20); materials:PrincipledMaterial{baseColor:"#24292e";metalness:0.30;roughness:0.52} }
                 Model { source:"#Sphere"; position:Qt.vector3d(-1.40,1.18,-0.92); scale:root.sphereScaleM(0.20); materials:PrincipledMaterial{baseColor:"#ffe7a8";emissiveFactor:Qt.vector3d(0.55,0.38,0.12)} }
                 Model { source:"#Sphere"; position:Qt.vector3d(-1.40,1.18, 0.92); scale:root.sphereScaleM(0.20); materials:PrincipledMaterial{baseColor:"#ffe7a8";emissiveFactor:Qt.vector3d(0.55,0.38,0.12)} }
-                Model { source:"#Cube"; position:Qt.vector3d(0.45,2.35,-1.55); scale:root.cubeScaleM(0.28,0.42,0.12); materials:PrincipledMaterial{baseColor:"#20252a";metalness:0.25} }
-                Model { source:"#Cube"; position:Qt.vector3d(0.45,2.35, 1.55); scale:root.cubeScaleM(0.28,0.42,0.12); materials:PrincipledMaterial{baseColor:"#20252a";metalness:0.25} }
+                Model { source:"#Cube"; position:Qt.vector3d(0.45,2.35,-Math.min(1.55, truckNode.halfW+0.25)); scale:root.cubeScaleM(0.28,0.42,0.12); materials:PrincipledMaterial{baseColor:"#20252a";metalness:0.25} }
+                Model { source:"#Cube"; position:Qt.vector3d(0.45,2.35, Math.min(1.55, truckNode.halfW+0.25)); scale:root.cubeScaleM(0.28,0.42,0.12); materials:PrincipledMaterial{baseColor:"#20252a";metalness:0.25} }
+                // Front bumper wheels under cab.
+                Model { source:"#Cylinder"; position:Qt.vector3d(0.35,0.48,-1.05); eulerRotation.x:90; scale:root.cylScaleM(0.88,0.30); materials:PrincipledMaterial{baseColor:"#121619";roughness:0.97} }
+                Model { source:"#Cylinder"; position:Qt.vector3d(0.35,0.48, 1.05); eulerRotation.x:90; scale:root.cylScaleM(0.88,0.30); materials:PrincipledMaterial{baseColor:"#121619";roughness:0.97} }
             }
         }
 
@@ -588,6 +755,7 @@ Item {
                 required property real lengthMm
                 required property real widthMm
                 required property real heightMm
+                required property int stackLayers
                 required property string cargoStatus
                 required property bool carried
                 position: Qt.vector3d(root.m(xMm),root.m(zMm),root.m(yMm))
@@ -596,19 +764,146 @@ Item {
                 Behavior on y { NumberAnimation{duration:420;easing.type:Easing.InOutCubic} }
                 Behavior on z { NumberAnimation{duration:420;easing.type:Easing.InOutCubic} }
 
-                property color palletColor: carried ? "#32b8d8" : (cargoStatus === "PLACED" ? "#3a916f" : "#4f86ba")
-                property color crateColor: carried ? "#f3a84f" : (cargoStatus === "PLACED" ? "#a8c9af" : "#e4e7e5")
-                property color bandColor: carried ? "#ffe0a0" : (cargoStatus === "PLACED" ? "#d0e0d2" : "#c9cfce")
+                property color woodDark: carried ? "#2f6f86" : (cargoStatus === "PLACED" ? "#3a6b52" : "#6b4a2e")
+                property color woodMid: carried ? "#3a8fa8" : (cargoStatus === "PLACED" ? "#4a8666" : "#8b6239")
+                property color woodLight: carried ? "#4aa8c0" : (cargoStatus === "PLACED" ? "#5a9a78" : "#a67848")
+                property color crateColor: carried ? "#f3a84f" : (cargoStatus === "PLACED" ? "#a8c9af" : "#e8ebe6")
+                property color crateEdge: carried ? "#d4893a" : (cargoStatus === "PLACED" ? "#7fa18a" : "#c5cac2")
+                property color bandColor: carried ? "#ffe0a0" : (cargoStatus === "PLACED" ? "#d0e0d2" : "#b9c0be")
+                // Pallet base ~145 mm; cargo heightMm is the load above the deck.
+                property real baseH: 0.145
+                property real midDeckH: stackLayers >= 2 ? 0.05 : 0
+                property real layerGapMm: stackLayers >= 2 ? 50 : 0
+                property real usableH: Math.max(80, heightMm)
+                property real layerH: stackLayers >= 2 ? Math.max(80, (usableH - layerGapMm) / 2.0) : usableH
+                property real halfL: root.m(lengthMm) * 0.5
+                property real halfW: root.m(widthMm) * 0.5
+                property real blockW: Math.max(0.08, root.m(widthMm) * 0.12)
+                property real topY1: baseH + root.m(layerH)
+                property real midY: topY1 + root.m(layerGapMm) * 0.5
+                property real topY2: midY + midDeckH + root.m(layerH)
 
-                Model { source:"#Cube"; position:Qt.vector3d(0,0.06,-root.m(cargoNode.widthMm)*0.36); scale:root.cubeScaleMm(cargoNode.lengthMm,120,120); materials:PrincipledMaterial{baseColor:"#366da1";roughness:0.72} }
-                Model { source:"#Cube"; position:Qt.vector3d(0,0.06,0); scale:root.cubeScaleMm(cargoNode.lengthMm,120,120); materials:PrincipledMaterial{baseColor:"#366da1";roughness:0.72} }
-                Model { source:"#Cube"; position:Qt.vector3d(0,0.06, root.m(cargoNode.widthMm)*0.36); scale:root.cubeScaleMm(cargoNode.lengthMm,120,120); materials:PrincipledMaterial{baseColor:"#366da1";roughness:0.72} }
-                Model { source:"#Cube"; position:Qt.vector3d(0,0.145,0); scale:root.cubeScaleMm(cargoNode.lengthMm,70,cargoNode.widthMm); materials:PrincipledMaterial{baseColor:cargoNode.palletColor;roughness:0.66} }
-                Model { source:"#Cube"; position:Qt.vector3d(0,0.18+root.m(cargoNode.heightMm)/2,0); scale:root.cubeScaleMm(cargoNode.lengthMm,cargoNode.heightMm,cargoNode.widthMm); materials:PrincipledMaterial{baseColor:cargoNode.crateColor;metalness:0.04;roughness:0.56} }
-                Model { source:"#Cube"; position:Qt.vector3d(0,0.18+root.m(cargoNode.heightMm)*0.18,0); scale:root.cubeScaleMm(cargoNode.lengthMm+30,55,cargoNode.widthMm+30); materials:PrincipledMaterial{baseColor:cargoNode.bandColor;metalness:0.08;roughness:0.52} }
-                Model { source:"#Cube"; position:Qt.vector3d(0,0.18+root.m(cargoNode.heightMm)*0.82,0); scale:root.cubeScaleMm(cargoNode.lengthMm+30,55,cargoNode.widthMm+30); materials:PrincipledMaterial{baseColor:cargoNode.bandColor;metalness:0.08;roughness:0.52} }
-                Model { source:"#Cube"; position:Qt.vector3d(0.24,0.07,-root.m(cargoNode.widthMm)/2-0.01); scale:root.cubeScaleM(0.23,0.10,0.02); materials:PrincipledMaterial{baseColor:"#252a2d"} }
-                Model { source:"#Cube"; position:Qt.vector3d(-0.24,0.07,-root.m(cargoNode.widthMm)/2-0.01); scale:root.cubeScaleM(0.23,0.10,0.02); materials:PrincipledMaterial{baseColor:"#252a2d"} }
+                // --- Wood pallet base (stringers + deck boards + fork openings) ---
+                Model { // left stringer
+                    source:"#Cube"; position:Qt.vector3d(0,0.055,-halfW+blockW*0.55)
+                    scale:root.cubeScaleMm(lengthMm,110,blockW*1000)
+                    materials:PrincipledMaterial{baseColor:woodDark;roughness:0.85}
+                }
+                Model { // center stringer
+                    source:"#Cube"; position:Qt.vector3d(0,0.055,0)
+                    scale:root.cubeScaleMm(lengthMm,110,blockW*1000)
+                    materials:PrincipledMaterial{baseColor:woodDark;roughness:0.85}
+                }
+                Model { // right stringer
+                    source:"#Cube"; position:Qt.vector3d(0,0.055,halfW-blockW*0.55)
+                    scale:root.cubeScaleMm(lengthMm,110,blockW*1000)
+                    materials:PrincipledMaterial{baseColor:woodDark;roughness:0.85}
+                }
+                // End blocks (create visible fork pockets).
+                Repeater3D {
+                    model: 3
+                    delegate: Node {
+                        required property int index
+                        property real zPos: index === 0 ? -cargoNode.halfW+cargoNode.blockW*0.55 : (index === 1 ? 0 : cargoNode.halfW-cargoNode.blockW*0.55)
+                        Model {
+                            source:"#Cube"
+                            position:Qt.vector3d(-cargoNode.halfL+root.m(90),0.05,zPos)
+                            scale:root.cubeScaleMm(100,100,cargoNode.blockW*1000)
+                            materials:PrincipledMaterial{baseColor:cargoNode.woodMid;roughness:0.82}
+                        }
+                        Model {
+                            source:"#Cube"
+                            position:Qt.vector3d(cargoNode.halfL-root.m(90),0.05,zPos)
+                            scale:root.cubeScaleMm(100,100,cargoNode.blockW*1000)
+                            materials:PrincipledMaterial{baseColor:cargoNode.woodMid;roughness:0.82}
+                        }
+                    }
+                }
+                // Top deck boards across width.
+                Repeater3D {
+                    model: Math.max(5, Math.min(11, Math.round(lengthMm / 140)))
+                    delegate: Model {
+                        required property int index
+                        property int n: Math.max(5, Math.min(11, Math.round(cargoNode.lengthMm / 140)))
+                        property real xOff: -cargoNode.halfL + root.m(cargoNode.lengthMm) * ((index + 0.5) / n)
+                        source:"#Cube"
+                        position:Qt.vector3d(xOff, cargoNode.baseH - 0.02, 0)
+                        scale:root.cubeScaleMm(Math.max(60, cargoNode.lengthMm / n - 12), 40, cargoNode.widthMm)
+                        materials:PrincipledMaterial{
+                            baseColor: index % 2 === 0 ? cargoNode.woodLight : cargoNode.woodMid
+                            roughness: 0.80
+                        }
+                    }
+                }
+                // Fork entry markers on the near face.
+                Model {
+                    source:"#Cube"
+                    position:Qt.vector3d(-halfL*0.25, 0.05, -halfW - 0.005)
+                    scale:root.cubeScaleM(0.22, 0.08, 0.015)
+                    materials:PrincipledMaterial{baseColor:"#1f2428";roughness:0.6}
+                }
+                Model {
+                    source:"#Cube"
+                    position:Qt.vector3d(halfL*0.25, 0.05, -halfW - 0.005)
+                    scale:root.cubeScaleM(0.22, 0.08, 0.015)
+                    materials:PrincipledMaterial{baseColor:"#1f2428";roughness:0.6}
+                }
+
+                // --- Cargo layer 1 (single-layer = full height) ---
+                Model {
+                    source:"#Cube"
+                    position:Qt.vector3d(0, baseH + root.m(layerH)*0.5, 0)
+                    scale:root.cubeScaleMm(lengthMm*0.96, layerH, widthMm*0.96)
+                    materials:PrincipledMaterial{baseColor:crateColor;metalness:0.03;roughness:0.58}
+                }
+                Model { // vertical edge trim
+                    source:"#Cube"
+                    position:Qt.vector3d(0, baseH + root.m(layerH)*0.5, 0)
+                    scale:root.cubeScaleMm(lengthMm*0.98, Math.max(40, layerH*0.08), widthMm*0.98)
+                    materials:PrincipledMaterial{baseColor:crateEdge;roughness:0.50}
+                }
+                Model {
+                    source:"#Cube"
+                    position:Qt.vector3d(0, baseH + root.m(layerH)*0.18, 0)
+                    scale:root.cubeScaleMm(lengthMm+20, 45, widthMm+20)
+                    materials:PrincipledMaterial{baseColor:bandColor;metalness:0.06;roughness:0.48}
+                }
+                Model {
+                    source:"#Cube"
+                    position:Qt.vector3d(0, baseH + root.m(layerH)*0.82, 0)
+                    scale:root.cubeScaleMm(lengthMm+20, 45, widthMm+20)
+                    materials:PrincipledMaterial{baseColor:bandColor;metalness:0.06;roughness:0.48}
+                }
+
+                // --- Two-layer intermediate deck + layer 2 (物品2) ---
+                Model {
+                    visible: stackLayers >= 2
+                    source:"#Cube"
+                    position:Qt.vector3d(0, midY, 0)
+                    scale:root.cubeScaleMm(lengthMm+30, 45, widthMm+30)
+                    materials:PrincipledMaterial{baseColor:woodMid;roughness:0.78}
+                }
+                Model {
+                    visible: stackLayers >= 2
+                    source:"#Cube"
+                    position:Qt.vector3d(0, midY + midDeckH + root.m(layerH)*0.5, 0)
+                    scale:root.cubeScaleMm(lengthMm*0.96, layerH, widthMm*0.96)
+                    materials:PrincipledMaterial{baseColor:crateColor;metalness:0.03;roughness:0.58}
+                }
+                Model {
+                    visible: stackLayers >= 2
+                    source:"#Cube"
+                    position:Qt.vector3d(0, midY + midDeckH + root.m(layerH)*0.18, 0)
+                    scale:root.cubeScaleMm(lengthMm+20, 45, widthMm+20)
+                    materials:PrincipledMaterial{baseColor:bandColor;metalness:0.06;roughness:0.48}
+                }
+                Model {
+                    visible: stackLayers >= 2
+                    source:"#Cube"
+                    position:Qt.vector3d(0, midY + midDeckH + root.m(layerH)*0.82, 0)
+                    scale:root.cubeScaleMm(lengthMm+20, 45, widthMm+20)
+                    materials:PrincipledMaterial{baseColor:bandColor;metalness:0.06;roughness:0.48}
+                }
             }
         }
 

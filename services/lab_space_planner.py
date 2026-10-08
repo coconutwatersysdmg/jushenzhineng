@@ -140,15 +140,20 @@ def build_lab_space_plan(
     *,
     board_geometry: CameraBoardGeometryService | None = None,
     space_manager: SpaceManager | None = None,
+    require_camera_source: bool = True,
 ) -> dict[str, Any]:
-    """把实验室最终 WORLD 角点划分为区域，但不生成 UI 专用显示数据。"""
+    """把最终 WORLD 角点划分为区域，但不生成 UI 专用显示数据。
+
+    require_camera_source=True（实验室默认）：角点必须来自相机 YOLO。
+    require_camera_source=False（真实环境循环、雷达兜底）：允许非相机角点划格。
+    """
     ids = [str(value) for value in corner_ids]
     non_camera = [
         point_id
         for point_id in ids
         if str((final_world_points.get(point_id) or {}).get("source") or "") != "camera_yolo"
     ]
-    if non_camera:
+    if require_camera_source and non_camera:
         raise RuntimeError(
             "相机最终 WORLD 四角不完整，禁止用雷达粗角点划格：" + ", ".join(non_camera)
         )
@@ -165,7 +170,10 @@ def build_lab_space_plan(
     geometry["lab_grid_source"] = "final_world_corners"
     geometry["row_length_mm"] = equal_row_length_mm
     geometry["remaining_length_mm"] = 0.0
-    geometry["message"] = "实验室相机最终 WORLD 四角已动态等分为两列×五排"
+    if require_camera_source:
+        geometry["message"] = "实验室相机最终 WORLD 四角已动态等分为两列×五排"
+    else:
+        geometry["message"] = "WORLD 角点已动态等分为两列×五排（允许非相机源）"
     geometry = _relabel_lab_regions_from_p1_p2(geometry)
     space = manager.initialize_from_camera_geometry(geometry)
     loading_order = [region["region_id"] for region in lab_b_regions(space)]
@@ -177,7 +185,7 @@ def build_lab_space_plan(
         "loading_column": "B",
         "ui_display": False,
         "message": (
-            f"实验室后台划格完成：{geometry.get('board_mode')}，"
+            f"后台划格完成：{geometry.get('board_mode')}，"
             f"生成 {len(space.get('regions') or [])} 个区域；装货顺序 "
             + " → ".join(loading_order)
         ),

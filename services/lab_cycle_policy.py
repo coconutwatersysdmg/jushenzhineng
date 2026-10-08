@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""实验室模式装货循环的步骤定义。"""
+"""装货循环步骤定义（实验室 / 真实环境共用；算法由 feature_switches 区分）。"""
 from __future__ import annotations
 
 
@@ -21,4 +21,9 @@ LAB_REPEAT_STEPS = (
 
 
 def lab_steps_for_round(round_index: int):
+    """兼容旧名：实验室与真实环境循环共用同一套步骤。"""
+    return cycle_steps_for_round(round_index)
+
+
+def cycle_steps_for_round(round_index: int):
     return LAB_FIRST_STEPS if int(round_index) == 0 else LAB_REPEAT_STEPS

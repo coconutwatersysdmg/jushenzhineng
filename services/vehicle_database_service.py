@@ -289,6 +289,35 @@ class VehicleDatabaseService:
                 (session_id,int(round_no),geometry.get("board_mode"),geometry.get("decision_source"),_json(truck.get("corners") or {}),_json(geometry),_now()),
             )
 
+    def update_vehicle_board_specs(self,session_id: str,specs: Mapping[str,Any]):
+        """把测得的车板长/宽/高写回当前会话关联的 vehicle 行。"""
+        if not session_id or not specs:
+            return
+        length=specs.get("length_mm"); width=specs.get("width_mm"); deck=specs.get("deck_height_mm")
+        try:
+            length=None if length is None else float(length)
+            width=None if width is None else float(width)
+            deck=None if deck is None else float(deck)
+        except (TypeError,ValueError):
+            return
+        if length is None and width is None and deck is None:
+            return
+        now=_now()
+        with self._lock,self._conn:
+            row=self._conn.execute("SELECT truck_id FROM loading_session WHERE session_id=?",(session_id,)).fetchone()
+            if not row:
+                return
+            truck_id=str(row[0])
+            self._conn.execute(
+                """UPDATE vehicle SET
+                   length_mm=COALESCE(?,length_mm),
+                   width_mm=COALESCE(?,width_mm),
+                   deck_height_mm=COALESCE(?,deck_height_mm),
+                   updated_at=?
+                   WHERE truck_id=?""",
+                (length,width,deck,now,truck_id),
+            )
+
     def record_step(self,session_id: str,record: Mapping[str,Any]):
         if not session_id: return
         with self._lock,self._conn:

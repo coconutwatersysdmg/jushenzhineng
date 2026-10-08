@@ -59,6 +59,10 @@ class DigitalTwinState:
                 "truck": {
                     "truck_id": "TRUCK-01",
                     "pose": Pose6D(0, 9000, 0, 0, 0, 0).to_dict(),
+                    # 车板规格（mm）；第一步测得后写入，孪生据此缩放卡车，不单等角点 AABB。
+                    "length_mm": None,
+                    "width_mm": None,
+                    "deck_height_mm": None,
                     "board_mode": "UNKNOWN",
                     "corners": {},
                     "regions": [],

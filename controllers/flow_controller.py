@@ -24,7 +24,13 @@ from services.lab_space_planner import (
 from services.lab_cycle_policy import (
     LAB_FIRST_STEPS as LAB_POLICY_FIRST_STEPS,
     LAB_REPEAT_STEPS as LAB_POLICY_REPEAT_STEPS,
-    lab_steps_for_round,
+    cycle_steps_for_round,
+)
+from services.board_spec_utils import (
+    board_extent_from_corners,
+    board_extent_from_geometry,
+    merge_board_specs,
+    resolve_pallet_specs,
 )
 from services.lab_dynamic_box_monitor_service import LabDynamicBoxMonitorService
 from services.sensor_calibration_service import SensorCalibrationService
@@ -101,6 +107,11 @@ class FlowController:
     @staticmethod
     def is_lab_profile() -> bool:
         return str(feature_switches.RUN_PROFILE or "").strip().lower() == "lab"
+
+    @staticmethod
+    def uses_coord_cycle_flow() -> bool:
+        """实验室与真实环境共用「感知→划格→确认→校验」循环；完全模拟仍用旧 12 步链。"""
+        return str(feature_switches.RUN_PROFILE or "").strip().lower() in {"lab", "field"}
 
     def __init__(self, twin=None, plc=None, robot=None, radar=None, camera=None, algorithms=None):
         self.device_config = get_device_layout_config()
@@ -251,9 +262,9 @@ class FlowController:
         speed = float(cmd.get("speed") or (GANTRY or {}).get("default_speed") or 30.0)
         timeout_s = float((GANTRY or {}).get("move_timeout_s") or 60.0)
         soft_limits = dict((GANTRY or {}).get("soft_limits") or {})
-        # 实验室所有自动运动只允许 X/Y；Z 与 R 由现场在启动前手动设定后保持不动。
-        # 现场模式仍按原有 hold_r_axis 规则运行。
-        if self.is_lab_profile():
+        # 循环流程（实验室/真实）自动运动只允许 X/Y；Z/R 现场保持。
+        # 完全模拟仍按原有 hold_r_axis 规则运行。
+        if self.uses_coord_cycle_flow():
             axes = ("X", "Y")
         else:
             axes = ("X", "Y", "Z") if bool(getattr(plc, "hold_r_axis", (GANTRY or {}).get("hold_r_axis", False))) else ("X", "Y", "Z", "R")
@@ -392,12 +403,12 @@ class FlowController:
     def is_first_round(self): return self.round_index == 0
     @property
     def steps(self):
-        if self.is_lab_profile():
-            return list(lab_steps_for_round(self.round_index))
+        if self.uses_coord_cycle_flow():
+            return list(cycle_steps_for_round(self.round_index))
         return self.FIRST_STEPS if self.is_first_round else self.REPEAT_STEPS
     @property
     def current_step(self):
-        done_msg = "实验室本轮/全部完成" if self.is_lab_profile() else "全部货物装载完成"
+        done_msg = "本轮/全部完成" if self.uses_coord_cycle_flow() else "全部货物装载完成"
         if self.finished:
             return ("DONE", done_msg)
         if self.step_index >= len(self.steps):
@@ -415,6 +426,9 @@ class FlowController:
                 c["instance_id"]=f"{c.get('cargo_code','CARGO')}-{unit:03d}-{seq:03d}"
                 inventory_base=c.get("inventory_id") or c.get("stock_id")
                 c["inventory_id"]=str(f"{inventory_base}-{unit:03d}" if inventory_base and qty>1 else (inventory_base or f"STOCK-{uuid4().hex[:12].upper()}"))
+                # 托盘规格：计划/默认值；视觉读入后走 resolve_pallet_specs 的 measured 分支。
+                specs = resolve_pallet_specs(c)
+                c.update(specs)
                 self.queue.append(c)
         # All task cargo exists from the initial scene. Pickup and the one-pass
         # camera route start at the left tail. Target-side selection begins only
@@ -583,14 +597,61 @@ class FlowController:
         c=deepcopy(next((item for item in inventory if item.get("instance_id")==cargo_id),self.current_cargo or {}))
         c["status"]="CURRENT"; self.twin.set_cargo(c); self.twin.set_phase(self.current_step[1],self.round_index+1)
 
+    def _apply_board_specs(self, *, corners=None, geometry=None, radar_result=None, source: str = "") -> dict[str, float]:
+        """车板规格 → 孪生卡车尺寸 + vehicle 表；角点未齐时也可先用雷达/几何尺寸驱动缩放。"""
+        radar_specs = {}
+        if isinstance(radar_result, Mapping):
+            ref = radar_result.get("radar_raw_board_analysis_reference_only") or {}
+            radar_specs = merge_board_specs(
+                {
+                    "length_mm": radar_result.get("length_mm") or ref.get("length_mm"),
+                    "width_mm": radar_result.get("width_mm") or ref.get("width_mm"),
+                }
+            )
+        truck = (self.twin.snapshot().get("truck") or {})
+        specs = merge_board_specs(
+            {
+                "length_mm": truck.get("length_mm"),
+                "width_mm": truck.get("width_mm"),
+                "deck_height_mm": truck.get("deck_height_mm"),
+            },
+            radar_specs,
+            board_extent_from_geometry(geometry),
+            board_extent_from_corners(corners if corners is not None else truck.get("corners")),
+        )
+        if not specs:
+            return {}
+        patch = dict(specs)
+        if source:
+            patch["board_specs_source"] = source
+        self.twin.update_truck(**patch)
+        if self.loading_session_id:
+            self.vehicle_db.update_vehicle_board_specs(self.loading_session_id, specs)
+        return specs
+
     def _record(self, code, name, status, message, data=None):
         rec={"time":datetime.now().isoformat(timespec="seconds"),"round":self.round_index+1,"step_code":code,"step_name":name,"status":status,"cargo_id":(self.current_cargo or {}).get("instance_id"),"message":str(message),"data":deepcopy(data)}
         self.results.append(rec); self.twin.add_result(rec); self.twin.add_message(code,status.upper(),message,data)
         if self.loading_session_id:
             self.vehicle_db.record_step(self.loading_session_id,rec)
             twin=self.twin.snapshot()
-            if code=="INITIAL_SPACE_PLAN" and isinstance(data,Mapping):
-                self.vehicle_db.record_board_snapshot(self.loading_session_id,self.round_index+1,twin.get("truck") or {},data.get("geometry") or {})
+            board_codes = {"INITIAL_SPACE_PLAN", "LAB_CORNER_SHELL", "LAB_SENSE"}
+            if code in board_codes and isinstance(data, Mapping) and status in {"success", "warning"}:
+                geometry = data.get("geometry") or (data.get("lab_space_plan") or {}).get("geometry") or {}
+                if not geometry and code == "LAB_SENSE":
+                    geometry = {
+                        "decision_source": "lab_radar_coarse",
+                        "board_mode": (twin.get("truck") or {}).get("board_mode"),
+                        "length_mm": (twin.get("truck") or {}).get("length_mm"),
+                        "width_mm": (twin.get("truck") or {}).get("width_mm"),
+                    }
+                if geometry or (twin.get("truck") or {}).get("corners"):
+                    self.vehicle_db.record_board_snapshot(
+                        self.loading_session_id,
+                        self.round_index + 1,
+                        twin.get("truck") or {},
+                        geometry if isinstance(geometry, Mapping) else {},
+                    )
             if code=="PLACE" and status=="success" and isinstance(data,Mapping):
                 self.vehicle_db.record_placement(self.loading_session_id,self.round_index+1,rec.get("cargo_id") or "",data)
             self._persist_database_snapshot(twin)
@@ -1149,27 +1210,42 @@ class FlowController:
                     },
                 )
                 self.truck_initialized = True
+                self._apply_board_specs(corners=corners, radar_result=radar, source="radar_coarse")
 
         pick_ok = bool(pick.get("success"))
         radar_ok = bool(radar.get("success"))
         summary = {
             "success": pick_ok and radar_ok,
             "continue_anyway": False,
-            "lab_mode": True,
+            "lab_mode": self.is_lab_profile(),
+            "cycle_flow": True,
             "pick": "SUCCESS" if pick_ok else "FAILED",
             "radar": "SUCCESS" if radar_ok else "FAILED",
             "radar_skipped": bool(radar.get("skipped")) or (not need_radar),
             "pick_result": pick,
             "radar_result": radar,
             "message": (
-                "实验室感知完成：插孔与雷达四角均就绪"
+                "感知完成：插孔与雷达四角均就绪"
                 if pick_ok and radar_ok and need_radar
                 else (
-                    "实验室感知完成：插孔已识别（雷达复用首轮）"
+                    "感知完成：插孔已识别（雷达复用首轮）"
                     if pick_ok and not need_radar
-                    else f"实验室感知部分完成：插孔={('OK' if pick_ok else '失败')}，雷达={('OK' if radar_ok else '失败')}"
+                    else f"感知部分完成：插孔={('OK' if pick_ok else '失败')}，雷达={('OK' if radar_ok else '失败')}"
                 )
             ),
+        }
+        truck_snap = self.twin.snapshot().get("truck") or {}
+        summary["geometry"] = {
+            "decision_source": "radar_coarse",
+            "board_mode": truck_snap.get("board_mode"),
+            "length_mm": truck_snap.get("length_mm"),
+            "width_mm": truck_snap.get("width_mm"),
+            "deck_height_mm": truck_snap.get("deck_height_mm"),
+        }
+        summary["board_specs"] = {
+            "length_mm": truck_snap.get("length_mm"),
+            "width_mm": truck_snap.get("width_mm"),
+            "deck_height_mm": truck_snap.get("deck_height_mm"),
         }
         self.round_data["lab_sense"] = summary
         if pick:
@@ -1299,8 +1375,106 @@ class FlowController:
             "message": "PLC XY 已到位，Z/R 未下发",
         }
 
+    def _field_corner_shell_from_radar(self) -> dict[str, Any]:
+        """真实环境第3步（无实验室相机算法时）：用雷达 WORLD 角点划格并写入车板规格。"""
+        radar = self.round_data.get("radar_result") or {}
+        radar_points = deepcopy(radar.get("world_points") or {})
+        if not radar.get("success") or not radar_points:
+            result = {
+                "success": False,
+                "lab_mode": False,
+                "field_mode": True,
+                "camera_world_corners": {},
+                "final_world_corners": {},
+                "geometry": {},
+                "message": "真实环境雷达没有可用 WORLD 角点，已停止划格",
+            }
+            self.round_data["lab_corner_shell"] = result
+            self.twin.add_message("LAB_CORNER_SHELL", "WARNING", result["message"], result)
+            return result
+        final_points = {}
+        for pid, point in radar_points.items():
+            p = dict(point)
+            p.setdefault("source", "radar_field")
+            final_points[str(pid)] = p
+        corner_ids = [str(x) for x in (radar.get("corner_ids") or list(final_points.keys()))]
+        try:
+            lab_space_plan = build_lab_space_plan(
+                final_points,
+                corner_ids,
+                board_geometry=self.board_geometry,
+                space_manager=self.space,
+                require_camera_source=False,
+            )
+        except Exception as exc:
+            lab_space_plan = {
+                "success": False,
+                "geometry": {},
+                "space": {},
+                "message": f"真实环境划格失败：{exc}",
+            }
+        self.round_data["lab_space_plan"] = deepcopy(lab_space_plan)
+        space_snapshot = lab_space_plan.get("space") or {}
+        geometry = lab_space_plan.get("geometry") or {}
+        self.twin.update_truck(
+            corners=deepcopy(final_points),
+            board_mode=str(geometry.get("board_mode") or "FIELD_RADAR_BOARD"),
+            camera_board_geometry={
+                "decision_source": "field_radar_world",
+                "corner_sources": {pid: point.get("source") for pid, point in final_points.items()},
+                "loading_column": lab_space_plan.get("loading_column"),
+                "loading_order": deepcopy(lab_space_plan.get("loading_order") or []),
+            },
+            regions=deepcopy(space_snapshot.get("regions") or []),
+            occupied=deepcopy(space_snapshot.get("occupied") or []),
+            available=deepcopy(space_snapshot.get("available") or []),
+            remaining_space={
+                "available_b_regions": deepcopy(lab_space_plan.get("loading_order") or []),
+            },
+        )
+        board_specs = self._apply_board_specs(
+            corners=final_points,
+            geometry=geometry,
+            radar_result=radar,
+            source="field_radar_board",
+        )
+        self.truck_initialized = True
+        self.round_data["camera_world_corners"] = {}
+        self.round_data["final_world_corners"] = deepcopy(final_points)
+        result = {
+            "success": bool(lab_space_plan.get("success")),
+            "lab_mode": False,
+            "field_mode": True,
+            "camera_world_corners": {},
+            "final_world_corners": deepcopy(final_points),
+            "geometry": deepcopy(geometry),
+            "lab_space_plan": {
+                "success": bool(lab_space_plan.get("success")),
+                "board_mode": geometry.get("board_mode"),
+                "region_count": len(space_snapshot.get("regions") or []),
+                "available_count": len(space_snapshot.get("available") or []),
+                "loading_column": lab_space_plan.get("loading_column"),
+                "loading_order": deepcopy(lab_space_plan.get("loading_order") or []),
+                "message": lab_space_plan.get("message"),
+            },
+            "board_specs": board_specs,
+            "message": (
+                f"真实环境车板划格完成：{lab_space_plan.get('message')}；"
+                f"车板约 {board_specs.get('length_mm', '-')}×{board_specs.get('width_mm', '-')} mm"
+            ),
+        }
+        self.round_data["lab_corner_shell"] = result
+        self.twin.add_message(
+            "LAB_CORNER_SHELL",
+            "SUCCESS" if result["success"] else "WARNING",
+            result["message"],
+            result,
+        )
+        self.twin.set_phase(result["message"], self.round_index + 1)
+        return result
+
     def _lab_corner_shell(self):
-        """实验室第3步：雷达粗点引导到位→RGB-D→YOLO WORLD，并写清过程日志。"""
+        """第3步：雷达粗点引导→精定位/划格。实验室用相机 YOLO；真实环境按开关可走雷达划格。"""
         preserved_camera = self.round_data.get("camera_world_corners")
         preserved_final = self.round_data.get("final_world_corners")
         if preserved_camera and preserved_final:
@@ -1308,11 +1482,11 @@ class FlowController:
             result.update(
                 {
                     "success": True,
-                    "lab_mode": True,
+                    "lab_mode": self.is_lab_profile(),
                     "reused": True,
                     "camera_world_corners": deepcopy(preserved_camera),
                     "final_world_corners": deepcopy(preserved_final),
-                    "message": "实验室角点复用首轮相机 WORLD 结果，未重复移动相机扫描",
+                    "message": "角点复用首轮 WORLD 结果，未重复移动相机扫描",
                 }
             )
             self.twin.update_truck(
@@ -1320,10 +1494,21 @@ class FlowController:
                 board_mode="LAB_CAMERA_FINAL",
                 camera_board_geometry={"decision_source": "lab_camera_world_reused"},
             )
+            plan = self.round_data.get("lab_space_plan") or {}
+            board_specs = self._apply_board_specs(
+                corners=preserved_final,
+                geometry=plan.get("geometry") if isinstance(plan, Mapping) else None,
+                source="reused_board",
+            )
+            result["board_specs"] = board_specs
+            result["geometry"] = deepcopy((plan.get("geometry") if isinstance(plan, Mapping) else {}) or {})
             self.round_data["lab_corner_shell"] = result
             self.twin.add_message("LAB_CORNER_SHELL", "SUCCESS", result["message"], result)
             self.twin.set_phase(result["message"], self.round_index + 1)
             return result
+
+        if not feature_switches.USE_LAB_CAMERA_ALGO:
+            return self._field_corner_shell_from_radar()
 
         radar = self.round_data.get("radar_result") or {}
         radar_points = radar.get("world_points") or {}
@@ -1333,7 +1518,7 @@ class FlowController:
                 "lab_mode": True,
                 "camera_world_corners": {},
                 "final_world_corners": {},
-                "message": "实验室雷达没有可用 WORLD 角点，已停止本轮相机精定位",
+                "message": "雷达没有可用 WORLD 角点，已停止本轮相机精定位",
             }
             self.round_data["lab_corner_shell"] = result
             self.twin.add_message("LAB_CORNER_SHELL", "WARNING", result["message"], result)
@@ -1625,6 +1810,7 @@ class FlowController:
         self.round_data["final_world_corners"] = deepcopy(final_points)
         self.round_data["lab_corner_shell"] = result
         space_snapshot = lab_space_plan.get("space") or {}
+        geometry = lab_space_plan.get("geometry") or {}
         self.twin.update_truck(
             corners=deepcopy(final_points),
             board_mode="LAB_CAMERA_FINAL",
@@ -1642,6 +1828,14 @@ class FlowController:
                 "available_b_regions": deepcopy(lab_space_plan.get("loading_order") or []),
             },
         )
+        board_specs = self._apply_board_specs(
+            corners=final_points,
+            geometry=geometry,
+            radar_result=radar,
+            source="lab_camera_final",
+        )
+        result["geometry"] = deepcopy(geometry)
+        result["board_specs"] = board_specs
         self.twin.add_message(
             "LAB_CORNER_SHELL",
             "SUCCESS" if result["success"] else "WARNING",
@@ -2297,7 +2491,13 @@ class FlowController:
         snap=self.space.initialize_from_camera_geometry(geometry); self.truck_initialized=True
         self.round_data["camera_board_geometry"]=geometry
         self.twin.update_truck(board_mode=geometry["board_mode"],camera_board_geometry=geometry,regions=snap["regions"],occupied=snap["occupied"],available=snap["available"],remaining_space={"available_count":len(snap["available"]),"borrow_plan":snap.get("borrow_plan")})
-        result={"success":True,"geometry":geometry,"space":snap,"radar_used_for_board_judgement":False}
+        board_specs=self._apply_board_specs(
+            corners=camera_result.get("world_points"),
+            geometry=geometry,
+            radar_result=self.round_data.get("radar_result"),
+            source="initial_space_plan",
+        )
+        result={"success":True,"geometry":geometry,"space":snap,"radar_used_for_board_judgement":False,"board_specs":board_specs}
         self._evidence("BOARD_GEOMETRY_PLAN",{"world_points":camera_result["world_points"],"corner_ids":camera_result["corner_ids"]},result,started)
         return result
 
@@ -2504,21 +2704,21 @@ class FlowController:
         try:
             if code=="DEVICE_CHECK":
                 data=self._device_check()
-                if self.is_lab_profile() and not data.get("all_online"):
+                if self.uses_coord_cycle_flow() and not data.get("all_online"):
                     detail = str(data.get("message") or "未知设备故障")
-                    raise RuntimeError(f"实验室设备未全部在线，已停止流程：{detail}")
+                    raise RuntimeError(f"设备未全部在线，已停止流程：{detail}")
             elif code=="LAB_RETURN_ORIGIN":
                 data=self._lab_return_origin()
                 if not data.get("success"):
-                    raise RuntimeError(data.get("message") or "实验室返回原点失败")
+                    raise RuntimeError(data.get("message") or "返回原点失败")
             elif code=="LAB_SENSE":
                 data=self._lab_sense()
                 if not data.get("success"):
-                    raise RuntimeError(data.get("message") or "实验室插孔识别或雷达四角失败")
+                    raise RuntimeError(data.get("message") or "插孔识别或雷达四角失败")
             elif code=="LAB_CORNER_SHELL":
                 data=self._lab_corner_shell()
                 if not data.get("success"):
-                    raise RuntimeError(data.get("message") or "相机最终 WORLD 四角不完整，已停止划格")
+                    raise RuntimeError(data.get("message") or "WORLD 四角不完整，已停止划格")
             elif code=="LAB_PRE_PLACE_MONITOR":
                 data=self._lab_pre_place_monitor()
                 if not data.get("success"):
@@ -2614,7 +2814,7 @@ class FlowController:
             "forced_continue": True,
             "reason": str(reason or "用户选择失败后继续"),
         }
-        if self.is_lab_profile() and code == "LAB_PLACE_VERIFY":
+        if self.uses_coord_cycle_flow() and code == "LAB_PLACE_VERIFY":
             self._record(code, name, "warning", f"失败后继续：{detail['reason']}", detail)
             self.twin.set_alarm(None)
             advance = self._advance_lab_round()

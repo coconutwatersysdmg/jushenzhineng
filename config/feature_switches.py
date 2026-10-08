@@ -57,7 +57,7 @@ RUN_PROFILES: Dict[str, Dict[str, Any]] = {
     "field": {
         "id": "field",
         "title": "完全真实",
-        "subtitle": "现场算法 + 真机适配器（暂定命名）",
+        "subtitle": "与实验室同一套循环步骤；现场 PointNet / corner 算法 + 真机适配器",
         "switches": {
             "DEVICE_MODE": "real",
             "ALLOW_DEMO_DEVICE_DATA": False,
