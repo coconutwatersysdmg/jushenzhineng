@@ -717,6 +717,15 @@ class FlowController:
             self.twin.update_device(device_id, status="FAILED", task="PROBE_ERROR")
             return {"success": False, "device_id": device_id, "message": f"{device_id} 探测异常：{exc}"}
 
+    def _camera_ids_for_device_check(self) -> list[str]:
+        """现场模式检测海康角点 + 梅卡托盘；其他模式仍检测 CAM_PICK。"""
+        profile = str(feature_switches.RUN_PROFILE or "").strip().lower()
+        if profile == "field":
+            cams = list(((self.device_config.get("cameras") or {}) or {}).keys())
+            ordered = [cid for cid in ("CAM_CORNER", "CAM_PALLET") if cid in cams]
+            return ordered or ["CAM_CORNER", "CAM_PALLET"]
+        return ["CAM_PICK"]
+
     def _device_check(self):
         """第1步：检查 PLC / 雷达 / 相机连接。失败只记日志，不阻断下一步。"""
         checks = []
@@ -730,22 +739,30 @@ class FlowController:
             self.twin.update_device("RADAR", status="ONLINE", task="NO_PROBE")
             return {"success": True, "device_id": "RADAR", "message": "雷达适配器无 probe，已跳过硬件探测"}
 
-        def _camera():
-            if hasattr(self.camera, "connect"):
-                return self.camera.connect()
-            if hasattr(self.camera, "probe"):
-                return self.camera.probe()
-            self.twin.update_device("CAM_PICK", status="ONLINE", task="NO_PROBE")
-            return {"success": True, "device_id": "CAM_PICK", "message": "相机适配器无 connect/probe，已跳过硬件探测"}
+        def _camera_one(camera_id: str):
+            if hasattr(self.camera, "probe_camera"):
+                return self.camera.probe_camera(camera_id)
+            if camera_id == "CAM_PICK":
+                if hasattr(self.camera, "connect"):
+                    return self.camera.connect()
+                if hasattr(self.camera, "probe"):
+                    return self.camera.probe()
+            self.twin.update_camera(camera_id, status="ONLINE", task="NO_PROBE")
+            return {"success": True, "device_id": camera_id, "message": f"{camera_id} 无独立探测接口，已跳过"}
 
-        for device_id, fn in (("PLC", _plc), ("RADAR", _radar), ("CAM_PICK", _camera)):
+        probe_plan = [("PLC", _plc), ("RADAR", _radar)]
+        for cam_id in self._camera_ids_for_device_check():
+            probe_plan.append((cam_id, lambda cid=cam_id: _camera_one(cid)))
+
+        camera_ids = set(self._camera_ids_for_device_check())
+        for device_id, fn in probe_plan:
             item = self._probe_one_device(device_id, fn)
             item.setdefault("device_id", device_id)
             checks.append(item)
             ok_one = bool(item.get("success"))
             status = "SUCCESS" if ok_one else "FAILED"
             twin_status = "ONLINE" if ok_one else "OFFLINE"
-            if device_id == "CAM_PICK":
+            if device_id in camera_ids or device_id.startswith("CAM_"):
                 self.twin.update_camera(device_id, status=twin_status, task=status)
             else:
                 self.twin.update_device(device_id, status=twin_status, task=status)
@@ -1376,7 +1393,7 @@ class FlowController:
         }
 
     def _field_corner_shell_from_radar(self) -> dict[str, Any]:
-        """真实环境第3步（无实验室相机算法时）：用雷达 WORLD 角点划格并写入车板规格。"""
+        """真实环境第3步：海康 SDK 拍照 + YOLO 识别；WORLD/划格仍用雷达角点（2D 相机无深度）。"""
         radar = self.round_data.get("radar_result") or {}
         radar_points = deepcopy(radar.get("world_points") or {})
         if not radar.get("success") or not radar_points:
@@ -1392,12 +1409,60 @@ class FlowController:
             self.round_data["lab_corner_shell"] = result
             self.twin.add_message("LAB_CORNER_SHELL", "WARNING", result["message"], result)
             return result
+
+        corner_ids = [str(x) for x in (radar.get("corner_ids") or list(radar_points.keys()))]
+        camera_id = self._camera_for_role("corner", "CAM_CORNER")
+        capture = {"success": False, "message": "未采图"}
+        vision = {"success": False, "message": "未识别"}
+        try:
+            capture = self._capture_rgb(camera_id, "FIELD_CORNER", required=True)
+            image_path = str(capture.get("image_path") or capture.get("rgb_path") or "")
+            image_paths = {pid: image_path for pid in corner_ids}
+            self.round_data["corner_images"] = deepcopy(image_paths)
+            started = perf_counter()
+            vision = self.algorithms.corner_image_recognize(
+                image_paths, corner_ids, self.current_cargo or {}
+            )
+            self._evidence(
+                "CORNER_YOLO",
+                {
+                    "image_paths_by_point": image_paths,
+                    "corner_ids": corner_ids,
+                    "field_hikvision": True,
+                    "capture": {
+                        "image_path": image_path,
+                        "ip": capture.get("ip"),
+                        "source": capture.get("source"),
+                    },
+                },
+                vision,
+                started,
+                model_invoked=True,
+            )
+            self.round_data["corner_recognition"] = deepcopy(vision)
+        except Exception as exc:
+            result = {
+                "success": False,
+                "lab_mode": False,
+                "field_mode": True,
+                "camera_world_corners": {},
+                "final_world_corners": {},
+                "geometry": {},
+                "capture": deepcopy(capture) if isinstance(capture, Mapping) else {},
+                "message": (
+                    f"现场海康拍照/识别失败：{exc}。"
+                    "请确认已装 MVS SDK、FIELD_CAMERAS.CAM_CORNER.ip 已填，且已关闭 MVS 对该相机的占用。"
+                ),
+            }
+            self.round_data["lab_corner_shell"] = result
+            self.twin.add_message("LAB_CORNER_SHELL", "WARNING", result["message"], result)
+            return result
+
         final_points = {}
         for pid, point in radar_points.items():
             p = dict(point)
             p.setdefault("source", "radar_field")
             final_points[str(pid)] = p
-        corner_ids = [str(x) for x in (radar.get("corner_ids") or list(final_points.keys()))]
         try:
             lab_space_plan = build_lab_space_plan(
                 final_points,
@@ -1418,10 +1483,12 @@ class FlowController:
         geometry = lab_space_plan.get("geometry") or {}
         self.twin.update_truck(
             corners=deepcopy(final_points),
-            board_mode=str(geometry.get("board_mode") or "FIELD_RADAR_BOARD"),
+            board_mode=str(geometry.get("board_mode") or "FIELD_HIK_VISION_BOARD"),
             camera_board_geometry={
-                "decision_source": "field_radar_world",
+                "decision_source": "field_hikvision_rgb_plus_radar_world",
                 "corner_sources": {pid: point.get("source") for pid, point in final_points.items()},
+                "vision_success": bool(vision.get("success")),
+                "capture_image": capture.get("image_path") or capture.get("rgb_path"),
                 "loading_column": lab_space_plan.get("loading_column"),
                 "loading_order": deepcopy(lab_space_plan.get("loading_order") or []),
             },
@@ -1436,20 +1503,34 @@ class FlowController:
             corners=final_points,
             geometry=geometry,
             radar_result=radar,
-            source="field_radar_board",
+            source="field_hikvision_board",
         )
         self.truck_initialized = True
         self.round_data["camera_world_corners"] = {}
         self.round_data["final_world_corners"] = deepcopy(final_points)
+        vision_ok = bool(vision.get("success"))
+        plan_ok = bool(lab_space_plan.get("success"))
         result = {
-            "success": bool(lab_space_plan.get("success")),
+            "success": plan_ok and vision_ok,
             "lab_mode": False,
             "field_mode": True,
+            "hikvision_capture": {
+                "success": True,
+                "image_path": capture.get("image_path") or capture.get("rgb_path"),
+                "ip": capture.get("ip"),
+                "source": capture.get("source"),
+            },
+            "corner_recognition": {
+                "success": vision_ok,
+                "message": vision.get("message"),
+                "result_dir": vision.get("result_dir"),
+                "physical_image_count": vision.get("physical_image_count"),
+            },
             "camera_world_corners": {},
             "final_world_corners": deepcopy(final_points),
             "geometry": deepcopy(geometry),
             "lab_space_plan": {
-                "success": bool(lab_space_plan.get("success")),
+                "success": plan_ok,
                 "board_mode": geometry.get("board_mode"),
                 "region_count": len(space_snapshot.get("regions") or []),
                 "available_count": len(space_snapshot.get("available") or []),
@@ -1459,7 +1540,8 @@ class FlowController:
             },
             "board_specs": board_specs,
             "message": (
-                f"真实环境车板划格完成：{lab_space_plan.get('message')}；"
+                f"现场海康已拍照并识别（{vision.get('message')}）；"
+                f"WORLD/划格用雷达：{lab_space_plan.get('message')}；"
                 f"车板约 {board_specs.get('length_mm', '-')}×{board_specs.get('width_mm', '-')} mm"
             ),
         }

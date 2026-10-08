@@ -147,15 +147,10 @@ class MainWindow(QMainWindow):
         top.addWidget(brand,0)
 
         device_cluster=QFrame(); device_cluster.setObjectName("deviceCluster")
-        dc=QHBoxLayout(device_cluster); dc.setContentsMargins(8,6,8,6); dc.setSpacing(6)
-        dc_label=QLabel("外设"); dc_label.setObjectName("clusterLabel"); dc.addWidget(dc_label,0)
+        self._device_cluster_layout=QHBoxLayout(device_cluster); self._device_cluster_layout.setContentsMargins(8,6,8,6); self._device_cluster_layout.setSpacing(6)
+        dc_label=QLabel("外设"); dc_label.setObjectName("clusterLabel"); self._device_cluster_layout.addWidget(dc_label,0)
         self.device_status_badges={}
-        for device_id,dev_title in (("PLC","PLC"),("RADAR","雷达"),("CAM_PICK","相机")):
-            badge=QLabel(f"○ {dev_title}")
-            badge.setObjectName("deviceLed")
-            badge.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-            self.device_status_badges[device_id]=badge
-            dc.addWidget(badge,0)
+        self._rebuild_device_status_badges()
         top.addWidget(device_cluster,0)
         top.addStretch(1)
 
@@ -767,6 +762,27 @@ class MainWindow(QMainWindow):
         """实验室与真实环境共用循环流程 UI；完全模拟仍用旧 12 步界面。"""
         return str(feature_switches.RUN_PROFILE or "").strip().lower() in {"lab", "field"}
 
+    def _device_badge_defs(self) -> list[tuple[str, str]]:
+        """顶栏外设灯：现场模式拆成海康/梅卡两台相机。"""
+        if str(feature_switches.RUN_PROFILE or "").strip().lower() == "field":
+            return [("PLC", "PLC"), ("RADAR", "雷达"), ("CAM_CORNER", "海康"), ("CAM_PALLET", "梅卡")]
+        return [("PLC", "PLC"), ("RADAR", "雷达"), ("CAM_PICK", "相机")]
+
+    def _rebuild_device_status_badges(self) -> None:
+        layout = getattr(self, "_device_cluster_layout", None)
+        if layout is None:
+            return
+        for badge in list((getattr(self, "device_status_badges", {}) or {}).values()):
+            layout.removeWidget(badge)
+            badge.deleteLater()
+        self.device_status_badges = {}
+        for device_id, dev_title in self._device_badge_defs():
+            badge = QLabel(f"○ {dev_title}")
+            badge.setObjectName("deviceLed")
+            badge.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            self.device_status_badges[device_id] = badge
+            layout.addWidget(badge, 0)
+
     def _apply_ui_mode(self) -> None:
         lab = self._is_lab_ui()
         if hasattr(self, "field_flow_card"):
@@ -781,6 +797,7 @@ class MainWindow(QMainWindow):
             self.lab_right_panel.setVisible(lab)
         if hasattr(self, "debug_btn"):
             self.debug_btn.setVisible(not lab)
+        self._rebuild_device_status_badges()
         self.setWindowTitle("装载数字孪生监控台")
         if hasattr(self, "main_splitter"):
             # 左栏中间量多，加宽；右栏收窄，相机/雷达参数走专用页
@@ -1594,7 +1611,9 @@ class MainWindow(QMainWindow):
 
     def _refresh_sensor_panels(self, t: dict, rd: dict, truck: dict):
         """右侧「相机 / 雷达」页：设备参数 + 本轮角点结果。"""
-        cam=((t.get("cameras") or {}).get("CAM_PICK") or {})
+        cameras=t.get("cameras") or {}
+        field_mode=str(feature_switches.RUN_PROFILE or "").strip().lower()=="field"
+        cam=((cameras.get("CAM_PALLET") if field_mode else None) or cameras.get("CAM_PICK") or {})
         cam_pose=cam.get("world_pose") or {}
         mount=cam.get("mount_pose") or {}
         intr=cam.get("intrinsics") or {}
@@ -1602,14 +1621,22 @@ class MainWindow(QMainWindow):
         radar_pose=radar.get("pose") or {}
         parallel=((t.get("parallel") or {}).get("radar") or {})
         check=((rd.get("device_check") or {}).get("devices") or {})
-        cam_check=check.get("CAM_PICK") or {}
+        cam_check=check.get("CAM_PALLET") or check.get("CAM_PICK") or {}
+        corner_check=check.get("CAM_CORNER") or {}
         radar_check=check.get("RADAR") or {}
         radar_result=rd.get("radar_result") or {}
         corner_shell=rd.get("lab_corner_shell") or rd.get("corner_result") or {}
         if hasattr(self, "camera_param_table"):
-            self._fill_kv(self.camera_param_table, [
+            rows=[
                 ("状态", cam.get("status") or "-"),
                 ("任务", cam.get("task") or "-"),
+            ]
+            if field_mode:
+                rows = [
+                    ("海康角点检测", "通过" if corner_check.get("success") else str(corner_check.get("message") or "未检测")),
+                    ("梅卡托盘检测", "通过" if cam_check.get("success") else str(cam_check.get("message") or "未检测")),
+                ] + rows
+            self._fill_kv(self.camera_param_table, rows + [
                 ("探测", "已连接" if cam_check.get("success") else (cam_check.get("message") or "未检测")),
                 ("父设备", cam.get("parent_robot_id") or "-"),
                 ("标定名", cam.get("calibration_name") or "-"),
@@ -1674,12 +1701,20 @@ class MainWindow(QMainWindow):
         devices=twin.get("devices") or {}
         cameras=twin.get("cameras") or {}
         check=((s.get("round_data") or {}).get("device_check") or {}).get("devices") or {}
-        titles={"PLC":"PLC","RADAR":"雷达","CAM_PICK":"相机"}
-        rows=[
-            ("PLC","控制器",devices.get("PLC") or {}),
-            ("RADAR","雷达",devices.get("RADAR") or {}),
-            ("CAM_PICK","臂上相机",devices.get("CAM_PICK") or cameras.get("CAM_PICK") or {}),
-        ]
+        titles={"PLC":"PLC","RADAR":"雷达","CAM_PICK":"相机","CAM_CORNER":"海康","CAM_PALLET":"梅卡"}
+        if str(feature_switches.RUN_PROFILE or "").strip().lower() == "field":
+            rows=[
+                ("PLC","控制器",devices.get("PLC") or {}),
+                ("RADAR","雷达",devices.get("RADAR") or {}),
+                ("CAM_CORNER","海康角点",devices.get("CAM_CORNER") or cameras.get("CAM_CORNER") or {}),
+                ("CAM_PALLET","梅卡托盘",devices.get("CAM_PALLET") or cameras.get("CAM_PALLET") or {}),
+            ]
+        else:
+            rows=[
+                ("PLC","控制器",devices.get("PLC") or {}),
+                ("RADAR","雷达",devices.get("RADAR") or {}),
+                ("CAM_PICK","臂上相机",devices.get("CAM_PICK") or cameras.get("CAM_PICK") or {}),
+            ]
         for device_id,kind,meta in rows:
             detail=check.get(device_id) or {}
             checked=bool(detail)

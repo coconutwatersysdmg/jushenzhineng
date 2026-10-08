@@ -34,6 +34,13 @@ def create_device_adapters(
     mode = normalize_device_mode(runtime.get("device_mode", "mock"))
     device_cfg = dict(cfg.get("devices") or {})
 
+    try:
+        import config.feature_switches as fs
+
+        profile = str(fs.RUN_PROFILE or "").strip().lower()
+    except Exception:
+        profile = ""
+
     if mode == "real":
         from devices.real_arm_camera_adapter import RealArmCameraAdapter
         from devices.real_gantry_robot_adapter import RealGantryRobotAdapter
@@ -45,12 +52,25 @@ def create_device_adapters(
         # 主流程只发布运动指令；真写轴在独立模块 plc_console
         robot = RealGantryRobotAdapter(twin, plc, device_cfg.get("gantry") or {})
         radar = RealLivoxRadarAdapter(twin, device_cfg.get("livox") or {})
-        camera = RealArmCameraAdapter(twin, device_cfg.get("camera") or {})
+        if profile == "field":
+            from devices.field_camera_hub import FieldCameraHub
+
+            camera = FieldCameraHub(twin, device_cfg.get("camera") or {})
+        else:
+            camera = RealArmCameraAdapter(twin, device_cfg.get("camera") or {})
         return mode, plc, robot, radar, camera
 
     # mock：孪生动画 + 同样发布 JSON 指令，便于联调 plc_console
     plc = MockPLCAdapter(twin)
     robot = MockRobotAdapter(twin, plc, device_cfg.get("gantry") or {})
     radar = MockRadarAdapter(twin)
-    camera = MockArmCameraAdapter(twin)
+    if profile == "field":
+        from devices.field_camera_hub import FieldCameraHub
+
+        cam_cfg = dict(device_cfg.get("camera") or {})
+        cam_cfg["allow_file_inputs"] = True
+        cam_cfg["mock_probe"] = True
+        camera = FieldCameraHub(twin, cam_cfg)
+    else:
+        camera = MockArmCameraAdapter(twin)
     return mode, plc, robot, radar, camera

@@ -113,7 +113,7 @@ LIVOX = {
     },
 }
 
-# TODO 相机配置 D435i
+# 实验室相机：D435i（USB）
 CAMERA = {
     "enabled": True,
     "backend": "realsense",
@@ -124,13 +124,28 @@ CAMERA = {
     "depth_height": 720,
     "fps": 30,
     "depth_unit_mm": 1.0,
-    # 现场已标定外参（迁自 Automatic loading system）
     "extrinsic_file": "config/camera_extrinsic.json",
     "plc_reference_r_deg": -80.0,
-    # 旧标定包路径（内参等，可选）
     "calibration_dir": "config/sensor_coordinate_config",
     "intrinsic_file": "config/sensor_coordinate_config/camera_intrinsic.json",
     "capture_dir": "workdir/camera_captures",
+}
+
+# 现场相机（field）：海康角点 + 梅卡托盘 —— 现场只改这里的 ip / ipc_ip
+FIELD_CAMERAS = {
+    "CAM_CORNER": {
+        "backend": "hikvision",
+        "model": "MV-DLS300P-04T",
+        "ip": "",  # TODO: 海康相机IP
+        "port": 8000,
+        "title": "海康角点相机",
+    },
+    "CAM_PALLET": {
+        "backend": "mechmind",
+        "model": "Eye Deep-V4D3000A",
+        "ipc_ip": "10.11.206.190",  # 1 线梅卡工控机；2 线 10.11.207.111；3 线 10.11.207.131
+        "title": "梅卡托盘相机",
+    },
 }
 
 # ---- 设备布局：臂 / 相机挂载 / 雷达位姿 / 拍摄角色 ----
@@ -205,7 +220,55 @@ DEVICE_LAYOUT: Dict[str, Any] = {
 
 
 def get_device_layout_config() -> Dict[str, Any]:
-    return deepcopy(DEVICE_LAYOUT)
+    layout = deepcopy(DEVICE_LAYOUT)
+    try:
+        import config.feature_switches as fs
+
+        profile = str(fs.RUN_PROFILE or "").strip().lower()
+    except Exception:
+        profile = ""
+    if profile == "field":
+        # 现场：海康拍车板角点，梅卡拍托盘（插孔/规格）
+        layout["cameras"] = {
+            "CAM_CORNER": {
+                "calibration_name": "corner_camera",
+                "parent_robot_id": "PICK_ARM",
+                "sensor": "RGB",
+                "role": "车板角点识别（海康 MV-DLS300P-04T）",
+                "mount_pose": {
+                    "x_mm": 0,
+                    "y_mm": 0,
+                    "z_mm": 0,
+                    "roll_deg": 0,
+                    "pitch_deg": 0,
+                    "yaw_deg": 0,
+                },
+            },
+            "CAM_PALLET": {
+                "calibration_name": "hole_camera",
+                "parent_robot_id": "PICK_ARM",
+                "sensor": "RGB-D",
+                "role": "托盘插孔/规格（梅卡 Eye Deep-V4D3000A）",
+                "mount_pose": {
+                    "x_mm": 250,
+                    "y_mm": 0,
+                    "z_mm": -80,
+                    "roll_deg": 0,
+                    "pitch_deg": 0,
+                    "yaw_deg": 180,
+                },
+                "plc_reference_r_deg": -80.0,
+            },
+        }
+        layout["camera_roles"] = {
+            "pallet_hole": "CAM_PALLET",
+            "pre_pick_offset": "CAM_PALLET",
+            "corner": "CAM_CORNER",
+            "observe": "CAM_PALLET",
+            "neighbor": "CAM_PALLET",
+            "post": "CAM_PALLET",
+        }
+    return layout
 
 
 def get_livox_runtime_settings() -> Dict[str, str]:
@@ -270,6 +333,8 @@ def get_devices_section_for_system_config() -> Dict[str, Any]:
 
     gantry = deepcopy(GANTRY)
     gantry["allow_real_motion"] = bool(fs.ALLOW_REAL_MOTION)
+    camera = deepcopy(CAMERA)
+    camera["field_cameras"] = deepcopy(FIELD_CAMERAS)
     return {
         "plc": {
             "ip": PLC["ip"],
@@ -286,7 +351,7 @@ def get_devices_section_for_system_config() -> Dict[str, Any]:
             "host_ip": LIVOX["host_ip"],
         },
         "gantry": gantry,
-        "camera": deepcopy(CAMERA),
+        "camera": camera,
     }
 
 
@@ -294,12 +359,15 @@ def get_external_devices_snapshot() -> Dict[str, Any]:
     import config.feature_switches as fs
 
     devices = get_devices_section_for_system_config()
+    camera = deepcopy(CAMERA)
+    camera["field_cameras"] = deepcopy(FIELD_CAMERAS)
     return {
         "device_mode": fs.DEVICE_MODE,
         "run_profile": fs.RUN_PROFILE,
         "plc": deepcopy(PLC),
         "gantry": devices["gantry"],
         "livox": devices["livox"],
-        "camera": deepcopy(CAMERA),
+        "camera": camera,
+        "field_cameras": deepcopy(FIELD_CAMERAS),
         "layout": get_device_layout_config(),
     }
