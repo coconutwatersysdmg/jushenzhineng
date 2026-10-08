@@ -152,6 +152,7 @@ FIELD_CAMERAS = {
         # 1 线 10.11.206.190（默认）；2 线 10.11.207.111；3 线 10.11.207.131
         "ipc_ip": "10.11.206.190",
         # TODO【后续】工控机远程采图尚未实现；失败后只切换路由并提示，需工控机 Viewer 或在工控机跑本程序
+        # 本机直连 SDK：主 runtime 是 3.12；请先运行 tools\build_mecheye_runtime.bat 生成 runtime_mecheye\
         "title": "梅卡托盘相机",
     },
 }

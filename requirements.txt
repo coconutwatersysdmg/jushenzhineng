@@ -4,6 +4,9 @@
 # 部署：在目标机运行 tools\build_runtime.bat（会自带 Python 3.12.10 embed）。
 # 即使系统是 Python 3.13.x，也不要用系统 python -m pip；依赖必须装进 runtime\。
 #
+# 梅卡 MechEyeAPI：官方仅支持 Python 3.7–3.11，不能装进本 runtime(3.12)。
+# 请另跑 tools\build_mecheye_runtime.bat → 生成 runtime_mecheye\（侧车采图）。
+#
 # 说明：
 # - 当前验证环境中的 torch 为 CPU wheel（torch==2.13.0）。
 # - 若现场需要 CUDA GPU 推理，请在开发机用匹配驱动的 CUDA 版 PyTorch wheel

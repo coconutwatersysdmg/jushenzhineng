@@ -13,6 +13,8 @@ build/
 
 # Portable Python runtime (built by tools/build_runtime.bat; copy with delivery folder)
 runtime/
+# Mech-Eye sidecar (Python 3.11; tools/build_mecheye_runtime.bat)
+runtime_mecheye/
 tools/_cache/
 
 # Generated work data / logs (formerly mixed into runtime/)
