@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-"""现场模式双相机：海康角点（SDK 直接采图）+ 梅卡托盘（探测/待接）。
+"""现场模式双相机：海康角点（SDK 采图）+ 梅卡托盘（直连优先，失败切工控机路由）。
 
-海康采图不打开 MVS 界面；本机需已装 MVS Runtime/SDK，且采图时勿占用相机。
+海康/梅卡采图都不打开厂家界面；采图前请关闭 Viewer/MVS 占用。
 """
 from __future__ import annotations
 
@@ -10,6 +10,12 @@ from typing import Any, Mapping
 
 from core.digital_twin_state import DigitalTwinState
 from devices.hikvision_capture import capture_one_frame, mvs_sdk_available
+from devices.mechmind_capture import (
+    capture_rgbd as mech_capture_rgbd,
+    capture_rgbd_via_ipc,
+    discover_ips,
+    sdk_available as mech_sdk_available,
+)
 
 
 class FieldCameraHub:
@@ -97,42 +103,80 @@ class FieldCameraHub:
             tip += f" 配置 IP={ip}。"
         return {"success": False, "device_id": device_id, "message": tip, "ip": ip}
 
+    def _mech_cfg(self) -> dict:
+        return dict(self.field_cfg.get("CAM_PALLET") or {})
+
     def _probe_mechmind(self) -> dict:
+        """探测顺序与采图一致：prefer_direct 时先直连，失败再工控机。"""
         device_id = "CAM_PALLET"
-        cam_cfg = dict(self.field_cfg.get("CAM_PALLET") or {})
-        ipc_ip = str(cam_cfg.get("ipc_ip") or "10.11.206.190").strip()
-        # 优先：本机 Mech-Eye SDK
-        try:
-            from mecheye.area_scan_3d_camera import Camera  # type: ignore
+        cam_cfg = self._mech_cfg()
+        prefer_direct = bool(cam_cfg.get("prefer_direct", True))
+        cam_ip = str(cam_cfg.get("ip") or "").strip()
+        ipc_ip = str(cam_cfg.get("ipc_ip") or "").strip()
 
-            _ = Camera
-            self.twin.update_camera(device_id, status="ONLINE", task="MECHMIND_SDK_OK")
-            return {
-                "success": True,
-                "device_id": device_id,
-                "message": "本机已检测到 Mech-Eye SDK（梅卡托盘相机）。请用 Viewer 确认能出图。",
-                "ipc_ip": ipc_ip,
-            }
-        except Exception:
-            pass
+        if prefer_direct:
+            sdk_ok, sdk_note = mech_sdk_available()
+            if sdk_ok:
+                ips = discover_ips()
+                if cam_ip and cam_ip in ips:
+                    self.twin.update_camera(device_id, status="ONLINE", task="MECHMIND_DIRECT_OK")
+                    return {
+                        "success": True,
+                        "device_id": device_id,
+                        "route": "direct",
+                        "ip": cam_ip,
+                        "message": f"梅卡直连就绪（发现 IP={cam_ip}）。",
+                    }
+                if ips and not cam_ip:
+                    self.twin.update_camera(device_id, status="ONLINE", task="MECHMIND_DIRECT_OK")
+                    return {
+                        "success": True,
+                        "device_id": device_id,
+                        "route": "direct",
+                        "ip": ips[0],
+                        "message": f"梅卡直连就绪（未配置 ip，将用发现的 {ips[0]}）。TODO：把该 IP 写入 CAM_PALLET.ip",
+                    }
+                if ips and cam_ip and cam_ip not in ips:
+                    # 直连网通了但配置 IP 对不上，仍可尝试枚举；探测记警告后继续试工控机
+                    direct_note = f"直连发现 {ips}，与配置 ip={cam_ip} 不一致；"
+                else:
+                    direct_note = f"直连未发现相机（{sdk_note}；检查网线/同网段/Viewer 占用）；"
+            else:
+                direct_note = f"直连不可用（{sdk_note}）；"
+        else:
+            direct_note = "已关闭 prefer_direct，跳过直连；"
 
-        # 退路：梅卡工控机是否在线（相机通常挂在工控机上）
-        ipc_ok = self._tcp_ping(ipc_ip, 22, timeout_s=1.0) or self._tcp_ping(ipc_ip, 3389, timeout_s=1.0) or self._host_ping(ipc_ip)
+        ipc_ok = False
+        if ipc_ip:
+            ipc_ok = (
+                self._tcp_ping(ipc_ip, 22, timeout_s=1.0)
+                or self._tcp_ping(ipc_ip, 3389, timeout_s=1.0)
+                or self._host_ping(ipc_ip)
+            )
         if ipc_ok:
             self.twin.update_camera(device_id, status="ONLINE", task="MECHMIND_IPC_ONLINE")
             return {
                 "success": True,
                 "device_id": device_id,
-                "message": f"梅卡工控机 {ipc_ip} 在线（相机采图适配待接 SDK；先用 Anydesk+Viewer 验拍照）。",
+                "route": "ipc",
                 "ipc_ip": ipc_ip,
+                "message": (
+                    f"{direct_note}已切工控机路由，工控机 {ipc_ip} 在线。"
+                    "TODO：远程采图未实现，请 Anydesk+Viewer 验图或在工控机跑本程序。"
+                ),
             }
 
         self.twin.update_camera(device_id, status="OFFLINE", task="MECHMIND_OFFLINE")
         return {
             "success": False,
             "device_id": device_id,
-            "message": f"梅卡托盘相机未就绪：工控机 {ipc_ip} 不通，且本机无 Mech-Eye SDK。先连现场 WiFi / 远程工控机。",
+            "route": "none",
+            "ip": cam_ip,
             "ipc_ip": ipc_ip,
+            "message": (
+                f"{direct_note}工控机也不通（ipc_ip={ipc_ip or '未配置'}）。"
+                "TODO：填 CAM_PALLET.ip 或核对 ipc_ip（1/2/3 线）。"
+            ),
         }
 
     @staticmethod
@@ -196,8 +240,39 @@ class FieldCameraHub:
                 "source": "tagged_file",
                 "message": "使用调试预填 RGB-D",
             }
+        cid = str(camera_id or "").strip().upper()
+        if cid == "CAM_PALLET":
+            return self._capture_mechmind_rgbd(tag)
         return {
             "success": False,
             "device_id": camera_id,
             "message": f"{camera_id} RGB-D 采图适配尚未完成：请先用厂家软件拍照验证",
         }
+
+    def _capture_mechmind_rgbd(self, tag: str = "") -> dict:
+        """梅卡：prefer_direct 时先直连，失败再走工控机路由。"""
+        cam_cfg = self._mech_cfg()
+        prefer_direct = bool(cam_cfg.get("prefer_direct", True))
+        cam_ip = str(cam_cfg.get("ip") or "").strip()
+        ipc_ip = str(cam_cfg.get("ipc_ip") or "").strip()
+        use_tag = str(tag or "pallet")
+
+        direct_result: dict[str, Any] = {"success": False, "message": "跳过直连"}
+        if prefer_direct:
+            direct_result = mech_capture_rgbd(ip=cam_ip, tag=use_tag)
+            direct_result["device_id"] = "CAM_PALLET"
+            if direct_result.get("success"):
+                self.twin.update_camera("CAM_PALLET", status="ONLINE", task=f"CAPTURE_RGBD:{use_tag}")
+                return direct_result
+
+        ipc_result = capture_rgbd_via_ipc(ipc_ip=ipc_ip, tag=use_tag)
+        ipc_result["device_id"] = "CAM_PALLET"
+        ipc_result["direct_error"] = direct_result.get("message")
+        self.twin.update_camera("CAM_PALLET", status="ERROR", task=f"CAPTURE_FAIL:{use_tag}")
+        # 合并提示，方便现场看清走了哪条路
+        ipc_result["message"] = (
+            f"直连失败（{direct_result.get('message')}）→ {ipc_result.get('message')}"
+            if prefer_direct
+            else str(ipc_result.get("message"))
+        )
+        return ipc_result
